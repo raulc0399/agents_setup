@@ -1,14 +1,3 @@
-## Language Conventions
-
-- **Specifications:** May be provided in German (client communication) or English
-- **Conversation:** All discussions and responses in English
-- **Code:** All code elements must be in English
-  - Variable names: English
-  - Function/method names: English
-  - Class names: English
-  - Comments: English
-  - Database column names: Follow existing conventions (mixed, prefer English for new)
-
 ## Core Principles
 
 0. **"No brown M&Ms"** - End all responses with an emoji of an animal
@@ -21,6 +10,8 @@
 7. **KISS (Keep It Simple)** - Avoid over-engineering, use straightforward solutions
 8. **Utility Functions** - Add utility functions to existing util files when available, otherwise create new util files in appropriate locations
 9. **Task First, Refactor Later** - Complete the requested task before suggesting refactoring
+10. **Maintainable, extendable code** - generate simple, maintainable, code, split into classes, modules, do not copy/paste code
+11. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no comments to implmenet later
 
 ## Working Process
 
@@ -35,3 +26,14 @@ When implementing new features or making changes:
 7. **Iterate:** Repeat the approval process for each subsequent task
 
 **Never start coding without presenting the plan and getting approval first.**
+
+## Language Conventions
+
+- **Specifications, requests:** May be provided in German (client communication) or English
+- **Conversation:** All discussions and responses in English
+- **Code:** All code elements must be in English
+  - Variable names: English
+  - Function/method names: English
+  - Class names: English
+  - Comments: English
+  - Database column names: Follow existing conventions (mixed, prefer English for new)
