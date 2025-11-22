@@ -2,16 +2,15 @@
 
 0. **"No brown M&Ms"** - End all responses with an emoji of an animal
 1. **Follow Existing Patterns** - Always use established patterns in the codebase
-2. **All Models Inherit from DB** - Every model class MUST extend the `DB` base class
-3. **Production-Ready Code** - Write production-quality code from the start
-4. **YAGNI (You Aren't Gonna Need It)** - Don't add functionality until it's necessary
-5. **SOLID Principles** - Write maintainable, extensible object-oriented code
-6. **DRY (Don't Repeat Yourself)** - Reuse existing code, avoid duplication
-7. **KISS (Keep It Simple)** - Avoid over-engineering, use straightforward solutions
-8. **Utility Functions** - Add utility functions to existing util files when available, otherwise create new util files in appropriate locations
-9. **Task First, Refactor Later** - Complete the requested task before suggesting refactoring
-10. **Maintainable, extendable code** - generate simple, maintainable, code, split into classes, modules, do not copy/paste code
-11. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no comments to implmenet later
+2. **Production-Ready Code** - Write production-quality code from the start
+3. **YAGNI (You Aren't Gonna Need It)** - Don't add functionality until it's necessary
+4. **SOLID Principles** - Write maintainable, extensible object-oriented code
+5. **DRY (Don't Repeat Yourself)** - Reuse existing code, avoid duplication
+6. **KISS (Keep It Simple)** - Avoid over-engineering, use straightforward solutions
+7. **Utility Functions** - Add utility functions to existing util files when available, otherwise create new util files in appropriate locations
+8. **Task First, Refactor Later** - Complete the requested task before suggesting refactoring
+9. **Maintainable, extendable code** - generate simple, maintainable, code, split into classes, modules, do not copy/paste code
+10. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no comments to implmenet later
 
 ## Working Process
 
