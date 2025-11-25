@@ -14,6 +14,7 @@
 11. **Refactoring** - when refactoring, remove old code - unless otherwise specified, delete unused and obsolete files - but GET USER'S PERMISSION beforehand, no versioned names (processV2, handleNew, ClientOld)
 12. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
 
+Other
 * when stuck: stop and ask for instructions
 * the simplest solution is usually correct
 * if asked a question, provide the answer, do not change code
@@ -22,6 +23,7 @@
 
 When implementing new features or making changes:
 
+0. ***Never start coding without presenting the plan and getting approval first.***
 1. **Research First:** Analyze the codebase to understand existing patterns
 2. **Analyze Results:** Review and understand what you found
 3. **Plan and create Detailed TODO List:** Break down work into small, specific tasks
@@ -31,13 +33,14 @@ When implementing new features or making changes:
 6. **Validate, After each task:** once a task is completed, review the changes and validate if anything is misssing or has been ignore or has been missed
 8. **Iterate:** from step #5 for each task
 
-**Never start coding without presenting the plan and getting approval first.**
+***Never start coding without presenting the plan and getting approval first.***
 
 ## Language Conventions
 
 - **Specifications, requests:** May be provided in German (client communication) or English
 - **Conversation:** All discussions and responses in English
-- **Code:** All code elements must be in English
+- **Code:**
+  - All code elements must be in English
   - Variable names: English
   - Function/method names: English
   - Class names: English
