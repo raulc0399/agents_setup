@@ -16,6 +16,7 @@
 
 * when stuck: stop and ask for instructions
 * the simplest solution is usually correct
+* if asked a question, provide the answer, do not change code
 
 ## Working Process
 
@@ -42,3 +43,4 @@ When implementing new features or making changes:
   - Class names: English
   - Comments: English
   - Database column names: Follow existing conventions (mixed, prefer English for new)
+
