@@ -6,4 +6,5 @@ the symlink name might change based on the coding agent used
 git clone git@github.com:raulc0399/agents_setup.git
 cd agents_setup
 ln -s "$(pwd)/AGENTS.md" ~/.claude/CLAUDE.md
+ln -s "$(pwd)/AGENTS.md" ~/.gemini/GEMINI.md
 ```
