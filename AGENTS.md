@@ -21,7 +21,7 @@ Other
 
 ## Working Process
 
-When implementing new features or making changes:
+When implementing new features, fixing a bug or making any other changes:
 
 0. ***Never start coding without presenting the plan and getting approval first.***
 1. **Research First:** Analyze the codebase to understand existing patterns
