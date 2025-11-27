@@ -18,6 +18,7 @@ Other
 * when stuck: stop and ask for instructions
 * the simplest solution is usually correct
 * if asked a question, provide the answer, do not change code
+* keep the naming conventions from the project, do not change them
 
 ## Working Process
 
