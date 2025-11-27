@@ -34,6 +34,7 @@ When implementing new features, fixing a bug or making any other changes:
 8. **Iterate:** from step #5 for each task
 
 ***Never start coding without presenting the plan and getting approval first.***
+***When fixing a bug also present why is the reasoning behing the bug and how the changes will fix it.***
 
 ## Language Conventions
 
