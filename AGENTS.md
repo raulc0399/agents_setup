@@ -20,6 +20,7 @@ Other
 * if asked a question, provide the answer, do not change code
 * keep the naming conventions from the project, do not change them
 * do not give summary of the changes or list the changed just done, unless asked
+* do not changed the quote style unnecessary. eg. from "status" to 'status', unless that line changed for something else, and the new style matches the general project style.
 
 ## Working Process
 
