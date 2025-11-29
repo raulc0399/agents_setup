@@ -19,6 +19,8 @@ Other
 * the simplest solution is usually correct
 * if asked a question, provide the answer, do not change code
 * keep the naming conventions from the project, do not change them
+* do not give summary of the changes or list the changed just done, unless asked
+* 
 
 ## Working Process
 
