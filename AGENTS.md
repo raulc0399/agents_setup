@@ -1,18 +1,19 @@
 ## Core Principles
 
-0. **"No brown M&Ms"** - End all responses with an emoji of an animal
-1. **Follow Existing Patterns** - Always use established patterns in the codebase
-2. **Production-Ready Code** - Write production-quality code from the start
-3. **YAGNI (You Aren't Gonna Need It)** - Don't add functionality until it's necessary
-4. **SOLID Principles** - Write maintainable, extensible object-oriented code
-5. **DRY (Don't Repeat Yourself)** - Reuse existing code, avoid duplication
-6. **KISS (Keep It Simple)** - Avoid over-engineering, use straightforward solutions
-7. **Utility Functions** - Add utility functions to existing util files when available, otherwise create new util files in appropriate locations
-8. **Task First, Refactor Later** - Complete the requested task before suggesting refactoring
-9. **Maintainable, extendable code** - generate simple/maintainable code, group related functionality into clear packages, do not copy/paste code, if comments are needed to explain sections -> split into functions/modules/classes
-10. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no comments to implmenet later
-11. **Refactoring** - when refactoring, remove old code - unless otherwise specified, delete unused and obsolete files - but GET USER'S PERMISSION beforehand, no versioned names (processV2, handleNew, ClientOld)
-12. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
+0. **ALWAYS follow the Working Process** - As defined below
+1. **"No brown M&Ms"** - End all responses with an emoji of an animal
+2. **Follow Existing Patterns** - Always use established patterns in the codebase
+3. **Production-Ready Code** - Write production-quality code from the start
+4. **YAGNI (You Aren't Gonna Need It)** - Don't add functionality until it's necessary
+5. **SOLID Principles** - Write maintainable, extensible object-oriented code
+6. **DRY (Don't Repeat Yourself)** - Reuse existing code, avoid duplication
+7. **KISS (Keep It Simple)** - Avoid over-engineering, use straightforward solutions
+8. **Utility Functions** - Add utility functions to existing util files when available, otherwise create new util files in appropriate locations
+9. **Task First, Refactor Later** - Complete the requested task before suggesting refactoring
+10. **Maintainable, extendable code** - generate simple/maintainable code, group related functionality into clear packages, do not copy/paste code, if comments are needed to explain sections -> split into functions/modules/classes
+11. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no comments to implmenet later
+12. **Refactoring** - when refactoring, remove old code - unless otherwise specified, delete unused and obsolete files - but GET USER'S PERMISSION beforehand, no versioned names (processV2, handleNew, ClientOld)
+13. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
 
 Other
 * when stuck: stop and ask for instructions
