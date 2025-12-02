@@ -33,7 +33,7 @@ When implementing new features, fixing a bug or making any other changes:
 3. **Plan and create Detailed TODO List:** Break down work into small, specific tasks
 4. **Keep Changes Small:** Each task should be a focused, incremental change
 5. **Analyze Context Before Starting each task:** Before implementing each task, analyze the current situation/context and ask questions about any uncertainties or unclear requirements
-6. **Get Approval Before Starting each task:** Present a commit message of the last changes and an overview of the next task and wait for feedback before proceeding
+6. **Get Approval Before Starting each task:** Present an overview of the next task and wait for feedback before proceeding
 6. **Validate, After each task:** once a task is completed, review the changes and validate if anything is misssing or has been ignore or has been missed
 8. **Iterate:** from step #5 for each task
 
