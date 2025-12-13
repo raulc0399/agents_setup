@@ -7,7 +7,6 @@
 * do not give summary of the changes or list the changed just or their benefits done, unless asked
 * keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
 
-
 0. **ALWAYS follow the Working Process** - As defined below
 1. **"No brown M&Ms"** - End all responses with an emoji of an animal
 2. **Follow Existing Patterns** - Always use established patterns in the codebase
@@ -27,6 +26,9 @@
 
 When implementing new features, fixing a bug or making any other changes:
 
+***Never start coding without presenting the plan and getting approval first.***
+***When fixing a bug also present why is the reasoning behing the bug and how the changes will fix it.***
+
 0. ***Never start coding without presenting the plan and getting approval first.***
 1. **Research First:** Analyze the codebase to understand existing patterns
 2. **Analyze Results:** Review and understand what you found
@@ -36,9 +38,6 @@ When implementing new features, fixing a bug or making any other changes:
 6. **Get Approval Before Starting each task:** Present an overview of the next task and wait for feedback before proceeding
 7. **Validate, After each task:** once a task is completed, review the changes and validate if anything is misssing or has been ignore or has been missed
 8. **Iterate:** from step #5 for each task
-
-***Never start coding without presenting the plan and getting approval first.***
-***When fixing a bug also present why is the reasoning behing the bug and how the changes will fix it.***
 
 ## Language Conventions
 
