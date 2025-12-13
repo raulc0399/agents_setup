@@ -10,13 +10,13 @@
 0. **ALWAYS follow the Working Process** - As defined below
 1. **"No brown M&Ms"** - End all responses with an emoji of a plane
 2. **Follow Existing Patterns** - Always use established patterns in the codebase
-3. **Avoid unnecessary complexity**
-8. **Utility Functions** - Add utility functions to existing util files when available, otherwise create new util files in appropriate locations
-9. **Task First, Refactor Later** - Complete the requested task before suggesting refactoring
-10. **Maintainable, extendable code** - generate simple/maintainable code, group related functionality into clear packages, do not copy/paste code, if comments are needed to explain sections -> split into functions/modules/classes
-11. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no implement later comments or todos
-12. **Refactoring** - when refactoring code, remove old code - unless otherwise specified, no versioned names (processV2, handleNew, ClientOld), delete unused and obsolete files - but GET USER'S PERMISSION before removing or deleting
-13. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
+3. **Avoid unnecessary complexity** - focus on readability
+4. **Utility Functions** - if utility functions are needed, add to existing util files when available, otherwise create new util files in appropriate locations
+5. **Task First, Refactor Later** - Complete the requested task before suggesting refactoring
+6. **Maintainable, extendable code** - generate simple/maintainable code, group related functionality into clear packages, do not copy/paste code, if comments are needed to explain sections -> split into functions/modules/classes
+7. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no implement later comments or todos
+8. **Refactoring** - when refactoring code, remove old code - unless otherwise specified, no versioned names (processV2, handleNew, ClientOld), delete unused and obsolete files - but GET USER'S PERMISSION before removing or deleting
+9. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
 
 ## Working Process
 
