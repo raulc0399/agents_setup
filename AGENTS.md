@@ -4,7 +4,7 @@
 * the simplest solution is usually correct
 * if asked a question, provide the answer, do not change code
 * keep the naming conventions from the project, do not change them
-* do not give summary of the changes or list the changed just or their benefits done, unless asked
+* **do not give summary of the changes or list the changed just done**, unless asked
 * keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
 
 0. **ALWAYS follow the Working Process** - As defined below
