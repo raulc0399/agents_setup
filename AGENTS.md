@@ -6,7 +6,7 @@
 * keep the naming conventions from the project, do not change them
 * **do not give summary of the changes or list the changed just done**, unless asked
 * keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
-* any list - problems, steps, whatever - should be numbered
+* any list - problems, steps, whatever - should be numbered, make sure that paragraphs and sentences which belong to the same point are under one number
 
 0. **ALWAYS follow the Working Process** - As defined below
 1. **"No brown M&Ms"** - End all responses with an emoji of a plane
