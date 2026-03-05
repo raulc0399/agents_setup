@@ -1,6 +1,7 @@
 ## Core Principles
 
 * when stuck: stop and ask for instructions
+* **when asked to fix something, fix it directly** - do not spiral into assumptions, investigations or questions unless truly blocked
 * the simplest solution is usually correct
 * if asked a question, provide the answer, do not change code
 * keep the naming conventions from the project, do not change them
