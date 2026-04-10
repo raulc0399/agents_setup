@@ -48,4 +48,5 @@ When implementing new features, fixing a bug or making any other changes:
   - Class names: English
   - Comments: English
   - Database column names: Follow existing conventions (mixed, prefer English for new)
+  - In languages that support {} blocks (e.g., C, C++, Java, JavaScript, C#), always wrap the body of if, for, while, etc. in {} — even for a single statement.
 
