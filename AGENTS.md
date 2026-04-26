@@ -19,6 +19,8 @@
 7. **ALL CODE IS PRODUCTION CODE** - all code is production code, no other assumptions, no dummy data, no implement later comments or todos
 8. **Refactoring** - when refactoring code, remove old code - unless otherwise specified, no versioned names (processV2, handleNew, ClientOld), delete unused and obsolete files - but GET USER'S PERMISSION before removing or deleting
 9. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
+10. Code in functions should be grouped by logical blocks, separated by new line
+11. The blocks should have at least a one-line comment - if not obvious what they do, more if the block does something more complicated.
 
 ## Working Process
 
