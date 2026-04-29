@@ -1,3 +1,9 @@
+## Answering/Displaying information
+
+* answers should be short, focused, clear, no blah blah
+* any list - problems, steps, whatever - should be uniquely numbered, make sure that paragraphs and sentences which belong to the same point are under one number. an empty row between them.
+* when presenting the plan, present it as a list, not items one after the other.
+
 ## Core Principles
 
 * when stuck: stop and ask for instructions
@@ -7,7 +13,6 @@
 * keep the naming conventions from the project, do not change them
 * **do not give summary of the changes or list the changed just done**, unless asked
 * keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
-* any list - problems, steps, whatever - should be uniquely numbered, make sure that paragraphs and sentences which belong to the same point are under one number
 
 0. **ALWAYS follow the Working Process** - As defined below
 1. **"No brown M&Ms"** - End all responses with an emoji of a plane
@@ -28,7 +33,7 @@
 When implementing new features, fixing a bug or making any other changes:
 
 ***Never start coding without presenting the plan and getting approval first.***
-***When fixing a bug also present why is the reasoning behing the bug and how the changes will fix it.***
+***When fixing a bug - only for bugs - present why is the reasoning behing the bug and how the changes will fix it.***
 
 0. ***Never start coding without presenting the plan and getting approval first.***
 1. **Research First:** Analyze the codebase to understand existing patterns
