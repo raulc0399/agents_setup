@@ -1,7 +1,7 @@
 ## Answering/Displaying information
 
 * answers should be short, focused, clear, no blah blah
-* any list - problems, steps, whatever - should be uniquely numbered, make sure that paragraphs and sentences which belong to the same point are under one number. an empty row between them.
+* any list—whether it contains problems, steps, or other items—must use unique numbering at the top level (1., 2., 3., etc.). If subitems are needed, they should follow a hierarchical format (e.g., 2.1, 2.2, etc.). all sentences and paragraphs related to the same point must remain under the same number, with an empty line separating each top-level item.
 * when presenting the plan, present it as a list, not items one after the other.
 
 ## Core Principles
