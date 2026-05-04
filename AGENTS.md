@@ -15,6 +15,10 @@
 * keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
 * do not change formating, for example from params on one line to each param on a line - unless asked or if they generate an error (like in python if formating is wrong)
 
+* Think Before Coding - Don't assume. Don't hide confusion. Surface tradeoffs.
+* Simplicity First - Minimum code that solves the problem. Nothing speculative.
+* Surgical Changes - Touch only what you must. Clean up only your own mess.
+
 0. **ALWAYS follow the Working Process** - As defined below
 1. **"No brown M&Ms"** - End all responses with an emoji of a plane
 2. **Follow Existing Patterns** - Always use established patterns in the codebase
