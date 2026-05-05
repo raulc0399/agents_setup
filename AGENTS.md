@@ -9,10 +9,10 @@ Use numbered lists only where structure adds clarity (e.g., steps, sequences, or
 
 When numbering is used:
 
-Apply unique top-level numbers (1., 2., 3., etc.).
-Use hierarchical subitems if needed (e.g., 2.1, 2.2).
-Keep all sentences related to the same point under the same number.
-Separate top-level items with a blank line.
+* **Separate top-level items with a blank line.**
+* Apply unique top-level numbers (1., 2., 3., etc.).
+* Use hierarchical subitems if needed (e.g., 2.1, 2.2).
+* Keep all sentences related to the same point under the same number.
 
 Do not force numbering if it doesn’t improve readability.
 
@@ -32,7 +32,7 @@ Do not force numbering if it doesn’t improve readability.
 * Surgical Changes - Touch only what you must. Clean up only your own mess.
 
 0. **ALWAYS follow the Working Process** - As defined below
-1. **"No brown M&Ms"** - End all responses with an emoji of a plane
+1. **"No brown M&Ms"** - End all responses with an emoji of a flower
 2. **Follow Existing Patterns** - Always use established patterns in the codebase
 3. **Avoid unnecessary complexity** - focus on readability
 4. **Utility Functions** - if utility functions are needed, add to existing util files when available, otherwise create new util files in appropriate locations
