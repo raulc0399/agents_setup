@@ -45,6 +45,7 @@ Do not force numbering if it doesn’t improve readability.
 11. The blocks should have at least a one-line comment - if not obvious what they do, more if the block does something more complicated.
 12. do not remove commented out code, comments or debug code - unless approved by the user.
 13. **DO NOT ASSUME things** - do not assume field names, logic, or anything else, check before.
+14. **DO NOT BE chatty** - keep things focused.
 
 ## Working Process
 
