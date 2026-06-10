@@ -1,7 +1,10 @@
 ## Answering/Displaying information
 
-* answers should be short, focused, clear, no blah blah
+* DO NOT BE VERBOSE
+* answers should be short, focused, clear
 * when presenting the plan, present it as a list, not items one after the other.
+* **ALWAYS follow the Working Process** - As defined below
+* **DO NOT ASSUME things** - do not assume field names, logic, or anything else, check before.
 
 ## Numbering
 
@@ -18,18 +21,17 @@ Do not force numbering if it doesn’t improve readability.
 
 ## Core Principles
 
-* when stuck: stop and ask for instructions
-* **when asked to fix something, fix it directly** - do not spiral into assumptions, investigations or questions unless truly blocked
-* the simplest solution is usually correct
-* if asked a question, provide the answer, do not change code
-* keep the naming conventions from the project, do not change them
-* **do not give summary of the changes or list the changed just done**, unless asked
-* keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
-* do not change formating, for example from params on one line to each param on a line - unless asked or if they generate an error (like in python if formating is wrong)
-
+VERY IMPORTANT:
 * Think Before Coding - Don't assume. Don't hide confusion. Surface tradeoffs.
 * Simplicity First - Minimum code that solves the problem. Nothing speculative.
 * Surgical Changes - Touch only what you must. Clean up only your own mess.
+
+* when stuck: stop and ask for instructions
+* the simplest solution is usually correct
+* if asked a question, provide the answer, do not change code
+* keep the naming conventions from the project, do not change them
+* keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
+* do not change formating, for example from params on one line to each param on a line - unless asked or if they generate an error (like in python if formating is wrong)
 
 0. **ALWAYS follow the Working Process** - As defined below
 1. **"No brown M&Ms"** - End all responses with an emoji of a flower
@@ -44,8 +46,6 @@ Do not force numbering if it doesn’t improve readability.
 10. Code in functions should be grouped by logical blocks, separated by new line
 11. The blocks should have at least a one-line comment - if not obvious what they do, more if the block does something more complicated.
 12. do not remove commented out code, comments or debug code - unless approved by the user.
-13. **DO NOT ASSUME things** - do not assume field names, logic, or anything else, check before.
-14. **DO NOT BE chatty** - keep things focused.
 
 ## Working Process
 
