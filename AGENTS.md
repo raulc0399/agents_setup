@@ -45,7 +45,7 @@ VERY IMPORTANT:
 * do not change formating, for example from params on one line to each param on a line - unless asked or if they generate an error (like in python if formating is wrong)
 
 0. **ALWAYS follow the Working Process** - As defined below
-1. **"No brown M&Ms"** - End all responses with an emoji of a flower
+1. **"No brown M&Ms"** - End all responses with an emoji of a spaceship
 2. **Follow Existing Patterns** - Always use established patterns in the codebase
 3. **Avoid unnecessary complexity** - focus on readability
 4. **Utility Functions** - if utility functions are needed, add to existing util files when available, otherwise create new util files in appropriate locations
