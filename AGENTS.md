@@ -4,8 +4,8 @@
 * answers should be short, focused, clear
 * when presenting the plan, present it as a list, not items one after the other.
 * **ALWAYS follow the Working Process** - As defined below
-* **DO NOT ASSUME things** - do not assume field names, logic, or anything else, check before.
-* Name concrete artifacts (file, symbol, path), not abstract nouns. First use of a domain term: anchor it to the thing on disk, e.g. specify what you mean by fpr ex. registry.
+* **Verify observable details** - check field names, logic, and other details before relying on them. State necessary assumptions.
+* Name concrete artifacts (file, symbol, path), not abstract nouns. First use of a domain term: anchor it to the thing on disk, e.g. specify what you mean by, for example, registry.
 * If asked "what is X", first state WHICH X in this context — there is usually more than one. Disambiguate before defining.
 * When specs, a file or ticket defines its own numbering, refer to those numbers only. Never number your own points in a way that collides with them.
 
@@ -44,14 +44,13 @@ VERY IMPORTANT:
 * Simplicity First - Minimum code that solves the problem. Nothing speculative.
 * Surgical Changes - Touch only what you must. Clean up only your own mess.
 
-* when stuck: stop and ask for instructions
+* when stuck after investigation or while coding: stop and ask for instructions
 * the simplest solution is usually correct
 * if asked a question, provide the answer, do not change code
 * keep the naming conventions from the project, do not change them
 * keep changes minimal so the git diff is as small as possible. avoid unnecessary modifications, such as changing quote styles, formatting details or change/remove comments without semantic changes
-* do not change formating, for example from params on one line to each param on a line - unless asked or if they generate an error (like in python if formating is wrong)
+* do not change formatting, for example from params on one line to each param on a line - unless asked or if they generate an error (like in python if formatting is wrong)
 
-0. **ALWAYS follow the Working Process** - As defined below
 1. **"No brown M&Ms"** - End all responses with an emoji of a sunrise
 2. **Follow Existing Patterns** - Always use established patterns in the codebase
 3. **Avoid unnecessary complexity** - focus on readability
@@ -62,26 +61,26 @@ VERY IMPORTANT:
 8. **Refactoring** - when refactoring code, remove old code - unless otherwise specified, no versioned names (processV2, handleNew, ClientOld), delete unused and obsolete files - but GET USER'S PERMISSION before removing or deleting
 9. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
 10. Code in functions should be grouped by logical blocks, separated by new line
-11. The blocks should have at least a one-line comment - if not obvious what they do, more if the block does something more complicated.
+11. Add a comment when a logical block is not obvious. Add more detail when the block is complicated.
 12. do not remove commented out code, comments or debug code - unless approved by the user. Keep existing comments, but update any that become inaccurate because of your change.
 13. **Verified requirements win over existing code** - if a spec, ticket, or issue contradicts the code, determine whether the requirement intentionally changes behavior. Report unclear or incorrect requirements. Implement approved changes; never knowingly implement behavior shown to be wrong.
+14. **Validate changes** - run the narrowest relevant tests, lint, or build after each completed batch.
 
 ## Working Process
 
 When implementing new features, fixing a bug or making any other changes:
 
 ***Never start coding without presenting the plan and getting approval first.***
-***When fixing a bug - only for bugs - present why is the reasoning behing the bug and how the changes will fix it.***
+***When fixing a bug - only for bugs - explain the reasoning behind the bug and how the changes will fix it.***
 
-0. ***Never start coding without presenting the plan and getting approval first.***
 1. **Research First:** Analyze the codebase to understand existing patterns
 2. **Analyze Results:** Review and understand what you found
 3. **Plan and create Detailed TODO List:** Break down work into small, specific tasks
-4. **Keep Changes Small:** Each task should be a focused, incremental change
-5. **Analyze Context Before Starting each task:** Before implementing each task, analyze the current situation/context and ask questions about any uncertainties or unclear requirements
-6. **Get Approval Before Starting each task:** Present an overview of the next task and wait for feedback before proceeding
-7. **Validate, After each task:** once a task is completed, review the changes and validate if anything is misssing or has been ignore or has been missed
-8. **Iterate:** from step #5 for each task
+4. **Get Approval:** Present the plan and wait for feedback before implementation
+5. **Keep Changes Small:** Complete the approved plan in focused batches
+6. **Analyze Context Before Each Batch:** Check the current situation and raise uncertainties or scope changes before proceeding
+7. **Validate After Each Batch:** Review the changes and run the narrowest relevant validation
+8. **Iterate:** Repeat from step #6 for each batch
 
 ### Parallel work
 
