@@ -5,6 +5,9 @@
 * when presenting the plan, present it as a list, not items one after the other.
 * **ALWAYS follow the Working Process** - As defined below
 * **DO NOT ASSUME things** - do not assume field names, logic, or anything else, check before.
+* Name concrete artifacts (file, symbol, path), not abstract nouns. First use of a domain term: anchor it to the thing on disk, e.g. specify what you mean by fpr ex. registry.
+* If asked "what is X", first state WHICH X in this context — there is usually more than one. Disambiguate before defining.
+* When specs, a file or ticket defines its own numbering, refer to those numbers only. Never number your own points in a way that collides with them.
 
 ## Output Style
 - Be concise. No preamble, no summary at the end. Keep responses concise and focused.
@@ -14,6 +17,10 @@
 - No "Great question!", "I'd be happy to...", or similar filler openers.
 - When showing code, show only the changed lines unless full context is requested.
 - If a one-word or one-line answer suffices, give that.
+- Do not repeat in prose what a list or the file already says.
+- This applies to DIRECT ANSWERS too, not just status reports. Answer the question asked and stop. Do not add the reasoning behind the answer, the alternatives considered, the caveats, or what it implies — unless asked.
+- One idea per sentence, one sentence per point. If a paragraph restates the point in different words, cut it.
+- When work is delegated, do not relay per-agent reports as they arrive. Report once at the end, plus anything blocking.
 
 ## Numbering
 
@@ -56,7 +63,8 @@ VERY IMPORTANT:
 9. **Prefer explicit over implicit** - clear function names over clever abstractions, obvious data flow over hidden magic, direct dependencies over service locators
 10. Code in functions should be grouped by logical blocks, separated by new line
 11. The blocks should have at least a one-line comment - if not obvious what they do, more if the block does something more complicated.
-12. do not remove commented out code, comments or debug code - unless approved by the user.
+12. do not remove commented out code, comments or debug code - unless approved by the user. Keep existing comments, but update any that become inaccurate because of your change.
+13. **Verified requirements win over existing code** - if a spec, ticket, or issue contradicts the code, determine whether the requirement intentionally changes behavior. Report unclear or incorrect requirements. Implement approved changes; never knowingly implement behavior shown to be wrong.
 
 ## Working Process
 
@@ -75,6 +83,12 @@ When implementing new features, fixing a bug or making any other changes:
 7. **Validate, After each task:** once a task is completed, review the changes and validate if anything is misssing or has been ignore or has been missed
 8. **Iterate:** from step #5 for each task
 
+### Parallel work
+
+- When work is parallelised across agents, approval is per BATCH, not per task. Steps 5-8 apply to the batch.
+- The plan must state FILE OWNERSHIP per agent, and the sets must be disjoint. Two agents editing one file lose each other's work silently.
+- An agent that needs a file it does not own stops and reports it. The parent applies that edit afterwards.
+
 ## Language Conventions
 
 - **Specifications, requests:** May be provided in German (client communication) or English
@@ -87,4 +101,3 @@ When implementing new features, fixing a bug or making any other changes:
   - Comments: English
   - Database column names: Follow existing conventions (mixed, prefer English for new)
   - In languages that support {} blocks (e.g., C, C++, Java, JavaScript, C#), always wrap the body of if, for, while, etc. in {} — even for a single statement.
-
