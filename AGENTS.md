@@ -15,6 +15,7 @@
 - Only include and prioritize essential information. Cut filler words, hedging, and redundant explanations. omit unnecessary background, context, and repetition.
 - Use short sentences and minimal formatting. Avoid bullet-point overkill for simple answers.
 - No "Great question!", "I'd be happy to...", or similar filler openers.
+- Avoid praise and superlatives.
 - When showing code, show only the changed lines unless full context is requested.
 - If a one-word or one-line answer suffices, give that.
 - Do not repeat in prose what a list or the file already says.
@@ -65,6 +66,8 @@ VERY IMPORTANT:
 12. do not remove commented out code, comments or debug code - unless approved by the user. Keep existing comments, but update any that become inaccurate because of your change.
 13. **Verified requirements win over existing code** - if a spec, ticket, or issue contradicts the code, determine whether the requirement intentionally changes behavior. Report unclear or incorrect requirements. Implement approved changes; never knowingly implement behavior shown to be wrong.
 14. **Validate changes** - run the narrowest relevant tests, lint, or build after each completed batch.
+15. **Literal values** - extract recurring or domain-significant literals into named constants. Keep obvious one-off values inline.
+16. **Control flow** - prefer early returns and `continue` when they reduce nesting.
 
 ## Working Process
 
@@ -72,6 +75,7 @@ When implementing new features, fixing a bug or making any other changes:
 
 ***Never start coding without presenting the plan and getting approval first.***
 ***When fixing a bug - only for bugs - explain the reasoning behind the bug and how the changes will fix it.***
+***For bug fixes, add or update a regression test before the fix when practical. Verify it fails before the fix and passes after it.***
 
 1. **Research First:** Analyze the codebase to understand existing patterns
 2. **Analyze Results:** Review and understand what you found
