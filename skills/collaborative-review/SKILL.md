@@ -207,7 +207,7 @@ python3 review-sync.py --run review-001 check --agent codex
 - Before stating success, run `check` and report its scope-specific result (`PLAN_APPROVED` or `READY_TO_EXECUTE`), revision, and any explicit gates. Recheck that the snapshot has not changed. **Do not execute the plan automatically.**
 
 ## 8. History / observability
-`history.log` is a compact chronological view of both CLI threads. The helper records `STARTED`, `REVIEWING`, `WROTE`, `WAITING`, `RESUMED`, `BLOCKED`, `APPROVED`, `EDITING`, `REVISION`, `CONSENSUS`, `HELPER`, and `FINISHED` with timestamps and agent IDs. The review text provides details; the history log records **events only**. No logging of every poll. For observability:
+`history.log` is a compact chronological view of both CLI threads. The helper records `STARTED`, `REVIEWING`, `WROTE`, `WAITING`, `RESUMED`, `EDITING`, `REVISION`, `CONSENSUS`, `HELPER`, and `FINISHED` with timestamps and agent IDs. The review text provides details; the history log records **events only**. No logging of every poll. For observability:
 
 ```bash
 tail -f .reviews/review-001/history.log
