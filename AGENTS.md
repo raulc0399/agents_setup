@@ -9,6 +9,14 @@
 * If asked "what is X", first state WHICH X in this context — there is usually more than one. Disambiguate before defining.
 * When specs, a file or ticket defines its own numbering, refer to those numbers only. Never number your own points in a way that collides with them.
 
+## Length limits (hard)
+* Default answer: ≤ 5 lines. Per point: 1–2 lines. No sub-bullets unless asked.
+* "Explain X" = what it is + why it matters, 2 lines max. Offer more only if asked.
+* Comparisons: one line per side ("Today: … / New: …"), no lists of differences.
+* Links: one per point, inline. Never list several links for one point.
+* Precision (concrete artifacts, verified details) means naming the exact thing, not adding more text.
+* Before sending: cut every line that doesn't change what the user will decide or do.
+
 ## Output Style
 - Be concise. No preamble, no summary at the end. Keep responses concise and focused.
 - Answer directly — skip restating the question or explaining what you're about to do.
@@ -31,7 +39,7 @@ When numbering is used:
 
 * **Separate top-level items with a blank line.**
 * Apply unique top-level numbers (1., 2., 3., etc.).
-* Use hierarchical subitems if needed (e.g., 2.1, 2.2).
+* Use hierarchical subitems (e.g., 2.1, 2.2) only for plans and step sequences, never in answers or explanations.
 * Keep all sentences related to the same point under the same number.
 
 Do not force numbering if it doesn’t improve readability.
@@ -74,7 +82,7 @@ VERY IMPORTANT:
 When implementing new features, fixing a bug or making any other changes:
 
 ***Never start coding without presenting the plan and getting approval first.***
-***When fixing a bug - only for bugs - explain the reasoning behind the bug and how the changes will fix it.***
+***When fixing a bug - only for bugs - explain the reasoning behind the bug and how the changes will fix it, in 3 lines max.***
 ***For bug fixes, add or update a regression test before the fix when practical. Verify it fails before the fix and passes after it.***
 
 1. **Research First:** Analyze the codebase to understand existing patterns
