@@ -94,11 +94,18 @@ def snapshot(paths):
     all_files = set()
     for raw in paths:
         p = Path(raw)
+        for item in (p, *p.parents):
+            if item.is_symlink():
+                sys.exit(f'Symlink snapshot path is unsupported: {item}')
         if not p.exists():
             sys.exit(f'Missing snapshot path: {raw}')
         choices = p.rglob('*') if p.is_dir() else [p]
         for item in choices:
-            if item.is_file() and not item.is_symlink() and not any(x in {'.git', '.reviews', '__pycache__'} for x in item.parts):
+            if any(x in {'.git', '.reviews', '__pycache__'} for x in item.parts):
+                continue
+            if item.is_symlink():
+                sys.exit(f'Symlink snapshot path is unsupported: {item}')
+            if item.is_file():
                 all_files.add(item)
     if not all_files:
         sys.exit('Snapshot has no files.')
@@ -212,6 +219,8 @@ def main():
     pub.add_argument('--agent', choices=AGENTS, required=True)
     pub.add_argument('--status', choices=['BLOCKED', 'APPROVED'], required=True)
     pub.add_argument('--text-file', required=True)
+    pub.add_argument('--expected-revision', required=True, help='Snapshot hash recorded before reviewing')
+    pub.add_argument('--expected-round', type=int, required=True, help='Round recorded before reviewing')
     pub.add_argument('--responding-to', type=int, default=0)
     pub.add_argument('--gate', action='append', default=[], help='Open gate of an APPROVED review; repeatable')
     control = sub.add_parser('control')
@@ -254,8 +263,9 @@ def main():
                     sys.exit('Existing run has different paths or approval scope; use a new run id.')
                 verify_helper(run)
             else:
+                revision = snapshot(args.paths)
                 atomic_json(run / 'meta.json', {'paths': args.paths, 'approval_scope': args.approval_scope, 'helper_sha256': helper_fingerprint(), 'created': now()})
-                atomic_json(run / 'state.json', {'revision': snapshot(args.paths), 'round': 1, 'consensus': 'PENDING', 'approval_scope': args.approval_scope})
+                atomic_json(run / 'state.json', {'revision': revision, 'round': 1, 'consensus': 'PENDING', 'approval_scope': args.approval_scope})
                 event(run, 'system', 'STARTED', f'run={args.run}')
         print(json.dumps(read_json(run / 'state.json')))
         return
@@ -333,6 +343,8 @@ def main():
             meta = read_json(run / 'meta.json')
             if args.cmd == 'publish' and state.get('editor'):
                 sys.exit(f'{state["editor"]} is editing; wait for its revise. Use control for other messages.')
+            if args.cmd == 'publish' and (args.expected_revision != state['revision'] or args.expected_round != state['round']):
+                sys.exit('Review revision or round changed. Re-review before publishing.')
             if args.cmd == 'publish' and args.gate and args.status != 'APPROVED':
                 sys.exit('--gate is only valid with APPROVED.')
             actual = snapshot(meta['paths']) if args.cmd == 'publish' else state['revision']

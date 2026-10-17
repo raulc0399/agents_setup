@@ -28,7 +28,11 @@ class ReviewSyncTests(unittest.TestCase):
 
     def publish(self, agent, status):
         return self.call('publish', '--agent', agent, '--status', status,
-                         '--text-file', 'message.md')
+                         '--text-file', 'message.md', *self.expected_review())
+
+    def expected_review(self):
+        state = self.state()
+        return ['--expected-revision', state['revision'], '--expected-round', str(state['round'])]
 
     def approve(self):
         for agent in ('codex', 'claude'):
@@ -83,15 +87,66 @@ class ReviewSyncTests(unittest.TestCase):
         self.publish('claude', 'APPROVED')
         self.assertEqual(self.call('check', '--agent', 'codex')['consensus'], 'PENDING')
 
+    def test_publish_rejects_review_of_previous_revision(self):
+        reviewed = self.state()
+        (self.root / 'PLAN.md').write_text('Changed plan')
+        self.call('revise', '--agent', 'claude')
+        error = self.run_failing('publish', '--agent', 'codex', '--status', 'APPROVED',
+                                 '--text-file', 'message.md', '--expected-revision', reviewed['revision'],
+                                 '--expected-round', str(reviewed['round']))
+        self.assertIn('Review revision or round changed', error)
+        self.assertFalse((self.root / '.reviews/test/codex').exists())
+
+    def test_publish_rejects_review_of_previous_round(self):
+        reviewed = self.state()
+        self.control('scope')
+        error = self.run_failing('publish', '--agent', 'codex', '--status', 'APPROVED',
+                                 '--text-file', 'message.md', '--expected-revision', reviewed['revision'],
+                                 '--expected-round', str(reviewed['round']))
+        self.assertIn('Review revision or round changed', error)
+        self.assertFalse((self.root / '.reviews/test/codex').exists())
+
+    def test_failed_init_can_be_retried(self):
+        command = [sys.executable, str(HELPER), '--run', 'retry', 'init', '--paths', 'missing.md']
+        result = subprocess.run(command, cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / '.reviews/retry/meta.json').exists())
+        (self.root / 'missing.md').write_text('Plan')
+        result = subprocess.run(command, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['round'], 1)
+
+    def test_snapshot_rejects_symlinks(self):
+        (self.root / 'src').mkdir()
+        (self.root / 'src/code.py').write_text('print(1)')
+        for target in ('PLAN.md', 'src', 'missing'):
+            with self.subTest(target=target):
+                link = self.root / 'src/link'
+                link.symlink_to(self.root / target)
+                command = [sys.executable, str(HELPER), '--run', 'links', 'init', '--paths', 'src']
+                result = subprocess.run(command, cwd=self.root, text=True, capture_output=True)
+                link.unlink()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Symlink snapshot path', result.stderr)
+
+    def test_snapshot_rejects_symlink_ancestors(self):
+        (self.root / 'linked').symlink_to(self.root, target_is_directory=True)
+        command = [sys.executable, str(HELPER), '--run', 'ancestor', 'init', '--paths', 'linked/PLAN.md']
+        result = subprocess.run(command, cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Symlink snapshot path', result.stderr)
+
     def test_technical_plan_has_distinct_result(self):
         result = subprocess.run([sys.executable, str(HELPER), '--run', 'plan', 'init',
                                  '--paths', 'PLAN.md', '--approval-scope', 'technical-plan'],
                                 cwd=self.root, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        reviewed = json.loads(result.stdout)
         for agent in ('codex', 'claude'):
             result = subprocess.run([sys.executable, str(HELPER), '--run', 'plan', 'publish',
                                      '--agent', agent, '--status', 'APPROVED',
-                                     '--text-file', 'message.md'],
+                                     '--text-file', 'message.md', '--expected-revision', reviewed['revision'],
+                                     '--expected-round', str(reviewed['round'])],
                                     cwd=self.root, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
         state = json.loads((self.root / '.reviews/plan/state.json').read_text())
@@ -133,7 +188,7 @@ class ReviewSyncTests(unittest.TestCase):
         run = self.root / '.reviews/test'
         before = {str(path.relative_to(run)): path.read_bytes() for path in run.rglob('*') if path.is_file()}
         for command in (['join', '--agent', 'claude'], ['start', '--agent', 'claude'],
-                        ['publish', '--agent', 'claude', '--status', 'APPROVED', '--text-file', 'message.md'],
+                        ['publish', '--agent', 'claude', '--status', 'APPROVED', '--text-file', 'message.md', *self.expected_review()],
                         ['init', '--paths', 'PLAN.md']):
             result = subprocess.run([sys.executable, str(changed), '--run', 'test', *command],
                                     cwd=self.root, text=True, capture_output=True)
@@ -174,7 +229,7 @@ class ReviewSyncTests(unittest.TestCase):
         self.assertEqual(self.call('check', '--agent', 'codex')['consensus'], 'PENDING')
         self.assertIn('claude is editing', self.run_failing('begin-edit', '--agent', 'codex', '--text-file', 'message.md'))
         self.assertIn('claude is editing', self.run_failing('publish', '--agent', 'codex', '--status', 'APPROVED',
-                                                             '--text-file', 'message.md'))
+                                                             '--text-file', 'message.md', *self.expected_review()))
         self.assertIn('only the editor', self.run_failing('revise', '--agent', 'codex'))
         received = self.call('wait', '--agent', 'codex', '--after', '1', '--timeout', '0')
         self.assertEqual((received['type'], received['kind']), ('control', 'edit'))
@@ -198,13 +253,13 @@ class ReviewSyncTests(unittest.TestCase):
 
     def test_gates_recorded_and_cleared(self):
         self.call('publish', '--agent', 'codex', '--status', 'APPROVED', '--text-file', 'message.md',
-                  '--gate', 'Metrics need user approval')
+                  '--gate', 'Metrics need user approval', *self.expected_review())
         self.publish('claude', 'APPROVED')
         self.assertEqual(self.call('check', '--agent', 'codex')['gates'], ['Metrics need user approval'])
         self.publish('claude', 'BLOCKED')
         self.assertEqual(self.state()['gates'], [])
         self.assertIn('only valid with APPROVED', self.run_failing('publish', '--agent', 'codex', '--status', 'BLOCKED',
-                                                                    '--text-file', 'message.md', '--gate', 'x'))
+                                                                    '--text-file', 'message.md', '--gate', 'x', *self.expected_review()))
 
     def test_uppercase_type_and_verdict_field_readable(self):
         self.approve()

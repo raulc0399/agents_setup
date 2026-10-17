@@ -51,7 +51,7 @@ Run this goal simultaneously in **two distinct interactive CLI sessions**, one C
 - Never name review or scratch files `claude.md`, `CLAUDE.md`, `agents.md`, or `AGENTS.md`, in any folder. Agent CLIs load these names as instructions, and on case-insensitive filesystems `claude.md` is read as `CLAUDE.md`. Use names like `claude-review.md`.
 
 ### D. Revision stability / frozen approval snapshot
-- Define the review scope explicitly (`PLAN.md` plus relevant code/tests) and hash its **exact file contents and paths**. Exclude `.reviews/` and generated artifacts.
+- Define the review scope explicitly (`PLAN.md` plus relevant code/tests) and hash its **exact file contents and paths**. Exclude `.reviews/` and generated artifacts. Symlinks in snapshot paths (including ancestor directories) are rejected; use explicit real paths instead.
 - Every review/approval MUST carry the verified revision hash and review round. Control messages carry the last recorded revision and can be sent during edits; they do not attest to current file contents. Before an approval is recorded and before readiness is declared, recheck the on-disk snapshot hash.
 - No plan/code edits during final approval. Any permitted change requires `revise`, creating a new revision and invalidating **both** previous approvals.
 - Either approval result requires two independently issued approvals for the **same current, unchanged hash** and round, with zero blockers. Git commit alone is not sufficient if working-tree files can change.
@@ -106,7 +106,7 @@ python3 review-sync.py --run review-001 heartbeat --agent codex --session-pid 12
 Run only your own watcher. It updates every 20 seconds and stops when that CLI exits (including a zombie process), its PID is reused, another `start` replaces its session token, or you log `FINISHED`. Do not use a short-lived tool shell PID or guess the peer's PID. Keep the tool's process handle; stop it when review work ends. Linux `/proc` is required for automatic watching; otherwise use manual `heartbeat` calls between bounded operations and disclose that automatic liveness is unavailable. A live but idle CLI may still heartbeat; review deadlines and unread-message processing remain necessary.
 
 ## 4. Initial independent review
-- Begin both reviews independently. Do not wait for the other agent to post first.
+- Begin both reviews independently. Do not wait for the other agent to post first. Before reading the snapshot, run `check --agent <your-agent>` and record its `revision` and `round` as `review_revision` and `review_round`. Ensure no editor is active and the result is not `STALE_REVISION`. Keep these values unchanged throughout that review; pass them to `publish`, and repeat this capture before every re-review.
 - Log `REVIEWING` via `python3 review-sync.py --run review-001 event --agent <your-agent> --kind REVIEWING` when you start inspecting the plan/code. Read the plan and relevant code; run **safe, non-destructive tests/static checks** where useful, but **do not execute the implementation plan**.
 - Prepare a compact Markdown review in your own temporary file (outside `.reviews/<run-id>/` or otherwise excluded from the snapshot). Include: verdict (`APPROVED` or `BLOCKED`), numbered blockers, supporting file/line evidence, suggested fixes, tests considered, and questions to the peer.
 - The initial review must be a **complete pass** over the whole scope. Report every blocker you can find now; do not hold findings back for later rounds.
@@ -117,11 +117,11 @@ Run only your own watcher. It updates every 20 seconds and stops when that CLI e
 - Publish through the helper, e.g.:
 
 ```bash
-python3 review-sync.py --run review-001 publish --agent codex --status BLOCKED --text-file /tmp/codex-review.md --responding-to 0
-python3 review-sync.py --run review-001 publish --agent claude --status BLOCKED --text-file /tmp/claude-review.md --responding-to 0
+python3 review-sync.py --run review-001 publish --agent codex --status BLOCKED --text-file /tmp/codex-review.md --responding-to 0 --expected-revision "$review_revision" --expected-round "$review_round"
+python3 review-sync.py --run review-001 publish --agent claude --status BLOCKED --text-file /tmp/claude-review.md --responding-to 0 --expected-revision "$review_revision" --expected-round "$review_round"
 ```
 
-Run only the command for your identity, and choose the verdict you genuinely reached. Publishing stamps the message with the current revision and sequence number. If the snapshot changed, publishing is rejected. After publishing, use `event --agent <your-agent> --kind APPROVED` or `--kind BLOCKED` to log the verdict. Log `FINISHED` once when your session actually ends.
+Run only the command for your identity, and choose the verdict you genuinely reached. Publishing requires the hash and round recorded before reviewing and stamps the message with the verified revision and sequence number. If the snapshot, recorded revision, or round changed, publishing is rejected. Re-review before retrying; never refresh the expected values merely to publish old findings. Log `FINISHED` once when your session actually ends.
 
 ### Authoring tasks
 When the task is to create or change files (not to review an existing plan), there is one author and one reviewer:
@@ -194,6 +194,7 @@ python3 review-sync.py --run review-001 revise --agent claude
 
 ```bash
 python3 review-sync.py --run review-001 publish --agent claude --status APPROVED --text-file /tmp/claude-review.md --responding-to 7 \
+  --expected-revision "$review_revision" --expected-round "$review_round" \
   --gate "Metric definitions need user approval" --gate "Each implementation batch needs user approval"
 ```
 
@@ -206,7 +207,7 @@ python3 review-sync.py --run review-001 check --agent codex
 - Before stating success, run `check` and report its scope-specific result (`PLAN_APPROVED` or `READY_TO_EXECUTE`), revision, and any explicit gates. Recheck that the snapshot has not changed. **Do not execute the plan automatically.**
 
 ## 8. History / observability
-`history.log` is a compact chronological view of both CLI threads. The helper records `STARTED`, `REVIEWING`, `WROTE`, `WAITING`, `RESUMED`, `BLOCKED`, `APPROVED`, `EDITING`, `REVISION`, `CONSENSUS`, and `FINISHED` with timestamps and agent IDs. The review text provides details; the history log records **events only**. No logging of every poll. For observability:
+`history.log` is a compact chronological view of both CLI threads. The helper records `STARTED`, `REVIEWING`, `WROTE`, `WAITING`, `RESUMED`, `BLOCKED`, `APPROVED`, `EDITING`, `REVISION`, `CONSENSUS`, `HELPER`, and `FINISHED` with timestamps and agent IDs. The review text provides details; the history log records **events only**. No logging of every poll. For observability:
 
 ```bash
 tail -f .reviews/review-001/history.log
