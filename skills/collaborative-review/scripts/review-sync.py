@@ -8,17 +8,22 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 import sys
 import time
 import uuid
 
 ROOT = Path('.reviews')
-AGENTS = ('codex', 'claude')
+AGENTS = ('agent-1', 'agent-2')
 DEFAULT_APPROVAL_SCOPE = 'implementation-ready'
 APPROVAL_RESULTS = {'technical-plan': 'PLAN_APPROVED', 'implementation-ready': 'READY_TO_EXECUTE'}
-CONTROL_KINDS = ('info', 'scope', 'stop', 'decision')
+CONTROL_KINDS = ('info', 'scope', 'stop', 'decision', 'logoff')
 HEARTBEAT_INTERVAL = 20
+PEER_STALE_AFTER = 120
+WAKE_PREFIX = 'collaborative-review wake:'
+WAKE_ENTER_DELAY = 0.5
 
 
 def now():
@@ -175,6 +180,165 @@ def refresh_consensus(run, state, actual):
     return state
 
 
+def peer_of(agent):
+    return AGENTS[1] if agent == AGENTS[0] else AGENTS[0]
+
+
+def control_lines(body, opcode):
+    return [line.strip() for line in body.splitlines()
+            if re.match(rf'^{opcode}(?:\s|$)', line.strip())]
+
+
+def startup_kick(run):
+    kicks = {agent: [] for agent in AGENTS}
+    for agent in AGENTS:
+        agent_dir = run / agent
+        entries = sorted(agent_dir.glob('*.json')) if agent_dir.exists() else []
+        for path in entries:
+            message = read_json(path)
+            body = message.get('body', '')
+            if message.get('type') == 'control' and message.get('kind') == 'info':
+                kicks[agent].extend((message, line) for line in control_lines(body, 'KICK'))
+    source = AGENTS[0] if kicks[AGENTS[0]] else AGENTS[1]
+    candidates = kicks[source]
+    if not candidates:
+        return None
+    message, line = candidates[-1]
+    if message.get('agent') != source or not isinstance(message.get('seq'), int):
+        return None
+    slot_pattern = '|'.join(re.escape(slot) for slot in AGENTS)
+    match = re.fullmatch(rf'KICK\s+run=([A-Za-z0-9][A-Za-z0-9_-]{{0,63}})\s+prob="((?:[^"\\\r\n]|\\.)+)"\s+exe=({slot_pattern})\s+rep=({slot_pattern})', line)
+    if not match or match.group(1) != run.name:
+        return None
+    return {'agent': message.get('agent'), 'seq': message.get('seq'),
+            'executor': match.group(3), 'reporter': match.group(4)}
+
+
+def ack_submission_error(run, agent, body):
+    lines = control_lines(body, 'ACK')
+    if not lines:
+        return None
+    peer = peer_of(agent)
+    for line in lines:
+        match = re.fullmatch(r'ACK\s+(\d+)', line)
+        if not match:
+            return 'ACK must name one existing peer message sequence.'
+        seq = int(match.group(1))
+        path = run / peer / f'{seq:08d}.json'
+        message = read_json(path)
+        if not message or message.get('agent') != peer or message.get('seq') != seq:
+            return 'ACK must reference an existing peer message.'
+    return None
+
+
+def startup_go_error(run, agent):
+    for peer in AGENTS:
+        session = read_json(run / f'{peer}.session.json')
+        heartbeat = read_json(run / f'{peer}.heartbeat.json')
+        if not session or session.get('active') is not True:
+            return 'Startup gate requires both agents to have active start/join sessions.'
+        if not heartbeat or not isinstance(heartbeat.get('time'), (int, float)):
+            return 'Startup gate requires fresh heartbeats from both agents.'
+        age = time.time() - heartbeat['time']
+        if age < 0 or age > PEER_STALE_AFTER:
+            return 'Startup gate requires fresh heartbeats from both agents.'
+    kick = startup_kick(run)
+    if not kick:
+        return 'Startup gate requires one valid KICK for this run.'
+    if agent != kick['reporter']:
+        return f'Only the KICK reporter ({kick["reporter"]}) can relay GO.'
+    peer = peer_of(kick['agent'])
+    peer_dir = run / peer
+    entries = sorted(peer_dir.glob('*.json')) if peer_dir.exists() else []
+    for path in entries:
+        message = read_json(path)
+        if message.get('type') == 'control' and message.get('kind') == 'info' and message.get('agent') == peer:
+            if any(re.fullmatch(rf'ACK\s+{kick["seq"]}', line) for line in control_lines(message.get('body', ''), 'ACK')):
+                return None
+    return 'Startup gate requires the KICK peer to ACK its exact sequence.'
+
+
+def is_go_request(body):
+    return any(re.match(r'^USR\s+"(?:[^"\\\r\n]|\\.)*"\s*=>\s*GO\b', line)
+               for line in control_lines(body, 'USR'))
+
+
+def valid_go_body(body):
+    lines = control_lines(body, 'USR')
+    return len(lines) == 1 and bool(re.fullmatch(r'USR\s+"(?:[^"\\\r\n]|\\.)+"\s*=>\s*GO', lines[0]))
+
+
+def require_startup_ready(state):
+    if not state.get('startup_ready', False):
+        sys.exit('Startup gate is closed; complete the KICK, peer ACK, and reporter GO first.')
+
+
+def pending_wake(run, agent, session_id):
+    """Return an unread-message or first stale-peer wake for the idle agent."""
+    idle = read_json(run / f'{agent}.idle.json')
+    peer = peer_of(agent)
+    entries = sorted((run / peer).glob('*.json')) if (run / peer).exists() else []
+    heartbeat = read_json(run / f'{peer}.heartbeat.json')
+    outage_path = run / f'{agent}.peer-stale.json'
+    outage = read_json(outage_path)
+    stale = heartbeat and time.time() - heartbeat['time'] > PEER_STALE_AFTER
+    if not stale:
+        outage_path.unlink(missing_ok=True)
+        outage = None
+    elif not outage or outage['heartbeat_time'] != heartbeat['time']:
+        outage = {'heartbeat_time': heartbeat['time'], 'notified': False}
+        atomic_json(outage_path, outage)
+    if not idle:
+        return None
+    progress = idle.get('wake_progress')
+    if progress and progress['session_id'] == session_id:
+        return progress
+    wake = {'idle_token': idle.get('token'), 'text_sent': False}
+    if entries and int(entries[-1].stem) > idle['after']:
+        return {**wake, 'source': 'message',
+                'text': f'{WAKE_PREFIX} run={run.name} peer={peer} after={idle["after"]}'}
+    if stale and not outage['notified']:
+        return {**wake, 'source': 'stale', 'heartbeat_time': heartbeat['time'],
+                'text': f'{WAKE_PREFIX} run={run.name} peer={peer} unavailable after={idle["after"]}'}
+    return None
+
+
+def wake_pane(pane, text, text_sent=False):
+    # Enter is a separate key press so the CLI does not read it as part of a paste.
+    if not text_sent:
+        sent = subprocess.run(['tmux', 'send-keys', '-t', pane, '-l', text])
+        if sent.returncode:
+            print(f'tmux send-keys to {pane} failed', file=sys.stderr)
+            return False, False
+    time.sleep(WAKE_ENTER_DELAY)
+    entered = subprocess.run(['tmux', 'send-keys', '-t', pane, 'Enter'])
+    if entered.returncode:
+        print(f'tmux send-keys to {pane} failed', file=sys.stderr)
+        return True, False
+    return True, True
+
+
+def acknowledge_wake(run, agent, session_id, wake, text_sent, delivered):
+    with locked(run):
+        session = read_json(run / f'{agent}.session.json')
+        if not session or not session['active'] or session['id'] != session_id:
+            return
+        idle_path = run / f'{agent}.idle.json'
+        idle = read_json(idle_path)
+        if idle and idle.get('token') == wake['idle_token']:
+            if delivered:
+                idle_path.unlink()
+            elif text_sent:
+                idle['wake_progress'] = {**wake, 'session_id': session_id, 'text_sent': True}
+                atomic_json(idle_path, idle)
+        if delivered and wake['source'] == 'stale':
+            outage_path = run / f'{agent}.peer-stale.json'
+            outage = read_json(outage_path)
+            if outage and outage['heartbeat_time'] == wake['heartbeat_time']:
+                outage['notified'] = True
+                atomic_json(outage_path, outage)
+
+
 def process_identity(pid):
     """Linux process start time prevents PID reuse from extending a heartbeat."""
     try:
@@ -184,7 +348,7 @@ def process_identity(pid):
         return None
 
 
-def watch_heartbeat(run, agent, pid, interval):
+def watch_heartbeat(run, agent, pid, interval, pane=None):
     identity = process_identity(pid)
     if identity is None:
         sys.exit('Session PID must identify a live local Linux CLI process.')
@@ -200,7 +364,12 @@ def watch_heartbeat(run, agent, pid, interval):
                 return
             atomic_json(run / f'{agent}.heartbeat.json',
                         {'time': time.time(), 'at': now(), 'session_pid': pid,
-                         'session_id': session['id']})
+                         'session_id': session['id'], 'tmux_pane': pane})
+            wake = pending_wake(run, agent, session['id']) if pane else None
+        # Never hold the run lock while typing into the pane.
+        if wake:
+            text_sent, delivered = wake_pane(pane, wake['text'], wake['text_sent'])
+            acknowledge_wake(run, agent, session['id'], wake, text_sent, delivered)
         time.sleep(interval)
 
 
@@ -233,11 +402,15 @@ def main():
     wait.add_argument('--after', type=int, default=0, help='Last processed sequence FROM the peer')
     wait.add_argument('--timeout', type=int, default=600)
     wait.add_argument('--interval', type=float, default=2)
-    wait.add_argument('--stale-after', type=int, default=120)
+    wait.add_argument('--stale-after', type=int, default=PEER_STALE_AFTER)
     hb = sub.add_parser('heartbeat')
     hb.add_argument('--agent', choices=AGENTS, required=True)
     hb.add_argument('--session-pid', type=int, help='Watch this local CLI PID (Linux /proc required)')
     hb.add_argument('--interval', type=float, default=HEARTBEAT_INTERVAL)
+    hb.add_argument('--tmux-pane', help='Own tmux pane ($TMUX_PANE) to wake when idle; needs --session-pid')
+    idle = sub.add_parser('idle', help='Mark this agent idle until the peer publishes after --after')
+    idle.add_argument('--agent', choices=AGENTS, required=True)
+    idle.add_argument('--after', type=int, required=True, help='Last processed sequence FROM the peer')
     check = sub.add_parser('check')
     check.add_argument('--agent', choices=AGENTS, required=True)
     begin_edit = sub.add_parser('begin-edit', help='Claim the single editor role until revise')
@@ -265,7 +438,7 @@ def main():
             else:
                 revision = snapshot(args.paths)
                 atomic_json(run / 'meta.json', {'paths': args.paths, 'approval_scope': args.approval_scope, 'helper_sha256': helper_fingerprint(), 'created': now()})
-                atomic_json(run / 'state.json', {'revision': revision, 'round': 1, 'consensus': 'PENDING', 'approval_scope': args.approval_scope})
+                atomic_json(run / 'state.json', {'revision': revision, 'round': 1, 'consensus': 'PENDING', 'approval_scope': args.approval_scope, 'startup_ready': False})
                 event(run, 'system', 'STARTED', f'run={args.run}')
         print(json.dumps(read_json(run / 'state.json')))
         return
@@ -273,8 +446,13 @@ def main():
     require_run(run)
     with locked(run):
         verify_helper(run, allow_legacy=args.cmd in ('start', 'join'))
+        # Any other own command means the agent is active again; a stale marker must not wake it later.
+        if args.cmd not in ('heartbeat', 'idle', 'start', 'join'):
+            (run / f'{args.agent}.idle.json').unlink(missing_ok=True)
     if args.cmd == 'event':
         with locked(run):
+            if args.kind in ('REVIEWING', 'BLOCKED', 'APPROVED'):
+                require_startup_ready(read_json(run / 'state.json'))
             if args.kind == 'FINISHED':
                 session = read_json(run / f'{args.agent}.session.json')
                 if session:
@@ -283,11 +461,26 @@ def main():
             event(run, args.agent, args.kind, args.details.replace('\n', ' ')[:160])
         return
 
+    if args.cmd == 'idle':
+        with locked(run):
+            atomic_json(run / f'{args.agent}.idle.json',
+                        {'after': args.after, 'token': uuid.uuid4().hex, 'at': now()})
+            event(run, args.agent, 'IDLE', f'after={args.after}')
+        return
+
     if args.cmd == 'heartbeat':
+        if args.tmux_pane and args.session_pid is None:
+            sys.exit('--tmux-pane requires --session-pid.')
+        if args.tmux_pane and not shutil.which('tmux'):
+            sys.exit('--tmux-pane requires tmux on PATH.')
+        # Fail at launch, not as a silent missed wake later.
+        if args.tmux_pane and subprocess.run(['tmux', 'display-message', '-p', '-t', args.tmux_pane, '#{pane_id}'],
+                                             capture_output=True).returncode:
+            sys.exit(f'tmux pane {args.tmux_pane} is not reachable from this shell.')
         if args.session_pid is not None:
             if not 0 < args.interval <= HEARTBEAT_INTERVAL:
                 sys.exit(f'Heartbeat interval must be > 0 and <= {HEARTBEAT_INTERVAL} seconds.')
-            watch_heartbeat(run, args.agent, args.session_pid, args.interval)
+            watch_heartbeat(run, args.agent, args.session_pid, args.interval, args.tmux_pane)
             return
         with locked(run):
             atomic_json(run / f'{args.agent}.heartbeat.json', {'time': time.time(), 'at': now()})
@@ -295,6 +488,14 @@ def main():
 
     if args.cmd in ('start', 'join'):
         with locked(run):
+            session_path = run / f'{args.agent}.session.json'
+            heartbeat = read_json(run / f'{args.agent}.heartbeat.json')
+            if (read_json(session_path) or {}).get('active') is True and heartbeat:
+                heartbeat_time = heartbeat.get('time')
+                if (isinstance(heartbeat_time, (int, float))
+                        and time.time() - heartbeat_time <= PEER_STALE_AFTER):
+                    sys.exit(f'Agent slot {args.agent} is already active.')
+            (run / f'{args.agent}.idle.json').unlink(missing_ok=True)
             atomic_json(run / f'{args.agent}.session.json', {'id': uuid.uuid4().hex, 'active': True})
             atomic_json(run / f'{args.agent}.heartbeat.json', {'time': time.time(), 'at': now()})
             event(run, args.agent, 'STARTED', f'run={args.run}' + (' joined' if args.cmd == 'join' else ''))
@@ -309,6 +510,7 @@ def main():
         body = Path(args.text_file).read_text(encoding='utf-8')
         with locked(run):
             state = read_json(run / 'state.json')
+            require_startup_ready(state)
             editor = state.get('editor')
             if editor and editor != args.agent:
                 sys.exit(f'{editor} is editing since {state["editing_since"]}; wait for its revise.')
@@ -341,6 +543,20 @@ def main():
         with locked(run):
             state = read_json(run / 'state.json')
             meta = read_json(run / 'meta.json')
+            if args.cmd == 'publish':
+                require_startup_ready(state)
+            startup_go = args.cmd == 'control' and args.kind == 'decision' and is_go_request(body)
+            if startup_go:
+                if not valid_go_body(body):
+                    sys.exit('GO must be relayed as USR "<verbatim user text>" => GO.')
+                if not state.get('startup_ready', False):
+                    error = startup_go_error(run, args.agent)
+                    if error:
+                        sys.exit(error)
+            if args.cmd == 'control' and args.kind == 'info':
+                error = ack_submission_error(run, args.agent, body)
+                if error:
+                    sys.exit(error)
             if args.cmd == 'publish' and state.get('editor'):
                 sys.exit(f'{state["editor"]} is editing; wait for its revise. Use control for other messages.')
             if args.cmd == 'publish' and (args.expected_revision != state['revision'] or args.expected_round != state['round']):
@@ -358,6 +574,9 @@ def main():
             else:
                 fields = {'type': 'control', 'kind': args.kind}
             msg = append_message(run, args.agent, state, fields, body, args.responding_to)
+            if startup_go:
+                state['startup_ready'] = True
+                atomic_json(run / 'state.json', state)
             event(run, args.agent, 'WROTE', f'seq={msg["seq"]} type={msg["type"]} verdict={msg.get("status", msg.get("kind"))} round={state["round"]} rev={actual[:12]}')
             if args.cmd == 'publish':
                 refresh_consensus(run, state, actual)
@@ -369,13 +588,12 @@ def main():
             state = read_json(run / 'state.json')
             actual = snapshot(read_json(run / 'meta.json')['paths'])
             refresh_consensus(run, state, actual)
-            if args.agent == 'codex':
-                atomic_json(run / 'status.json', state)
+            atomic_json(run / 'status.json', state)
             print(json.dumps(state))
         return
 
     if args.cmd == 'wait':
-        peer = 'claude' if args.agent == 'codex' else 'codex'
+        peer = peer_of(args.agent)
         begin = time.monotonic()
         with locked(run):
             event(run, args.agent, 'WAITING', f'for={peer} after={args.after}')
