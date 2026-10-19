@@ -23,6 +23,7 @@ Answer the user's research question with evidence, for the user's own case, unti
 - The project codebase is read-only. No installs, experiments, or code changes without explicit user permission (`USR`).
 - Both slots and their research subagents run read-only research tools themselves (web search and fetch, file search, `git log`), overriding review §2; tests, experiments, and snapshot edits stay with the executor.
 - Files in `research/<run-id>/` are owned as listed in section 2; never write a file you do not own.
+- The review skill's `reviews/<run-id>/proposed-changes.diff` and `reviews/<run-id>/TRANSCRIPT.html` live in `research/<run-id>/` instead, outside the `REPORT.md` snapshot.
 
 ## 0. Setup
 
@@ -76,7 +77,7 @@ Verify subagent findings yourself. Write them to your notes file, one `F` line e
 
 **3 Cross-check.** After both `NOTES`, read the peer's notes. Open the sources of findings rated `high`, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
 
-**4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. The peer checks it against both notes files and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the top findings, and the open questions, and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; deeper research returns to phase 2 for the named topic.
+**4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. The peer checks it against both notes files and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the top findings, the open questions, and the executor's proposed `REPORT.md` text (review §6 proposed changes), and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; "write the report" approves that proposed text, and later `REPORT.md` edits follow review §6 proposed changes. Deeper research returns to phase 2 for the named topic.
 
 **5 Report.** An authoring task (review §6): the executor runs `begin-edit`, writes `REPORT.md`, runs `revise`, and publishes its own review. `REPORT.md` contains:
 1. Question and case.
@@ -113,10 +114,10 @@ As review §8, with the phase and its color at the start of the first line:
 🟧 Next: <current action or waiting decision>
 ```
 
-Report at least once at each phase change. The user may intervene at any time (review §8).
+Every status report uses this template, at least once at each phase change. The user may intervene at any time (review §8).
 
 ## 5. Stop and logoff
 
 - Results: `REPORT_APPROVED`, `BLOCKED`, `WAITING_FOR_OTHER_AGENT` (review §10).
 - Report rounds are limited as in review §10.
-- After `REPORT_APPROVED`, the reporter gives the user the report path and a one-line recommendation, then follows the review logoff (review §9, §10).
+- After `REPORT_APPROVED`, the reporter gives the user the report path and a one-line recommendation, then follows the review transcript and logoff (review §9, §10); the transcript covers all phases.
