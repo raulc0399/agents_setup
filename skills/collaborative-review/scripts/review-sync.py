@@ -18,7 +18,8 @@ import uuid
 ROOT = Path('.reviews')
 AGENTS = ('agent-1', 'agent-2')
 DEFAULT_APPROVAL_SCOPE = 'implementation-ready'
-APPROVAL_RESULTS = {'technical-plan': 'PLAN_APPROVED', 'implementation-ready': 'READY_TO_EXECUTE'}
+APPROVAL_RESULTS = {'technical-plan': 'PLAN_APPROVED', 'implementation-ready': 'READY_TO_EXECUTE',
+                    'report-ready': 'REPORT_APPROVED'}
 CONTROL_KINDS = ('info', 'scope', 'stop', 'decision', 'logoff')
 HEARTBEAT_INTERVAL = 20
 PEER_STALE_AFTER = 120

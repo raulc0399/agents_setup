@@ -334,8 +334,14 @@ class ReviewSyncTests(unittest.TestCase):
         self.assertIn('Symlink snapshot path', result.stderr)
 
     def test_technical_plan_has_distinct_result(self):
+        self.assert_scope_result('technical-plan', 'PLAN_APPROVED')
+
+    def test_report_ready_has_distinct_result(self):
+        self.assert_scope_result('report-ready', 'REPORT_APPROVED')
+
+    def assert_scope_result(self, scope, expected):
         result = subprocess.run([sys.executable, str(HELPER), '--run', 'plan', 'init',
-                                 '--paths', 'PLAN.md', '--approval-scope', 'technical-plan'],
+                                 '--paths', 'PLAN.md', '--approval-scope', scope],
                                 cwd=self.root, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         reviewed = json.loads(result.stdout)
@@ -349,7 +355,7 @@ class ReviewSyncTests(unittest.TestCase):
                                     cwd=self.root, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
         state = json.loads((self.root / '.reviews/plan/state.json').read_text())
-        self.assertEqual(state['consensus'], 'PLAN_APPROVED')
+        self.assertEqual(state['consensus'], expected)
 
     def test_conflicting_approval_scope_rejected(self):
         result = subprocess.run([sys.executable, str(HELPER), '--run', 'test', 'init',
