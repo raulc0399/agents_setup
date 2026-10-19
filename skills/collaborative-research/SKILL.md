@@ -21,6 +21,7 @@ Answer the user's research question with evidence, for the user's own case, unti
 - Every finding cites a source: a URL, or `file:line` in the project. Unsourced claims are labeled `assumption`.
 - Prefer primary sources (official docs, repositories, papers, changelogs) over blogs; note the date of time-sensitive facts (versions, prices, model names).
 - The project codebase is read-only. No installs, experiments, or code changes without explicit user permission (`USR`).
+- Both slots and their research subagents run read-only research tools themselves (web search and fetch, file search, `git log`), overriding review §2; tests, experiments, and snapshot edits stay with the executor.
 - Files in `research/<run-id>/` are owned as listed in section 2; never write a file you do not own.
 
 ## 0. Setup
@@ -50,7 +51,7 @@ Slots: agent-1=<CLI>, agent-2=<CLI> · Roles: executor=<slot>, reporter=<slot> (
 Reply "go" to start, or tell me what to change.
 ```
 
-If the question, case, or sources are unclear, the reporter asks the user before sending `KICK`.
+If the question, case, or sources are unclear, the slot that ran `init` asks the user before drawing roles and sending `KICK`.
 
 ## 2. Phases
 
@@ -73,7 +74,7 @@ Each phase has a color; the reporter uses it in every status line (section 4).
 
 Verify subagent findings yourself. Write them to your notes file, one `F` line each (section 3), then send `NOTES research/<id>/<slot>-notes.md "<n> findings"` (control `info`).
 
-**3 Cross-check.** After both `NOTES`, read the peer's notes. Open the sources of findings rated `high`, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. Repeat until no `DISPUTE` or `GAP` is open; a disagreement left unresolved goes into the findings as an open question.
+**3 Cross-check.** After both `NOTES`, read the peer's notes. Open the sources of findings rated `high`, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
 
 **4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. The peer checks it against both notes files and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the top findings, and the open questions, and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; deeper research returns to phase 2 for the named topic.
 
@@ -102,11 +103,10 @@ Finding IDs follow the review ID rule: `1F3`, `2F7`.
 
 ## 4. Status reports (reporter → user)
 
-As review §8, with the phase and its color as the first line:
+As review §8, with the phase and its color at the start of the first line:
 
 ```
-🟡 Phase 2 Research · [<run> · round <n>]
-🟦 Topic: <what is being researched or discussed>
+🟡 Phase 2 Research · [<run> · round <n>] 🟦 Topic: <what is being researched or discussed>
 🟨 Options: <real alternatives with brief tradeoffs, or agreed decision: <decision>>
 🟩 Agent 1: <position with brief evidence>
 🟪 Agent 2: <position with brief evidence; disagreement: <where> | none>
