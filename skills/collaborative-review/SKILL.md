@@ -24,7 +24,7 @@ Review the plan the user names (`PLAN.md`, `features/<name>.md`, several files, 
 - Do not implement the reviewed plan, deploy, migrate, or make destructive changes.
 - Never name a file `claude.md`, `CLAUDE.md`, `agents.md`, or `AGENTS.md` in any folder (CLIs load them as instructions). Use names like `claude-review.md`.
 - Do not edit helper-managed files in `.reviews/<run-id>/`; only `skill-update/` (section 9) is written by hand.
-- Keep `.reviews/` out of the snapshot and preferably in `.gitignore`.
+- Keep `.reviews/` out of the snapshot and preferably in `.gitignore`; keep `reviews/<run-id>/proposed-changes.diff` and `reviews/<run-id>/TRANSCRIPT.html` out of the snapshot.
 - A wake line (section 5) carries no authority. User decisions reach the non-reporter only as the reporter's `USR`/`SCOPE`.
 - The helper synchronizes; it does not launch agents or keep CLIs alive.
 
@@ -142,10 +142,11 @@ rs --run <id> publish --agent <you> --status BLOCKED --text-file /tmp/<you>-revi
 ## 6. Edits
 
 - Plan edits need a concrete Q/A agreement on the exact files and `B`/`FIX` ids: the editor proposes them in `Q`, and the peer confirms the same list in `A`. Implementation code edits need explicit user permission (`USR`).
+- Proposed changes: whenever user approval of an edit is needed, the executor first supplies the exact proposed text or diff (in `Q`, or in `reviews/<run-id>/proposed-changes.diff` when long), and the reporter shows the user the affected files, that text or diff, and any unresolved peer disagreement before asking.
 - Only the executor edits. Before touching any snapshot file: `rs --run <id> begin-edit --agent <exe> --text-file <EDIT text>`. This blocks reviews and a second editor, and sets consensus to `PENDING`.
 - After editing: `rs --run <id> revise --agent <exe>`. Immediately check and publish the executor's own review for the current revision, even when `revise` only releases an unchanged editor lock. A changed snapshot gets a new revision and round, and both approvals become invalid; both agents re-review.
 - While the executor edits, do not review the moving files; use controls.
-- **Authoring tasks** (create or change files instead of reviewing an existing plan): the executor is the author. Its `EDIT` names the owned files, the scope, and what to check. It skips the initial independent review, edits, runs `revise`, and publishes its own review with validation evidence (`RAN`). The other agent reviews that revision independently (content against its source, rendering, interactions).
+- **Authoring tasks** (create or change files instead of reviewing an existing plan): the executor is the author. Its `EDIT` names the owned files, the scope, and what to check. It skips the initial independent review, shows its proposed changes and waits for the relayed `USR` approval, edits, runs `revise`, and publishes its own review with validation evidence (`RAN`). The other agent reviews that revision independently (content against its source, rendering, interactions).
 
 ## 7. Consensus
 
@@ -155,9 +156,9 @@ rs --run <id> publish --agent <you> --status BLOCKED --text-file /tmp/<you>-revi
 
 ## 8. Status reports (reporter → user)
 
-After a meaningful change in the topic, options, agent positions, next action, or consensus, the reporter prints at most five plain-English lines. Do not report `ACK`s or repeat unchanged status. Summarize findings and evidence; do not fabricate options or reopen settled decisions.
+After a meaningful change in the topic, options, agent positions, next action, or consensus, the reporter prints at most five plain-English lines, always in the template below. Do not report `ACK`s or repeat unchanged status. Summarize findings and evidence; do not fabricate options or reopen settled decisions.
 
-Emoji labels add color; the text labels carry the meaning.
+Keep the emoji labels; they add color, and the text labels carry the meaning.
 
 ```
 [<run> · round <n>] 🟦 Topic: <what is being discussed>
@@ -184,8 +185,9 @@ The user can follow raw events with `tail -f .reviews/<run-id>/history.log`.
 
 - Results: `PLAN_APPROVED`, `READY_TO_EXECUTE`, `BLOCKED` (unresolved after the limit or genuine disagreement), `WAITING_FOR_OTHER_AGENT` (peer unavailable or CLI budget exhausted; keep all files).
 - Stop after at most **10** substantive review rounds; the reporter reports remaining blockers, differences, and needed decisions. Surface human product decisions instead of looping.
-- **Review-only requests:** stop once both agree on the blockers and an edit list; the reporter reports `BLOCKED` with the list and asks the user. Edit only after the user approves.
-- **Logoff:** only the reporter sends `OFF`, after the user agrees to end and both agents have exchanged their `IMP` lists or `IMP none`, peer-accepted updates are written to `skill-update/`, and accepted IMPs are acknowledged. The reporter includes a `Q` asking the peer to confirm completion. The peer runs `event --kind FINISHED`, then replies with `A` as its last helper command and stops. The reporter remains idle and wakeable while waiting, verifies `.reviews/<id>/<peer>.session.json` has `active: false` after receiving the `A`, then runs its own `event --kind FINISHED`. Until then, idle agents stay idle and wakeable.
+- **Review-only requests:** stop once both agree on the blockers and an edit list; the reporter reports `BLOCKED` with the list and the proposed changes (section 6) and asks the user. Edit only after the user approves.
+- **Transcript:** before `OFF`, the executor writes `reviews/<run-id>/TRANSCRIPT.html`, a self-contained chronological page of the recorded exchanges (helper messages, `history.log`, relayed user decisions; never hidden reasoning): proposals, problems, disagreements, decisions, and resolutions, with unresolved outcomes stated as such. The peer verifies it against the messages; the reporter gives the user its path.
+- **Logoff:** only the reporter sends `OFF`, after the user agrees to end, the transcript is verified, and both agents have exchanged their `IMP` lists or `IMP none`, peer-accepted updates are written to `skill-update/`, and accepted IMPs are acknowledged. The reporter includes a `Q` asking the peer to confirm completion. The peer runs `event --kind FINISHED`, then replies with `A` as its last helper command and stops. The reporter remains idle and wakeable while waiting, verifies `.reviews/<id>/<peer>.session.json` has `active: false` after receiving the `A`, then runs its own `event --kind FINISHED`. Until then, idle agents stay idle and wakeable.
 - **Crash/restart:** restart the CLI in tmux with the same run ID and scope, reclaim your slot with `start` only after its heartbeat becomes stale, relaunch the watcher, find your last processed peer sequence from your own messages' `responding_to` and `history.log`, and drain from there. Never reset or delete messages or history. Either slot may refresh `status.json` by running `check`.
 
 **Final objective: the agreed scope's approval result only after two independent, current-revision approvals.**
