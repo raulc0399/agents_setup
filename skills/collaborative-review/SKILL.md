@@ -133,6 +133,7 @@ rs --run <id> publish --agent <you> --status BLOCKED --text-file /tmp/<you>-revi
 
 - At the start of every turn, including a user question, wake, or task notification, drain unread helper messages from the saved peer cursor before answering or working; this clears a stale idle marker. Before ending a waiting turn, drain again and run `idle` with the latest peer cursor, remain wakeable, and do not send `FINISHED` except during authorized shutdown. This applies to short direct answers too. Before a run exists, finish setup/join first, then drain; do not issue helper commands recursively after idling.
 - Messages are immutable and sequenced. Remember the last **peer** sequence you processed and read the next unread one with `rs --run <id> wait --agent <you> --after <N> --timeout 0`. Repeat until exit code `2`, which means nothing unread (not a failure). Exit `3` means the peer heartbeat is stale: possibly disconnected, never `BLOCKED` or `APPROVED`.
+- Sequence numbers are per agent/slot; `--after` is the last peer sequence processed, never your own sequence.
 - On exit `3`, both agents run `idle` and remain wakeable; the reporter reports `WAITING_FOR_OTHER_AGENT` to the user. Neither agent sends `FINISHED` unless the user authorized `OFF`.
 - Controls (`type: control`) are not verdicts; mention a received control's sequence in your next substantive message.
 - When you have nothing to do: drain unread messages, run `rs --run <id> idle --agent <you> --after <N>`, and end your turn. Do not loop on long waits or `tail -f`.
@@ -143,6 +144,7 @@ rs --run <id> publish --agent <you> --status BLOCKED --text-file /tmp/<you>-revi
 
 - Plan edits need a concrete Q/A agreement on the exact files and `B`/`FIX` ids: the editor proposes them in `Q`, and the peer confirms the same list in `A`. Implementation code edits need explicit user permission (`USR`).
 - Proposed changes: whenever user approval of an edit is needed, the executor first supplies the exact proposed text or diff (in `Q`, or in `reviews/<run-id>/proposed-changes.diff` when long), and the reporter shows the user the affected files, that text or diff, and any unresolved peer disagreement before asking.
+- Store reviewable proposed text and diffs in shared `reviews/<run-id>/` (for example `proposed-changes.diff`), never in `/tmp`, because separate containers may not share it. Temporary helper `--text-file` input may still use `/tmp`.
 - Only the executor edits. Before touching any snapshot file: `rs --run <id> begin-edit --agent <exe> --text-file <EDIT text>`. This blocks reviews and a second editor, and sets consensus to `PENDING`.
 - After editing: `rs --run <id> revise --agent <exe>`. Immediately check and publish the executor's own review for the current revision, even when `revise` only releases an unchanged editor lock. A changed snapshot gets a new revision and round, and both approvals become invalid; both agents re-review.
 - While the executor edits, do not review the moving files; use controls.
