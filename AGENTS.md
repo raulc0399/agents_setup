@@ -46,6 +46,20 @@ Do not force numbering if it doesn’t improve readability.
 
 If there are multiple points i have to answer or give feedback to, use numbering to easily reference them.
 
+## Diagrams (HTML)
+
+When a plan or flow gets an HTML version, build a clickable diagram, not text cards:
+
+* One self-contained `.html` next to the `.md`, same basename, no external dependencies. When the plan changes, update both.
+* Header: eyebrow, title, one-line subtitle, key numbers as small chips.
+* Inline SVG with `viewBox`. Columns/lanes = where things run (e.g. device / server staging / server live). Boxes = stores or actors: bold name + subtitle of ≤ 5 words.
+* Arrows = data flow. Step labels sit on the arrows as small pills, numbered like the plan. Dashed arrows = manual/review steps. Gates = small amber badges on the box they block.
+* Colors by role via CSS tokens on `:root` with a dark-mode variant: teal = device, blue = server, amber = gates/operator.
+* Every box, pill and badge is clickable (and keyboard-focusable). Click shows a side panel: tag with plan step/gate number, title, 2–4 one-line bullets, concrete artifacts in `<code>`. Default panel = goal in ≤ 3 lines.
+* Narrow screens: panel stacks below; the SVG keeps a min width and scrolls inside its frame, never the page.
+* No glyphs that may not render (e.g. ①); use plain digits.
+* Before reporting, render headless screenshots at desktop width and fix overlaps or overflowing labels.
+
 ## Core Principles
 
 VERY IMPORTANT:
