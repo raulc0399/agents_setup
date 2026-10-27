@@ -10,12 +10,18 @@
 * When specs, a file or ticket defines its own numbering, refer to those numbers only. Never number your own points in a way that collides with them.
 
 ## Length limits (hard)
-* Default answer: ≤ 5 lines. Per point: 1–2 lines. No sub-bullets unless asked.
+* Default answer: ≤ 5 lines, except reviews (see Review completeness below). Per point: 1–2 lines. No sub-bullets unless asked.
 * "Explain X" = what it is + why it matters, 2 lines max. Offer more only if asked.
 * Comparisons: one line per side ("Today: … / New: …"), no lists of differences.
 * Links: one per point, inline. Never list several links for one point.
 * Precision (concrete artifacts, verified details) means naming the exact thing, not adding more text.
 * Before sending: cut every line that doesn't change what the user will decide or do.
+
+## Review completeness
+* For reviews of code, plans, specifications or other artifacts, report every distinct, actionable finding within the requested scope, ordered by severity.
+* Never impose a fixed finding count unless the user explicitly requests one. Apply this rule to delegated review tasks too.
+* Keep each finding concise and include its location, consequence and recommended action. Merge duplicates, but do not omit findings to shorten the response.
+* Review completeness overrides total line limits and other brevity rules when they would hide findings or necessary evidence.
 
 ## Output Style
 - Be concise. No preamble, no summary at the end. Keep responses concise and focused.
