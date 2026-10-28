@@ -235,6 +235,22 @@ class ReviewSyncTests(unittest.TestCase):
         self.assertEqual(result['kind'], 'decision')
         self.assertTrue(self.state()['startup_ready'])
 
+    def test_recovery_wait_ignores_long_stale_peer(self):
+        self.start_both_agents()
+        heartbeat_path = self.root / '.reviews/test/agent-2.heartbeat.json'
+        heartbeat = json.loads(heartbeat_path.read_text())
+        heartbeat['time'] = time.time() - 7200
+        heartbeat_path.write_text(json.dumps(heartbeat))
+        wait = [sys.executable, str(HELPER), '--run', 'test', 'wait', '--agent', 'agent-1',
+                '--after', '0', '--timeout', '1', '--interval', '0.5']
+        stale = subprocess.run(wait, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(stale.returncode, 3)
+        recovery = subprocess.run([*wait, '--ignore-stale'], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(recovery.returncode, 2)
+        self.send_control('agent-2', 'info', 'Q 2RD1 "ready slot=agent-2 cli=codex"')
+        resumed = subprocess.run([*wait, '--ignore-stale'], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+
     def test_staggered_readiness_message_wakes_first_agent(self):
         self.call('start', '--agent', 'agent-1')
         self.send_control('agent-1', 'info', 'Q 1RD1 "ready slot=agent-1 cli=codex"')
@@ -577,6 +593,11 @@ import json
 import os
 import sys
 import time
+if len(sys.argv) > 1 and sys.argv[1] == 'display-message' and '#{session_activity}' in sys.argv:
+    activity = os.environ.get('TMUX_ACTIVITY_FILE')
+    if activity and os.path.exists(activity):
+        print(open(activity, encoding='utf-8').read().strip())
+    raise SystemExit(0)
 if len(sys.argv) < 2 or sys.argv[1] != 'send-keys':
     raise SystemExit(0)
 with open(os.environ['TMUX_LOG'], 'a', encoding='utf-8') as log:
@@ -615,6 +636,42 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.assertEqual(self.tmux_calls(), ['send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 after=0',
                                              'send-keys -t %9 Enter'])
         self.assertFalse((self.root / '.reviews/test/agent-1.idle.json').exists())
+
+    def test_guarded_wake_waits_until_user_stops_typing(self):
+        activity = self.root / 'activity'
+        activity.write_text(str(int(time.time()) + 3600))
+        env = {**self.stub_tmux_env(), 'TMUX_ACTIVITY_FILE': str(activity)}
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', env=env)
+        self.call('idle', '--agent', 'agent-1', '--after', '0')
+        self.control('info')
+        time.sleep(0.5)
+        self.assertEqual(self.tmux_calls(), [])
+        self.wait_for_idle_marker(True)
+        activity.write_text(str(int(time.time()) - 60))
+        deadline = time.monotonic() + 3
+        while len(self.tmux_calls()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.tmux_calls(), ['send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 after=0',
+                                             'send-keys -t %9 Enter'])
+        self.wait_for_idle_marker(False)
+
+    def test_quiet_secs_must_be_finite_and_nonnegative(self):
+        self.call('start', '--agent', 'agent-1')
+        for value in ('-1', 'inf', 'nan'):
+            with self.subTest(value=value):
+                result = subprocess.run([sys.executable, str(HELPER), '--run', 'test', 'heartbeat',
+                                         '--agent', 'agent-1', '--quiet-secs', value],
+                                        cwd=self.root, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('--quiet-secs', result.stderr)
+
+    def test_wake_mode_none_never_types(self):
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', '--wake-mode', 'none', env=self.stub_tmux_env())
+        self.call('idle', '--agent', 'agent-1', '--after', '0')
+        self.control('info')
+        time.sleep(0.5)
+        self.assertEqual(self.tmux_calls(), [])
+        self.wait_for_idle_marker(True)
 
     def test_failed_text_send_retries_before_enter(self):
         env = self.stub_tmux_env('[1, 0, 0]')

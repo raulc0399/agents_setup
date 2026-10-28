@@ -25,6 +25,8 @@ HEARTBEAT_INTERVAL = 20
 PEER_STALE_AFTER = 120
 WAKE_PREFIX = 'collaborative-review wake:'
 WAKE_ENTER_DELAY = 0.5
+WAKE_MODES = ('guarded', 'pane', 'none')
+WAKE_QUIET_SECS = 8
 
 
 def now():
@@ -304,6 +306,17 @@ def pending_wake(run, agent, session_id):
     return None
 
 
+def user_typing(pane, quiet_secs):
+    """True while a client typed into the pane's session within quiet_secs (tmux session_activity)."""
+    shown = subprocess.run(['tmux', 'display-message', '-p', '-t', pane, '#{session_activity}'],
+                           capture_output=True, text=True)
+    try:
+        return time.time() - int(shown.stdout.strip()) < quiet_secs
+    except ValueError:
+        # Unknown activity must not suppress wakes forever.
+        return False
+
+
 def wake_pane(pane, text, text_sent=False):
     # Enter is a separate key press so the CLI does not read it as part of a paste.
     if not text_sent:
@@ -349,7 +362,7 @@ def process_identity(pid):
         return None
 
 
-def watch_heartbeat(run, agent, pid, interval, pane=None):
+def watch_heartbeat(run, agent, pid, interval, pane=None, wake_mode='guarded', quiet_secs=WAKE_QUIET_SECS):
     identity = process_identity(pid)
     if identity is None:
         sys.exit('Session PID must identify a live local Linux CLI process.')
@@ -366,7 +379,10 @@ def watch_heartbeat(run, agent, pid, interval, pane=None):
             atomic_json(run / f'{agent}.heartbeat.json',
                         {'time': time.time(), 'at': now(), 'session_pid': pid,
                          'session_id': session['id'], 'tmux_pane': pane})
-            wake = pending_wake(run, agent, session['id']) if pane else None
+            wake = pending_wake(run, agent, session['id']) if pane and wake_mode != 'none' else None
+        # Defer the wake text and any Enter retry while the user types; the next interval retries it.
+        if wake and wake_mode == 'guarded' and user_typing(pane, quiet_secs):
+            wake = None
         # Never hold the run lock while typing into the pane.
         if wake:
             text_sent, delivered = wake_pane(pane, wake['text'], wake['text_sent'])
@@ -404,11 +420,18 @@ def main():
     wait.add_argument('--timeout', type=int, default=600)
     wait.add_argument('--interval', type=float, default=2)
     wait.add_argument('--stale-after', type=int, default=PEER_STALE_AFTER)
+    wait.add_argument('--ignore-stale', action='store_true',
+                      help='Do not exit 3 on a stale peer; wait for a message or the timeout (recovery wait)')
     hb = sub.add_parser('heartbeat')
     hb.add_argument('--agent', choices=AGENTS, required=True)
     hb.add_argument('--session-pid', type=int, help='Watch this local CLI PID (Linux /proc required)')
     hb.add_argument('--interval', type=float, default=HEARTBEAT_INTERVAL)
     hb.add_argument('--tmux-pane', help='Own tmux pane ($TMUX_PANE) to wake when idle; needs --session-pid')
+    hb.add_argument('--wake-mode', choices=WAKE_MODES, default='guarded',
+                    help='guarded: type the wake only after the user stops typing; pane: type at once; '
+                         'none: never type (the agent waits with a background wait instead)')
+    hb.add_argument('--quiet-secs', type=float, default=WAKE_QUIET_SECS,
+                    help='Seconds without user keystrokes before a guarded wake is typed')
     idle = sub.add_parser('idle', help='Mark this agent idle until the peer publishes after --after')
     idle.add_argument('--agent', choices=AGENTS, required=True)
     idle.add_argument('--after', type=int, required=True, help='Last processed sequence FROM the peer')
@@ -472,6 +495,8 @@ def main():
     if args.cmd == 'heartbeat':
         if args.tmux_pane and args.session_pid is None:
             sys.exit('--tmux-pane requires --session-pid.')
+        if not 0 <= args.quiet_secs < float('inf'):
+            sys.exit('--quiet-secs must be a finite number >= 0.')
         if args.tmux_pane and not shutil.which('tmux'):
             sys.exit('--tmux-pane requires tmux on PATH.')
         # Fail at launch, not as a silent missed wake later.
@@ -481,7 +506,8 @@ def main():
         if args.session_pid is not None:
             if not 0 < args.interval <= HEARTBEAT_INTERVAL:
                 sys.exit(f'Heartbeat interval must be > 0 and <= {HEARTBEAT_INTERVAL} seconds.')
-            watch_heartbeat(run, args.agent, args.session_pid, args.interval, args.tmux_pane)
+            watch_heartbeat(run, args.agent, args.session_pid, args.interval, args.tmux_pane,
+                            args.wake_mode, args.quiet_secs)
             return
         with locked(run):
             atomic_json(run / f'{args.agent}.heartbeat.json', {'time': time.time(), 'at': now()})
@@ -609,7 +635,7 @@ def main():
                     print(json.dumps(message))
                     return
                 heartbeat = read_json(run / f'{peer}.heartbeat.json')
-                if heartbeat and time.time()-heartbeat['time'] > args.stale_after:
+                if not args.ignore_stale and heartbeat and time.time()-heartbeat['time'] > args.stale_after:
                     print(json.dumps({'result': 'PEER_STALE', 'peer': peer}), file=sys.stderr)
                     sys.exit(3)
                 atomic_json(run / f'{args.agent}.heartbeat.json', {'time': time.time(), 'at': now()})
