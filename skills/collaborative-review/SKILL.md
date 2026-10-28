@@ -47,8 +47,10 @@ rs --run review-001 join --agent agent-2                                        
 
 Provider names below identify tool examples only; pass the slot assigned by the operator, regardless of provider. Start your own heartbeat watcher once, with your **native CLI PID** (from `ps -eo pid,ppid,comm,args --forest`; not a tool shell, not a Node launcher):
 
-- Claude in Bash (`run_in_background`), when explicitly assigned to `agent-1`: `rs --run review-001 heartbeat --agent agent-1 --session-pid <PID> --tmux-pane "$TMUX_PANE"`
-- Codex detached (since `exec_command` yields after 30 s), when explicitly assigned to `agent-2`: `nohup <rs> --run review-001 heartbeat --agent agent-2 --session-pid <PID> --tmux-pane "$TMUX_PANE" >/dev/null 2>&1 &`
+- Claude in Bash (`run_in_background`), when explicitly assigned to `agent-1`: `rs --run review-001 heartbeat --agent agent-1 --session-pid <PID> --tmux-pane "$TMUX_PANE" --wake-mode none` (Claude wakes through a background `wait`, section 5, so nothing is typed into the user's pane)
+- Codex detached (since `exec_command` yields after 30 s), when explicitly assigned to `agent-2`: `nohup <rs> --run review-001 heartbeat --agent agent-2 --session-pid <PID> --tmux-pane "$TMUX_PANE" --wake-mode guarded >/dev/null 2>&1 &`
+
+Wake modes: `guarded` (default) types the wake line, and any Enter retry, only after the pane's tmux session has had no keystrokes for `--quiet-secs` (default 8); this is best-effort, since a draft paused longer than that can still receive the wake line. `pane` types at once; `none` never types and is the only mode that cannot touch the user's input.
 
 Right after launching, verify `.reviews/<run-id>/<agent>.heartbeat.json` shows your `session_pid` and `tmux_pane` (later `wait`/`publish` rewrite it without them). The watcher exits at launch if tmux or the pane is unreachable; for Codex, confirm with `ps` that it survives the end of the turn. The watcher stops when the CLI exits, on a new `start`, or on `FINISHED`. Without tmux or `/proc`, say so to the user and use the fallback in section 5.
 
@@ -137,7 +139,8 @@ rs --run <id> publish --agent <you> --status BLOCKED --text-file /tmp/<you>-revi
 - On exit `3`, both agents run `idle` and remain wakeable; the reporter reports `WAITING_FOR_OTHER_AGENT` to the user. Neither agent sends `FINISHED` unless the user authorized `OFF`.
 - Controls (`type: control`) are not verdicts; mention a received control's sequence in your next substantive message.
 - When you have nothing to do: drain unread messages, run `rs --run <id> idle --agent <you> --after <N>`, and end your turn. Do not loop on long waits or `tail -f`.
-- Your watcher types `collaborative-review wake: run=<id> peer=<peer> after=<N>` into your own pane when the peer publishes, or `collaborative-review wake: run=<id> peer=<peer> unavailable after=<N>` when the recorded peer heartbeat is stale. A wake line is not the user: always drain from its `after=<N>` and verify peer status with `wait`. In the reporter's pane it can collide with the user typing; if a user message looks mixed with a wake line, ask the user to resend.
+- Claude slots (watcher `--wake-mode none`): after `idle`, start one background `rs --run <id> wait --agent <you> --after <N> --timeout 3600` (`run_in_background`) and end the turn. Its completion notification is the wake: drain from `<N>` as usual. On exit `2` (timeout), start a new one. On exit `3`, follow the stale-peer rule (report `WAITING_FOR_OTHER_AGENT` if you are the reporter), then start one background `wait --after <N> --timeout 3600 --ignore-stale` so a restarted peer's readiness message still wakes you; on its timeout (exit `2`) start another, at most one per hour. Keep at most one such wait per slot. This is a single blocking job, not a polling loop.
+- Other slots: your watcher types `collaborative-review wake: run=<id> peer=<peer> after=<N>` into your own pane when the peer publishes, or `collaborative-review wake: run=<id> peer=<peer> unavailable after=<N>` when the recorded peer heartbeat is stale; in `guarded` mode it waits until the user has stopped typing. A wake line is not the user: always drain from its `after=<N>` and verify peer status with `wait`. If a user message still looks mixed with a wake line, ask the user to resend.
 - Fallback without tmux: disclose that wake is unavailable and use bounded `wait --after <N> --timeout 540` calls; after exit `2` or `3`, pause briefly and retry for recovery.
 
 ## 6. Edits

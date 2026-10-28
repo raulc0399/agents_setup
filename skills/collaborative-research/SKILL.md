@@ -22,6 +22,7 @@ Answer the user's research question with evidence, for the user's own case, unti
 - Prefer primary sources (official docs, repositories, papers, changelogs) over blogs; note the date of time-sensitive facts (versions, prices, model names).
 - The project codebase is read-only. No installs, experiments, or code changes without explicit user permission (`USR`).
 - Both slots and their research subagents run read-only research tools themselves (web search and fetch, file search, `git log`), overriding review §2; tests, experiments, and snapshot edits stay with the executor.
+- Keep the agent's own context small: delegate research, source verification, cross-checks, and findings/report reviews to subagents, which return only `F`/verdict lines; the parent owns every verdict. Store long subagent results in a scratch file, not in messages.
 - Files in `research/<run-id>/` are owned as listed in section 2; never write a file you do not own.
 - The review skill's `reviews/<run-id>/proposed-changes.diff` and `reviews/<run-id>/TRANSCRIPT.html` live in `research/<run-id>/` instead, outside the `REPORT.md` snapshot.
 
@@ -48,11 +49,13 @@ Run: review-001 · Scope: report-ready · Report: research/review-001/REPORT.md
 Question: <one line>
 Case: <the user's context: project, constraints, goals>
 Sources: <codebase paths | web | both> · Out of scope: <…>
+Exclusions: <criteria that may rule options out (licence, cost, vendor data terms, hardware, maturity) | none: tradeoffs only>
+Deliverable: <first output the user needs, if the question has one> · Save copy to: <path | none>
 Slots: agent-1=<CLI>, agent-2=<CLI> · Roles: executor=<slot>, reporter=<slot> (random)
 Reply "go" to start, or tell me what to change.
 ```
 
-If the question, case, or sources are unclear, the slot that ran `init` asks the user before drawing roles and sending `KICK`.
+If the question, case, sources, or exclusions are unclear, the slot that ran `init` asks the user before drawing roles and sending `KICK`. Settling exclusions up front avoids re-running research after the user lifts a constraint.
 
 ## 2. Phases
 
@@ -73,11 +76,13 @@ Each phase has a color; the reporter uses it in every status line (section 4).
 - fit: the user's codebase and constraints, what integrates and what conflicts;
 - risks: licensing, security, cost, lock-in, maintenance.
 
-Verify subagent findings yourself. Write them to your notes file, one `F` line each (section 3), then send `NOTES research/<id>/<slot>-notes.md "<n> findings"` (control `info`).
+Verify subagent findings at the source before writing them to your notes; a verification subagent may do this, and you own the verdict and spot-check. Mark each `F` line `[v]` (source opened and supports the claim), `[u]` (subagent-cited, not opened) or `[p]` (proposal or inference). The executor merges `[u]` lines only as labelled candidates. Write them to your notes file, one `F` line each (section 3), then send `NOTES research/<id>/<slot>-notes.md "<n> findings"` (control `info`).
 
-**3 Cross-check.** After both `NOTES`, read the peer's notes. Open the sources of findings rated `high`, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
+Give every subagent brief the current decision ledger (section 2a), so subagents do not re-apply a constraint the user has lifted.
 
-**4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. The peer checks it against both notes files and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the top findings, the open questions, and the executor's proposed `REPORT.md` text (review §6 proposed changes), and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; "write the report" approves that proposed text, and later `REPORT.md` edits follow review §6 proposed changes. Deeper research returns to phase 2 for the named topic.
+**3 Cross-check.** After both `NOTES`, read the peer's notes. Open the sources of findings rated `high`, directly or through a verification subagent, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
+
+**4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. The peer checks it against both notes files and the decision ledger (missing ids, contradicted revisions, re-applied exclusions, unlabelled `[u]`/inference claims) and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the top findings, the open questions, and the executor's proposed `REPORT.md` text (review §6 proposed changes), and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; "write the report" approves that proposed text, and later `REPORT.md` edits follow review §6 proposed changes. Deeper research returns to phase 2 for the named topic.
 
 **5 Report.** An authoring task (review §6): the executor runs `begin-edit`, writes `REPORT.md`, runs `revise`, and publishes its own review. `REPORT.md` contains:
 1. Question and case.
@@ -87,7 +92,17 @@ Verify subagent findings yourself. Write them to your notes file, one `F` line e
 5. Recommendation: what to apply here, alternatives with tradeoffs, next steps.
 6. Open questions and sources.
 
-**6 Approval.** The peer reviews `REPORT.md` against `FINDINGS.md` and the sources (review §4, §7). A blocker is a wrong or unsourced claim, a finding missing that changes the recommendation, or a recommendation that ignores the case.
+**6 Approval.** The peer reviews `REPORT.md` against `FINDINGS.md` and the sources (review §4, §7). A blocker is a wrong or unsourced claim, a finding missing that changes the recommendation, or a recommendation that ignores the case. After the current revision's `REPORT_APPROVED`, the executor copies `REPORT.md` unchanged to the user-authorized "Save copy to" path, if any; links relative to `research/<id>/` are reported to the user, not silently rewritten.
+
+### 2a. Decision ledger
+
+The reporter keeps `research/<id>/DECISIONS.md` (reporter-owned, outside the snapshot): one line per relayed `USR`/`SCOPE` with its sequence, verbatim text and resulting rule, latest first. It records only explicit relayed user decisions. A later decision that widens or lifts a constraint names the decisions it supersedes, and each agent re-checks its own notes for findings framed under the old rule (`F` revisions, not new research, unless the user asks to reopen). Agents and subagents read this file instead of searching messages.
+
+When research reopens after `REPORT_APPROVED` ("dig deeper"), the approved report covers only its prior scope. New notes and proposals stay separate until a new exact-text `USR` and matching approvals of the new revision; old consensus is never presented as approval of the deeper research.
+
+### 2b. Context handoff
+
+When an agent's context runs low, or the user asks for a restart, that agent writes `research/<id>/<slot>-handoff.md`: helper path, run ID, slot and role, last processed peer sequence and own sequence, the decision ledger state, phase and what is done or pending, open `Q`/`DISPUTE` items, owned files, and the restart steps. It then idles without `FINISHED`. The new session reads the handoff first, reclaims the slot after the old heartbeat goes stale (review §10 crash/restart), sends a readiness `Q`, and drains from the recorded cursor. The reporter tells the user the restart command.
 
 ## 3. AASM additions
 
