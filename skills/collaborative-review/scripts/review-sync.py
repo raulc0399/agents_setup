@@ -134,6 +134,14 @@ def verdict(message):
     return (message.get('status') or message.get('verdict') or '').upper()
 
 
+def touch_heartbeat(run, agent):
+    """Refresh the agent's heartbeat unless a watcher owns it; only the watcher can tell the CLI is alive."""
+    path = run / f'{agent}.heartbeat.json'
+    if (read_json(path) or {}).get('session_pid') is not None:
+        return
+    atomic_json(path, {'time': time.time(), 'at': now()})
+
+
 def append_message(run, agent, state, fields, body, responding_to):
     entries = sorted((run / agent).glob('*.json')) if (run / agent).exists() else []
     seq = (int(entries[-1].stem) + 1) if entries else 1
@@ -142,7 +150,7 @@ def append_message(run, agent, state, fields, body, responding_to):
            'approval_scope': read_json(run / 'meta.json').get('approval_scope', DEFAULT_APPROVAL_SCOPE),
            **fields, 'timestamp': now(), 'body': body}
     atomic_json(run / agent / f'{seq:08d}.json', msg)
-    atomic_json(run / f'{agent}.heartbeat.json', {'time': time.time(), 'at': now()})
+    touch_heartbeat(run, agent)
     return msg
 
 
@@ -317,7 +325,7 @@ def user_typing(pane, quiet_secs):
         return False
 
 
-def wake_pane(pane, text, text_sent=False):
+def wake_pane(pane, text, text_sent=False, guard_secs=None):
     # Enter is a separate key press so the CLI does not read it as part of a paste.
     if not text_sent:
         sent = subprocess.run(['tmux', 'send-keys', '-t', pane, '-l', text])
@@ -325,6 +333,9 @@ def wake_pane(pane, text, text_sent=False):
             print(f'tmux send-keys to {pane} failed', file=sys.stderr)
             return False, False
     time.sleep(WAKE_ENTER_DELAY)
+    # The user may start typing during the delay; keep the text and retry Enter once they stop.
+    if guard_secs is not None and user_typing(pane, guard_secs):
+        return True, False
     entered = subprocess.run(['tmux', 'send-keys', '-t', pane, 'Enter'])
     if entered.returncode:
         print(f'tmux send-keys to {pane} failed', file=sys.stderr)
@@ -380,12 +391,13 @@ def watch_heartbeat(run, agent, pid, interval, pane=None, wake_mode='guarded', q
                         {'time': time.time(), 'at': now(), 'session_pid': pid,
                          'session_id': session['id'], 'tmux_pane': pane})
             wake = pending_wake(run, agent, session['id']) if pane and wake_mode != 'none' else None
+        guard_secs = quiet_secs if wake_mode == 'guarded' else None
         # Defer the wake text and any Enter retry while the user types; the next interval retries it.
-        if wake and wake_mode == 'guarded' and user_typing(pane, quiet_secs):
+        if wake and guard_secs is not None and user_typing(pane, guard_secs):
             wake = None
         # Never hold the run lock while typing into the pane.
         if wake:
-            text_sent, delivered = wake_pane(pane, wake['text'], wake['text_sent'])
+            text_sent, delivered = wake_pane(pane, wake['text'], wake['text_sent'], guard_secs)
             acknowledge_wake(run, agent, session['id'], wake, text_sent, delivered)
         time.sleep(interval)
 
@@ -638,7 +650,7 @@ def main():
                 if not args.ignore_stale and heartbeat and time.time()-heartbeat['time'] > args.stale_after:
                     print(json.dumps({'result': 'PEER_STALE', 'peer': peer}), file=sys.stderr)
                     sys.exit(3)
-                atomic_json(run / f'{args.agent}.heartbeat.json', {'time': time.time(), 'at': now()})
+                touch_heartbeat(run, args.agent)
             if time.monotonic()-begin >= args.timeout:
                 print(json.dumps({'result': 'WAIT_TIMEOUT', 'peer': peer}), file=sys.stderr)
                 sys.exit(2)
