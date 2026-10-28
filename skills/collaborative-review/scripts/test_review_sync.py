@@ -251,6 +251,20 @@ class ReviewSyncTests(unittest.TestCase):
         resumed = subprocess.run([*wait, '--ignore-stale'], cwd=self.root, capture_output=True, text=True)
         self.assertEqual(resumed.returncode, 0, resumed.stderr)
 
+    def test_wait_and_send_leave_watcher_heartbeat_to_the_watcher(self):
+        # A leftover wait must not keep a crashed CLI's watched slot looking alive.
+        self.start_both_agents()
+        heartbeat_path = self.root / '.reviews/test/agent-1.heartbeat.json'
+        stale_time = time.time() - 7200
+        heartbeat_path.write_text(json.dumps({'time': stale_time, 'at': 'old', 'session_pid': 1,
+                                              'session_id': 'old', 'tmux_pane': None}))
+        subprocess.run([sys.executable, str(HELPER), '--run', 'test', 'wait', '--agent', 'agent-1',
+                        '--after', '0', '--timeout', '1', '--interval', '0.5', '--ignore-stale'],
+                       cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(json.loads(heartbeat_path.read_text())['time'], stale_time)
+        self.send_control('agent-1', 'info', 'Q 1RD1 "ready slot=agent-1 cli=claude"')
+        self.assertEqual(json.loads(heartbeat_path.read_text())['time'], stale_time)
+
     def test_staggered_readiness_message_wakes_first_agent(self):
         self.call('start', '--agent', 'agent-1')
         self.send_control('agent-1', 'info', 'Q 1RD1 "ready slot=agent-1 cli=codex"')
@@ -594,6 +608,8 @@ import os
 import sys
 import time
 if len(sys.argv) > 1 and sys.argv[1] == 'display-message' and '#{session_activity}' in sys.argv:
+    if os.environ.get('TMUX_ACTIVITY_FAIL'):
+        raise SystemExit(1)
     activity = os.environ.get('TMUX_ACTIVITY_FILE')
     if activity and os.path.exists(activity):
         print(open(activity, encoding='utf-8').read().strip())
@@ -604,6 +620,10 @@ with open(os.environ['TMUX_LOG'], 'a', encoding='utf-8') as log:
     log.write(' '.join(sys.argv[1:]) + '\\n')
     log.flush()
     call = sum(1 for _ in open(os.environ['TMUX_LOG'], encoding='utf-8'))
+# Simulates the user starting to type right after the wake text lands.
+if os.environ.get('TMUX_TYPE_ON_TEXT') and '-l' in sys.argv:
+    with open(os.environ['TMUX_ACTIVITY_FILE'], 'w', encoding='utf-8') as activity:
+        activity.write(str(int(time.time()) + 3600))
 if call == 1 and float(os.environ.get('TMUX_FIRST_DELAY', '0')):
     time.sleep(float(os.environ['TMUX_FIRST_DELAY']))
 results = json.loads(os.environ.get('TMUX_RESULTS', '[]'))
@@ -648,6 +668,54 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.assertEqual(self.tmux_calls(), [])
         self.wait_for_idle_marker(True)
         activity.write_text(str(int(time.time()) - 60))
+        deadline = time.monotonic() + 3
+        while len(self.tmux_calls()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.tmux_calls(), ['send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 after=0',
+                                             'send-keys -t %9 Enter'])
+        self.wait_for_idle_marker(False)
+
+    def test_guarded_wake_defers_enter_when_user_starts_typing(self):
+        activity = self.root / 'activity'
+        activity.write_text(str(int(time.time()) - 60))
+        env = {**self.stub_tmux_env(), 'TMUX_ACTIVITY_FILE': str(activity), 'TMUX_TYPE_ON_TEXT': '1'}
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', env=env)
+        self.call('idle', '--agent', 'agent-1', '--after', '0')
+        self.control('info')
+        deadline = time.monotonic() + 3
+        while len(self.tmux_calls()) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(1)
+        self.assertEqual(self.tmux_calls(), ['send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 after=0'])
+        marker = json.loads((self.root / '.reviews/test/agent-1.idle.json').read_text())
+        self.assertTrue(marker['wake_progress']['text_sent'])
+        activity.write_text(str(int(time.time()) - 60))
+        deadline = time.monotonic() + 3
+        while len(self.tmux_calls()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.tmux_calls(), ['send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 after=0',
+                                             'send-keys -t %9 Enter'])
+        self.wait_for_idle_marker(False)
+
+    def test_pane_wake_types_while_user_types(self):
+        activity = self.root / 'activity'
+        activity.write_text(str(int(time.time()) + 3600))
+        env = {**self.stub_tmux_env(), 'TMUX_ACTIVITY_FILE': str(activity)}
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', '--wake-mode', 'pane', env=env)
+        self.call('idle', '--agent', 'agent-1', '--after', '0')
+        self.control('info')
+        deadline = time.monotonic() + 3
+        while len(self.tmux_calls()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.tmux_calls(), ['send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 after=0',
+                                             'send-keys -t %9 Enter'])
+        self.wait_for_idle_marker(False)
+
+    def test_guarded_wake_is_delivered_when_activity_query_fails(self):
+        env = {**self.stub_tmux_env(), 'TMUX_ACTIVITY_FAIL': '1'}
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', env=env)
+        self.call('idle', '--agent', 'agent-1', '--after', '0')
+        self.control('info')
         deadline = time.monotonic() + 3
         while len(self.tmux_calls()) < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
