@@ -22,6 +22,9 @@ class ReviewSyncTests(unittest.TestCase):
         self.initial_state = initialized.copy()
         initialized['startup_ready'] = True
         (self.root / '.reviews/test/state.json').write_text(json.dumps(initialized))
+        # Sessions without heartbeats: commands are allowed, and start/join may still claim the slot.
+        for agent in ('agent-1', 'agent-2'):
+            (self.root / f'.reviews/test/{agent}.session.json').write_text(json.dumps({'id': agent, 'active': True}))
 
     def call(self, *args):
         result = subprocess.run([sys.executable, str(HELPER), '--run', 'test', *args],
@@ -115,7 +118,9 @@ class ReviewSyncTests(unittest.TestCase):
 
     def test_go_rejects_absent_sessions_and_missing_kick(self):
         self.set_startup_ready(False)
-        self.assertIn('startup gate', self.fail_go().lower())
+        for agent in ('agent-1', 'agent-2'):
+            (self.root / f'.reviews/test/{agent}.session.json').unlink()
+        self.assertIn('session', self.fail_go().lower())
         self.start_both_agents()
         self.assertIn('startup gate', self.fail_go().lower())
         self.assertFalse(self.state()['startup_ready'])
@@ -378,6 +383,7 @@ class ReviewSyncTests(unittest.TestCase):
         reviewed['startup_ready'] = True
         (self.root / '.reviews/plan/state.json').write_text(json.dumps(reviewed))
         for agent in ('agent-1', 'agent-2'):
+            (self.root / f'.reviews/plan/{agent}.session.json').write_text(json.dumps({'id': agent, 'active': True}))
             result = subprocess.run([sys.executable, str(HELPER), '--run', 'plan', 'publish',
                                      '--agent', agent, '--status', 'APPROVED',
                                      '--text-file', 'message.md', '--expected-revision', reviewed['revision'],
@@ -446,6 +452,8 @@ class ReviewSyncTests(unittest.TestCase):
         meta = json.loads(path.read_text())
         meta.pop('helper_sha256', None)
         path.write_text(json.dumps(meta))
+        for agent in ('agent-1', 'agent-2'):
+            (self.root / f'.reviews/test/{agent}.heartbeat.json').unlink()
         joined = self.call('join', '--agent', 'agent-2')
         self.assertEqual(joined['consensus'], 'PENDING')
         self.assertEqual(joined['round'], 2)
@@ -559,7 +567,8 @@ class ReviewSyncTests(unittest.TestCase):
         self.call('start', '--agent', 'agent-1')
         watcher = subprocess.Popen([sys.executable, str(HELPER), '--run', 'test',
                                     'heartbeat', '--agent', 'agent-1', '--session-pid', str(pid),
-                                    '--interval', '0.02', *extra], cwd=self.root, env=env,
+                                    '--interval', '0.02', *(() if '--tmux-pane' in extra else ('--wake-mode', 'none')),
+                                    *extra], cwd=self.root, env=env,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self.stop_process, watcher)
         path = self.root / '.reviews/test/agent-1.heartbeat.json'
@@ -890,6 +899,104 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
                                 cwd=self.root, text=True, capture_output=True, env={**os.environ, 'PATH': str(self.root)})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('requires tmux', result.stderr)
+
+    def wait_for_calls(self, count, timeout=3):
+        deadline = time.monotonic() + timeout
+        while len(self.tmux_calls()) < count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return self.tmux_calls()
+
+    def kickoff(self, executor='agent-1', reporter='agent-2'):
+        self.set_startup_ready(False)
+        self.start_both_agents()
+        kick = self.send_kick(body=f'KICK run=test prob="test problem" exe={executor} rep={reporter}')
+        self.send_control(reporter, 'info', f'ACK {kick["seq"]}')
+        self.send_go(reporter)
+
+    def test_typed_wake_modes_require_pane(self):
+        self.call('start', '--agent', 'agent-1')
+        for mode in ('guarded', 'pane'):
+            with self.subTest(mode=mode):
+                result = subprocess.run([sys.executable, str(HELPER), '--run', 'test', 'heartbeat', '--agent', 'agent-1',
+                                         '--session-pid', str(os.getpid()), '--wake-mode', mode],
+                                        cwd=self.root, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('--tmux-pane', result.stderr)
+
+    def test_auto_wake_after_wait_cursor_without_idle_marker(self):
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', '--auto-wake-secs', '0.1', env=self.stub_tmux_env())
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        self.control('info')
+        self.assertEqual(self.wait_for_calls(2), ['send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 after=0',
+                                                  'send-keys -t %9 Enter'])
+        time.sleep(0.3)
+        self.assertEqual(len(self.tmux_calls()), 2)
+
+    def test_auto_wake_waits_for_quiet_slot(self):
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', '--auto-wake-secs', '1', env=self.stub_tmux_env())
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        self.control('info')
+        time.sleep(0.4)
+        self.assertEqual(self.tmux_calls(), [])
+        self.assertEqual(len(self.wait_for_calls(2)), 2)
+
+    def test_unread_wake_is_repeated_after_nudge_secs(self):
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', '--auto-wake-secs', '0.05', '--nudge-secs', '0.3',
+                           env=self.stub_tmux_env())
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        self.control('info')
+        self.assertEqual(len(self.wait_for_calls(4)), 4)
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '1', '--timeout', '0')
+        count = len(self.tmux_calls())
+        time.sleep(0.5)
+        self.assertEqual(len(self.tmux_calls()), count)
+
+    def test_unanswered_question_is_nudged(self):
+        self.start_watcher(os.getpid(), '--tmux-pane', '%9', '--auto-wake-secs', '0.3', '--nudge-secs', '0.2',
+                           env=self.stub_tmux_env())
+        question = self.send_control('agent-2', 'info', 'Q 2Q1 "is refresh in scope?"')
+        self.call('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        self.run_failing('wait', '--agent', 'agent-1', '--after', str(question['seq']), '--timeout', '0')
+        calls = self.wait_for_calls(2)
+        self.assertEqual(calls[0], f'send-keys -t %9 -l collaborative-review wake: run=test peer=agent-2 unanswered seq={question["seq"]} after={question["seq"]}')
+        self.send_control('agent-1', 'info', 'A 1A1 "yes"')
+        count = len(self.wait_for_calls(2))
+        time.sleep(0.5)
+        self.assertEqual(len(self.tmux_calls()), count)
+
+    def test_wait_reports_peer_last_event(self):
+        self.start_both_agents()
+        self.call('event', '--agent', 'agent-2', '--kind', 'PROGRESS', '--details', 'spawned 3 review subagents')
+        result = subprocess.run([sys.executable, str(HELPER), '--run', 'test', 'wait', '--agent', 'agent-1',
+                                 '--after', '0', '--timeout', '0'], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        report = json.loads(result.stderr)
+        self.assertEqual(report['peer_last_event']['kind'], 'PROGRESS')
+        self.assertIn('subagents', report['peer_last_event']['details'])
+        self.assertLess(report['peer_last_event']['age_secs'], 5)
+
+    def test_roles_are_enforced_after_go(self):
+        self.kickoff(executor='agent-1', reporter='agent-2')
+        self.assertEqual(self.state()['roles'], {'executor': 'agent-1', 'reporter': 'agent-2'})
+        for kind in ('decision', 'scope', 'logoff'):
+            with self.subTest(kind=kind):
+                self.assertIn('reporter', self.run_failing('control', '--agent', 'agent-1', '--kind', kind,
+                                                           '--text-file', self.write_message('USR "x" => Y')))
+        self.assertIn('executor', self.run_failing('begin-edit', '--agent', 'agent-2', '--text-file', 'message.md'))
+        self.assertIn('executor', self.run_failing('revise', '--agent', 'agent-2'))
+        self.send_control('agent-1', 'stop', 'STOP "either slot may pause"')
+        self.call('begin-edit', '--agent', 'agent-1', '--text-file', 'message.md')
+        self.call('revise', '--agent', 'agent-1')
+        self.send_control('agent-2', 'scope', 'SCOPE "x" => y')
+
+    def test_finished_session_cannot_review_or_decide(self):
+        self.kickoff(executor='agent-1', reporter='agent-2')
+        self.call('event', '--agent', 'agent-1', '--kind', 'FINISHED')
+        self.assertIn('active', self.run_failing('publish', '--agent', 'agent-1', '--status', 'APPROVED',
+                                                 '--text-file', 'message.md', *self.expected_review()))
+        self.assertIn('active', self.run_failing('begin-edit', '--agent', 'agent-1', '--text-file', 'message.md'))
+        self.assertIn('active', self.run_failing('event', '--agent', 'agent-1', '--kind', 'REVIEWING'))
+        self.send_control('agent-1', 'info', 'A 1A9 "done"')
 
 
 if __name__ == '__main__':

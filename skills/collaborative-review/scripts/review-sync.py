@@ -21,12 +21,16 @@ DEFAULT_APPROVAL_SCOPE = 'implementation-ready'
 APPROVAL_RESULTS = {'technical-plan': 'PLAN_APPROVED', 'implementation-ready': 'READY_TO_EXECUTE',
                     'report-ready': 'REPORT_APPROVED'}
 CONTROL_KINDS = ('info', 'scope', 'stop', 'decision', 'logoff')
-HEARTBEAT_INTERVAL = 20
+HEARTBEAT_INTERVAL = 5
 PEER_STALE_AFTER = 120
 WAKE_PREFIX = 'collaborative-review wake:'
 WAKE_ENTER_DELAY = 0.5
 WAKE_MODES = ('guarded', 'pane', 'none')
-WAKE_QUIET_SECS = 8
+WAKE_QUIET_SECS = 4
+AUTO_WAKE_SECS = 60
+NUDGE_SECS = 300
+ROLE_KINDS = {'decision': 'reporter', 'scope': 'reporter', 'logoff': 'reporter'}
+ANSWER_OPCODES = ('Q', 'RUN')
 
 
 def now():
@@ -66,6 +70,25 @@ def event(run, agent, kind, details=''):
         f.write(f'{now()} | {agent.upper():6} | {kind:9} | {details}\n')
         f.flush()
         os.fsync(f.fileno())
+
+
+def last_event(run, agent):
+    """Latest history.log line of a slot, for the peer's wait report."""
+    path = run / 'history.log'
+    if not path.exists():
+        return None
+    label = f'| {agent.upper():6} |'
+    for line in reversed(path.read_text(encoding='utf-8').splitlines()):
+        if label not in line:
+            continue
+        at, _, kind, details = (part.strip() for part in line.split(' | ', 3))
+        age = time.time() - dt.datetime.fromisoformat(at).timestamp()
+        return {'kind': kind, 'details': details, 'at': at, 'age_secs': round(age)}
+    return None
+
+
+def wait_report(run, agent, result):
+    return {'result': result, 'peer': peer_of(agent), 'peer_last_event': last_event(run, peer_of(agent))}
 
 
 def require_run(run):
@@ -284,7 +307,20 @@ def require_startup_ready(state):
         sys.exit('Startup gate is closed; complete the KICK, peer ACK, and reporter GO first.')
 
 
-def pending_wake(run, agent, session_id):
+def require_role(state, agent, role):
+    """Roles are pinned at GO; runs started before that have none and stay unrestricted."""
+    owner = (state.get('roles') or {}).get(role)
+    if owner and owner != agent:
+        sys.exit(f'Only the {role} ({owner}) may do this.')
+
+
+def require_active_session(run, agent):
+    session = read_json(run / f'{agent}.session.json')
+    if not session or session.get('active') is not True:
+        sys.exit(f'Slot {agent} has no active session; run start or join first.')
+
+
+def pending_wake(run, agent, session_id, auto_wake_secs=AUTO_WAKE_SECS, nudge_secs=NUDGE_SECS):
     """Return an unread-message or first stale-peer wake for the idle agent."""
     idle = read_json(run / f'{agent}.idle.json')
     peer = peer_of(agent)
@@ -300,17 +336,52 @@ def pending_wake(run, agent, session_id):
         outage = {'heartbeat_time': heartbeat['time'], 'notified': False}
         atomic_json(outage_path, outage)
     if not idle:
-        return None
+        return auto_wake(run, agent, session_id, entries, auto_wake_secs, nudge_secs)
     progress = idle.get('wake_progress')
     if progress and progress['session_id'] == session_id:
         return progress
     wake = {'idle_token': idle.get('token'), 'text_sent': False}
     if entries and int(entries[-1].stem) > idle['after']:
-        return {**wake, 'source': 'message',
+        return {**wake, 'source': 'message', 'seq': int(entries[-1].stem),
                 'text': f'{WAKE_PREFIX} run={run.name} peer={peer} after={idle["after"]}'}
     if stale and not outage['notified']:
         return {**wake, 'source': 'stale', 'heartbeat_time': heartbeat['time'],
                 'text': f'{WAKE_PREFIX} run={run.name} peer={peer} unavailable after={idle["after"]}'}
+    return None
+
+
+def awaiting_answer(run, agent, latest):
+    """True while the peer's latest message asks (Q/RUN) and the slot has not written since."""
+    if not latest or not any(control_lines(latest.get('body', ''), op) for op in ANSWER_OPCODES):
+        return False
+    own = sorted((run / agent).glob('*.json')) if (run / agent).exists() else []
+    return not own or read_json(own[-1])['timestamp'] < latest['timestamp']
+
+
+def auto_wake(run, agent, session_id, entries, auto_wake_secs, nudge_secs):
+    """Wake a slot that ended its turn without idle: unread peer messages, or an unanswered question."""
+    cursor = read_json(run / f'{agent}.cursor.json')
+    if not cursor or not entries:
+        return None
+    activity = read_json(run / f'{agent}.activity.json') or {'time': 0}
+    if time.time() - activity['time'] < auto_wake_secs:
+        return None
+    latest = read_json(entries[-1])
+    unread = latest['seq'] > cursor['after']
+    if not unread and not awaiting_answer(run, agent, latest):
+        return None
+    source = 'unread' if unread else 'unanswered'
+    text = (f'{WAKE_PREFIX} run={run.name} peer={peer_of(agent)} after={cursor["after"]}' if unread else
+            f'{WAKE_PREFIX} run={run.name} peer={peer_of(agent)} unanswered seq={latest["seq"]} after={cursor["after"]}')
+    wake = {'source': source, 'seq': latest['seq'], 'text': text, 'text_sent': False, 'session_id': session_id}
+    last = read_json(run / f'{agent}.wake.json')
+    if not last or last['seq'] != latest['seq'] or last['source'] != source:
+        return wake
+    if not last['delivered']:
+        return {**wake, 'text_sent': last['text_sent']}
+    # Delivered but still pending: repeat after the nudge interval.
+    if time.time() - last['time'] >= nudge_secs:
+        return wake
     return None
 
 
@@ -348,6 +419,10 @@ def acknowledge_wake(run, agent, session_id, wake, text_sent, delivered):
         session = read_json(run / f'{agent}.session.json')
         if not session or not session['active'] or session['id'] != session_id:
             return
+        if wake['source'] in ('unread', 'unanswered'):
+            atomic_json(run / f'{agent}.wake.json', {'source': wake['source'], 'seq': wake['seq'], 'time': time.time(),
+                                                      'text_sent': text_sent, 'delivered': delivered})
+            return
         idle_path = run / f'{agent}.idle.json'
         idle = read_json(idle_path)
         if idle and idle.get('token') == wake['idle_token']:
@@ -356,6 +431,10 @@ def acknowledge_wake(run, agent, session_id, wake, text_sent, delivered):
             elif text_sent:
                 idle['wake_progress'] = {**wake, 'session_id': session_id, 'text_sent': True}
                 atomic_json(idle_path, idle)
+        if delivered and wake['source'] == 'message':
+            # The auto wake must not repeat a wake the idle marker already delivered.
+            atomic_json(run / f'{agent}.wake.json', {'source': 'unread', 'seq': wake['seq'], 'time': time.time(),
+                                                      'text_sent': True, 'delivered': True})
         if delivered and wake['source'] == 'stale':
             outage_path = run / f'{agent}.peer-stale.json'
             outage = read_json(outage_path)
@@ -373,7 +452,8 @@ def process_identity(pid):
         return None
 
 
-def watch_heartbeat(run, agent, pid, interval, pane=None, wake_mode='guarded', quiet_secs=WAKE_QUIET_SECS):
+def watch_heartbeat(run, agent, pid, interval, pane=None, wake_mode='guarded', quiet_secs=WAKE_QUIET_SECS,
+                    auto_wake_secs=AUTO_WAKE_SECS, nudge_secs=NUDGE_SECS):
     identity = process_identity(pid)
     if identity is None:
         sys.exit('Session PID must identify a live local Linux CLI process.')
@@ -390,7 +470,8 @@ def watch_heartbeat(run, agent, pid, interval, pane=None, wake_mode='guarded', q
             atomic_json(run / f'{agent}.heartbeat.json',
                         {'time': time.time(), 'at': now(), 'session_pid': pid,
                          'session_id': session['id'], 'tmux_pane': pane})
-            wake = pending_wake(run, agent, session['id']) if pane and wake_mode != 'none' else None
+            wake = (pending_wake(run, agent, session['id'], auto_wake_secs, nudge_secs)
+                    if pane and wake_mode != 'none' else None)
         guard_secs = quiet_secs if wake_mode == 'guarded' else None
         # Defer the wake text and any Enter retry while the user types; the next interval retries it.
         if wake and guard_secs is not None and user_typing(pane, guard_secs):
@@ -444,6 +525,10 @@ def main():
                          'none: never type (the agent waits with a background wait instead)')
     hb.add_argument('--quiet-secs', type=float, default=WAKE_QUIET_SECS,
                     help='Seconds without user keystrokes before a guarded wake is typed')
+    hb.add_argument('--auto-wake-secs', type=float, default=AUTO_WAKE_SECS,
+                    help='Seconds without own helper commands before unread or unanswered peer messages wake the slot')
+    hb.add_argument('--nudge-secs', type=float, default=NUDGE_SECS,
+                    help='Seconds between repeated wakes while a message stays unread or unanswered')
     idle = sub.add_parser('idle', help='Mark this agent idle until the peer publishes after --after')
     idle.add_argument('--agent', choices=AGENTS, required=True)
     idle.add_argument('--after', type=int, required=True, help='Last processed sequence FROM the peer')
@@ -456,7 +541,7 @@ def main():
     revise.add_argument('--agent', choices=AGENTS, required=True)
     ev = sub.add_parser('event')
     ev.add_argument('--agent', choices=AGENTS, required=True)
-    ev.add_argument('--kind', choices=['REVIEWING', 'BLOCKED', 'APPROVED', 'FINISHED'], required=True)
+    ev.add_argument('--kind', choices=['REVIEWING', 'PROGRESS', 'BLOCKED', 'APPROVED', 'FINISHED'], required=True)
     ev.add_argument('--details', default='')
     args = ap.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', args.run):
@@ -485,10 +570,12 @@ def main():
         # Any other own command means the agent is active again; a stale marker must not wake it later.
         if args.cmd not in ('heartbeat', 'idle', 'start', 'join'):
             (run / f'{args.agent}.idle.json').unlink(missing_ok=True)
+            atomic_json(run / f'{args.agent}.activity.json', {'time': time.time(), 'at': now(), 'cmd': args.cmd})
     if args.cmd == 'event':
         with locked(run):
             if args.kind in ('REVIEWING', 'BLOCKED', 'APPROVED'):
                 require_startup_ready(read_json(run / 'state.json'))
+                require_active_session(run, args.agent)
             if args.kind == 'FINISHED':
                 session = read_json(run / f'{args.agent}.session.json')
                 if session:
@@ -501,12 +588,15 @@ def main():
         with locked(run):
             atomic_json(run / f'{args.agent}.idle.json',
                         {'after': args.after, 'token': uuid.uuid4().hex, 'at': now()})
+            atomic_json(run / f'{args.agent}.cursor.json', {'after': args.after, 'at': now()})
             event(run, args.agent, 'IDLE', f'after={args.after}')
         return
 
     if args.cmd == 'heartbeat':
         if args.tmux_pane and args.session_pid is None:
             sys.exit('--tmux-pane requires --session-pid.')
+        if args.session_pid is not None and args.wake_mode != 'none' and not args.tmux_pane:
+            sys.exit(f'--wake-mode {args.wake_mode} requires --tmux-pane; use --wake-mode none for a slot that waits in the background.')
         if not 0 <= args.quiet_secs < float('inf'):
             sys.exit('--quiet-secs must be a finite number >= 0.')
         if args.tmux_pane and not shutil.which('tmux'):
@@ -519,7 +609,7 @@ def main():
             if not 0 < args.interval <= HEARTBEAT_INTERVAL:
                 sys.exit(f'Heartbeat interval must be > 0 and <= {HEARTBEAT_INTERVAL} seconds.')
             watch_heartbeat(run, args.agent, args.session_pid, args.interval, args.tmux_pane,
-                            args.wake_mode, args.quiet_secs)
+                            args.wake_mode, args.quiet_secs, args.auto_wake_secs, args.nudge_secs)
             return
         with locked(run):
             atomic_json(run / f'{args.agent}.heartbeat.json', {'time': time.time(), 'at': now()})
@@ -550,6 +640,8 @@ def main():
         with locked(run):
             state = read_json(run / 'state.json')
             require_startup_ready(state)
+            require_active_session(run, args.agent)
+            require_role(state, args.agent, 'executor')
             editor = state.get('editor')
             if editor and editor != args.agent:
                 sys.exit(f'{editor} is editing since {state["editing_since"]}; wait for its revise.')
@@ -563,6 +655,7 @@ def main():
     if args.cmd == 'revise':
         with locked(run):
             state = read_json(run / 'state.json')
+            require_role(state, args.agent, 'executor')
             editor = state.get('editor')
             if editor and editor != args.agent:
                 sys.exit(f'{editor} is editing; only the editor runs revise.')
@@ -584,7 +677,13 @@ def main():
             meta = read_json(run / 'meta.json')
             if args.cmd == 'publish':
                 require_startup_ready(state)
+            # A finished slot may still answer with control info (the logoff A); nothing else.
+            if args.cmd == 'publish' or args.kind != 'info':
+                require_active_session(run, args.agent)
+            if args.cmd == 'control' and args.kind in ROLE_KINDS and state.get('startup_ready', False):
+                require_role(state, args.agent, ROLE_KINDS[args.kind])
             startup_go = args.cmd == 'control' and args.kind == 'decision' and is_go_request(body)
+            roles = None
             if startup_go:
                 if not valid_go_body(body):
                     sys.exit('GO must be relayed as USR "<verbatim user text>" => GO.')
@@ -592,6 +691,8 @@ def main():
                     error = startup_go_error(run, args.agent)
                     if error:
                         sys.exit(error)
+                    kick = startup_kick(run)
+                    roles = {'executor': kick['executor'], 'reporter': kick['reporter']}
             if args.cmd == 'control' and args.kind == 'info':
                 error = ack_submission_error(run, args.agent, body)
                 if error:
@@ -615,6 +716,9 @@ def main():
             msg = append_message(run, args.agent, state, fields, body, args.responding_to)
             if startup_go:
                 state['startup_ready'] = True
+                if roles:
+                    state['roles'] = roles
+                    event(run, 'system', 'ROLES', f'executor={roles["executor"]} reporter={roles["reporter"]}')
                 atomic_json(run / 'state.json', state)
             event(run, args.agent, 'WROTE', f'seq={msg["seq"]} type={msg["type"]} verdict={msg.get("status", msg.get("kind"))} round={state["round"]} rev={actual[:12]}')
             if args.cmd == 'publish':
@@ -636,6 +740,7 @@ def main():
         begin = time.monotonic()
         with locked(run):
             event(run, args.agent, 'WAITING', f'for={peer} after={args.after}')
+            atomic_json(run / f'{args.agent}.cursor.json', {'after': args.after, 'at': now()})
         while True:
             with locked(run):
                 peer_dir = run / peer
@@ -648,11 +753,11 @@ def main():
                     return
                 heartbeat = read_json(run / f'{peer}.heartbeat.json')
                 if not args.ignore_stale and heartbeat and time.time()-heartbeat['time'] > args.stale_after:
-                    print(json.dumps({'result': 'PEER_STALE', 'peer': peer}), file=sys.stderr)
+                    print(json.dumps(wait_report(run, args.agent, 'PEER_STALE')), file=sys.stderr)
                     sys.exit(3)
                 touch_heartbeat(run, args.agent)
             if time.monotonic()-begin >= args.timeout:
-                print(json.dumps({'result': 'WAIT_TIMEOUT', 'peer': peer}), file=sys.stderr)
+                print(json.dumps(wait_report(run, args.agent, 'WAIT_TIMEOUT')), file=sys.stderr)
                 sys.exit(2)
             time.sleep(max(0.5, args.interval))
 
