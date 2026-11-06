@@ -76,6 +76,8 @@ Each phase has a color; the reporter uses it in every status line (section 4).
 - fit: the user's codebase and constraints, what integrates and what conflicts;
 - risks: licensing, security, cost, lock-in, maintenance.
 
+agent-1 splits by these four topics; agent-2 splits by candidate (one subagent per tool, service or approach found in a first landscape pass, each covering practice, fit and risks), as in review §2. The review §2 limits apply per phase: at most 4 research subagents plus 1 verification subagent per slot, verification on the cheap model.
+
 Each slot's `<slot>-coverage.md` lists its subagents (name, concern, sources assigned), the sources opened (URL or `path:lines`) and the areas not covered. Verify subagent findings at the source before writing them to your notes; a verification subagent may do this, and you own the verdict and spot-check. Mark each `F` line `[v]` (source opened and supports the claim), `[u]` (subagent-cited, not opened) or `[p]` (proposal or inference). The executor merges `[u]` lines only as labelled candidates; a `[u]` finding the peer confirms (`CONFIRM`, source opened) is merged as `[v]`. Write them to your notes file, one `F` line each (section 3), then send `NOTES research/<id>/<slot>-notes.md "<n> findings"` (control `info`).
 
 Give every subagent brief the current decision ledger (section 2a), so subagents do not re-apply a constraint the user has lifted.
