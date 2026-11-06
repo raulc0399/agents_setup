@@ -187,7 +187,7 @@ Keep the emoji labels; they add color, and the text labels carry the meaning.
 
 The user may intervene at any time with a direction such as “choose A,” “consider …,” “change scope …,” or “pause.” The reporter relays it through the existing rules in sections 2 and 6, and the agents apply it before any conflicting work. A pause halts work until the user resumes; routine work already authorized needs no new approval.
 
-The user can follow raw events with `tail -f .reviews/<run-id>/history.log`, and read the exchange so far as threads per finding id with `rs --run <id> render --agent <you>`, which writes `reviews/<run-id>/TRANSCRIPT.html` (either slot, any time; the reporter names the path when the user asks what the agents disagree about). The renderer follows explicit Q/A references and rechecks the snapshot; changed or unavailable files are marked `STALE_REVISION`.
+The user can follow raw events with `tail -f .reviews/<run-id>/history.log`, and read the exchange so far as threads per finding id with `rs --run <id> render --agent <you>`, which writes `reviews/<run-id>/TRANSCRIPT.html` (either slot, any time; the reporter names the path when the user asks what the agents disagree about). Custom `--out` destinations must be outside the snapshot and `.reviews/`, including file aliases. The renderer follows explicit Q/A references and rechecks the snapshot; changed or unavailable files are marked `STALE_REVISION`.
 
 ## 9. Self-adaptation
 

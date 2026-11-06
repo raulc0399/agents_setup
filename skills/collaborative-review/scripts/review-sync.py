@@ -157,6 +157,7 @@ def render_transcript(run, out):
     """Self-contained HTML: threads per finding id, controls and decisions, all messages, history."""
     meta = read_json(run / 'meta.json')
     state = read_json(run / 'state.json')
+    validate_transcript_output(meta['paths'], run.name, out)
     snapshot_error = None
     try:
         actual = snapshot(meta['paths'], run.name)
@@ -246,6 +247,62 @@ def is_work_folder(relative_parts, run_id):
                for i in range(len(relative_parts) - 1))
 
 
+def snapshot_includes(root, item, run_id):
+    relative = (root.name, *item.relative_to(root).parts)
+    return not (any(x in SNAPSHOT_EXCLUDES for x in item.parts) or is_work_folder(relative, run_id))
+
+
+def same_existing_file(path, candidate):
+    try:
+        return candidate.is_file() and path.samefile(candidate)
+    except FileNotFoundError:
+        # Another run may have atomically replaced a temporary state file.
+        return False
+
+
+def validate_transcript_output(paths, run_id, out):
+    try:
+        destination = out.resolve()
+    except (OSError, RuntimeError):
+        destination = Path(os.path.abspath(out))
+    review_root = ROOT.resolve()
+    if destination == review_root or review_root in destination.parents:
+        sys.exit(f'Transcript output overlaps helper review state: {out}')
+    if out.exists():
+        for item in ROOT.rglob('*'):
+            if same_existing_file(out, item):
+                sys.exit(f'Transcript output aliases helper review state: {out}')
+
+    for raw in paths:
+        root = Path(raw)
+        unresolved_root = False
+        try:
+            resolved_root = root.resolve()
+        except (OSError, RuntimeError):
+            resolved_root = Path(os.path.abspath(root))
+            unresolved_root = True
+        if destination == resolved_root:
+            included = snapshot_includes(root, root, run_id)
+        elif (unresolved_root or root.is_dir() or not root.exists()) and resolved_root in destination.parents:
+            item = root / destination.relative_to(resolved_root)
+            included = snapshot_includes(root, item, run_id)
+        else:
+            included = False
+        if included:
+            sys.exit(f'Transcript output overlaps snapshot path: {out}')
+
+        # Unresolvable roots still block lexical overlap; snapshot reports their error.
+        if unresolved_root:
+            continue
+
+        # An outside hard link still overwrites the reviewed inode.
+        if out.exists():
+            choices = root.rglob('*') if root.is_dir() else [root]
+            for item in choices:
+                if snapshot_includes(root, item, run_id) and same_existing_file(out, item):
+                    sys.exit(f'Transcript output aliases snapshot file: {out}')
+
+
 def snapshot(paths, run_id):
     """Hash exact contents of explicit files/directories; under a directory, the run's work folders are skipped."""
     all_files = set()
@@ -258,8 +315,7 @@ def snapshot(paths, run_id):
             sys.exit(f'Missing snapshot path: {raw}')
         choices = p.rglob('*') if p.is_dir() else [p]
         for item in choices:
-            relative = (p.name, *item.relative_to(p).parts)
-            if any(x in SNAPSHOT_EXCLUDES for x in item.parts) or is_work_folder(relative, run_id):
+            if not snapshot_includes(p, item, run_id):
                 continue
             if item.is_symlink():
                 sys.exit(f'Symlink snapshot path is unsupported: {item}')
@@ -462,6 +518,12 @@ def pending_wake(run, agent, session_id, auto_wake_secs=AUTO_WAKE_SECS, nudge_se
     elif not outage or outage['heartbeat_time'] != heartbeat['time']:
         outage = {'heartbeat_time': heartbeat['time'], 'notified': False}
         atomic_json(outage_path, outage)
+    # Typed text remains in this session's pane even when its idle marker changes.
+    last = read_json(run / f'{agent}.wake.json')
+    if (last and last.get('session_id') == session_id and not last['delivered'] and last['text_sent']):
+        activity = read_json(run / f'{agent}.activity.json') or {'time': 0}
+        if idle or time.time() - activity['time'] >= auto_wake_secs:
+            return last
     if not idle:
         return auto_wake(run, agent, session_id, entries, auto_wake_secs, nudge_secs)
     progress = idle.get('wake_progress')
@@ -494,7 +556,7 @@ def auto_wake(run, agent, session_id, entries, auto_wake_secs, nudge_secs):
     if time.time() - activity['time'] < auto_wake_secs:
         return None
     last = read_json(run / f'{agent}.wake.json')
-    if last and last.get('session_id') != session_id:
+    if last and (last.get('session_id') != session_id or last['source'] not in ('unread', 'unanswered')):
         last = None
     # Finish the text already in this session's pane before considering a newer peer message.
     if last and not last['delivered'] and last['text_sent']:
@@ -556,6 +618,9 @@ def acknowledge_wake(run, agent, session_id, wake, text_sent, delivered):
             atomic_json(run / f'{agent}.wake.json', {**wake, 'session_id': session_id, 'time': time.time(),
                                                       'text_sent': text_sent, 'delivered': delivered})
             return
+        # Keep partial delivery independent of idle markers, which ordinary commands replace or remove.
+        atomic_json(run / f'{agent}.wake.json', {**wake, 'session_id': session_id, 'time': time.time(),
+                                                  'text_sent': text_sent, 'delivered': delivered})
         idle_path = run / f'{agent}.idle.json'
         idle = read_json(idle_path)
         if idle and idle.get('token') == wake['idle_token']:
@@ -703,8 +768,9 @@ def main():
     require_run(run)
     with locked(run):
         verify_helper(run, allow_legacy=args.cmd in ('start', 'join'))
-        # Any other own command means the agent is active again; a stale marker must not wake it later.
-        if args.cmd not in ('heartbeat', 'idle', 'start', 'join'):
+        # Rendering observes the run; any other own command means the agent is active again.
+        # A stale marker must not wake an active agent later.
+        if args.cmd not in ('heartbeat', 'idle', 'start', 'join', 'render'):
             (run / f'{args.agent}.idle.json').unlink(missing_ok=True)
             atomic_json(run / f'{args.agent}.activity.json', {'time': time.time(), 'at': now(), 'cmd': args.cmd})
     if args.cmd == 'event':

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HELPER = Path(__file__).with_name('review-sync.py')
 
@@ -984,6 +985,54 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.assertEqual(next_wake['seq'], second['seq'])
         self.assertFalse(next_wake['text_sent'])
 
+    def test_partial_wake_survives_wake_mode_transitions(self):
+        helper = runpy.run_path(str(HELPER))
+        run = self.root / '.reviews/test'
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        for initial_idle, next_idle in ((False, True), (True, False), (True, True)):
+            with self.subTest(initial_idle=initial_idle, next_idle=next_idle):
+                (run / 'agent-1.wake.json').unlink(missing_ok=True)
+                if initial_idle:
+                    self.call('idle', '--agent', 'agent-1', '--after', '0')
+                first = self.control('info')
+                wake = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+                helper['acknowledge_wake'](run, 'agent-1', 'agent-1', wake, True, False)
+                self.call('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+                if next_idle:
+                    self.call('idle', '--agent', 'agent-1', '--after', str(first['seq']))
+                    marker = (run / 'agent-1.idle.json').read_text()
+                second = self.control('info')
+
+                retry = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+                self.assertTrue(retry['text_sent'])
+                self.assertEqual(retry['text'], wake['text'])
+                with mock.patch.object(helper['subprocess'], 'run') as send, mock.patch.object(helper['time'], 'sleep'):
+                    send.return_value.returncode = 0
+                    self.assertEqual(helper['wake_pane']('%9', retry['text'], retry['text_sent']), (True, True))
+                    send.assert_called_once_with(['tmux', 'send-keys', '-t', '%9', 'Enter'])
+                helper['acknowledge_wake'](run, 'agent-1', 'agent-1', retry, True, True)
+                if next_idle:
+                    self.assertEqual((run / 'agent-1.idle.json').read_text(), marker)
+                next_wake = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+                self.assertEqual(next_wake['seq'], second['seq'])
+                self.assertFalse(next_wake['text_sent'])
+                self.call('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+
+    def test_idle_partial_wake_does_not_reuse_previous_session_delivery(self):
+        helper = runpy.run_path(str(HELPER))
+        run = self.root / '.reviews/test'
+        self.call('idle', '--agent', 'agent-1', '--after', '0')
+        self.control('info')
+        wake = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+        helper['acknowledge_wake'](run, 'agent-1', 'agent-1', wake, True, False)
+        self.call('event', '--agent', 'agent-1', '--kind', 'FINISHED')
+        self.call('start', '--agent', 'agent-1')
+        self.call('idle', '--agent', 'agent-1', '--after', '0')
+        session = json.loads((run / 'agent-1.session.json').read_text())
+
+        retry = helper['pending_wake'](run, 'agent-1', session['id'], 0, 300)
+        self.assertFalse(retry['text_sent'])
+
     def test_auto_wake_does_not_reuse_previous_session_delivery(self):
         helper = runpy.run_path(str(HELPER))
         run = self.root / '.reviews/test'
@@ -1068,6 +1117,32 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.assertIn('active', self.run_failing('revise', '--agent', 'agent-1'))
         self.assertEqual(self.state(), before)
 
+    def test_render_preserves_idle_and_delivery_state(self):
+        helper = runpy.run_path(str(HELPER))
+        run = self.root / '.reviews/test'
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                self.call('idle', '--agent', 'agent-1', '--after', '0')
+                helper['atomic_json'](run / 'agent-2.heartbeat.json', {'time': time.time() - 121})
+                helper['atomic_json'](run / 'agent-1.activity.json', {'time': 1, 'cmd': 'check'})
+                helper['atomic_json'](run / 'agent-1.wake.json',
+                                      {'source': 'unread', 'seq': 0, 'session_id': 'agent-1', 'time': 1,
+                                       'text': 'Previously delivered wake', 'text_sent': True, 'delivered': True})
+                wake = helper['pending_wake'](run, 'agent-1', 'agent-1')
+                self.assertEqual(wake['source'], 'stale')
+                paths = [run / f'agent-1.{suffix}.json'
+                         for suffix in ('idle', 'cursor', 'activity', 'wake', 'peer-stale')]
+                before = {path: path.read_bytes() for path in paths}
+                if failed:
+                    # A regular file cannot serve as the output directory.
+                    self.run_failing('render', '--agent', 'agent-1', '--out', 'PLAN.md/transcript.html')
+                else:
+                    self.call('render', '--agent', 'agent-1')
+                    self.assertTrue((self.root / 'reviews/test/TRANSCRIPT.html').exists())
+                    self.assertIn('RENDERED', (run / 'history.log').read_text())
+                self.assertEqual({path: path.read_bytes() if path.exists() else None for path in paths}, before)
+                self.assertEqual(helper['pending_wake'](run, 'agent-1', 'agent-1'), wake)
+
     def test_render_rechecks_snapshot_approval(self):
         self.approve()
         (self.root / 'PLAN.md').write_text('Changed after approval\n')
@@ -1076,6 +1151,138 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.assertIn('<td>consensus</td><td>STALE_REVISION</td>', transcript)
         self.assertEqual(self.state()['consensus'], 'STALE_REVISION')
 
+    def test_render_preserves_partial_wake_through_idle_transition(self):
+        helper = runpy.run_path(str(HELPER))
+        run = self.root / '.reviews/test'
+        after = 0
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                self.run_failing('wait', '--agent', 'agent-1', '--after', str(after), '--timeout', '0')
+                first = self.control('info')
+                wake = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+                helper['acknowledge_wake'](run, 'agent-1', 'agent-1', wake, True, False)
+                self.call('wait', '--agent', 'agent-1', '--after', str(after), '--timeout', '0')
+                self.call('idle', '--agent', 'agent-1', '--after', str(first['seq']))
+                paths = [run / f'agent-1.{suffix}.json' for suffix in ('idle', 'cursor', 'activity', 'wake')]
+                before = {path: path.read_bytes() for path in paths}
+
+                if failed:
+                    self.assertIn('snapshot', self.run_failing('render', '--agent', 'agent-1', '--out', 'PLAN.md'))
+                else:
+                    self.call('render', '--agent', 'agent-1')
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                second = self.control('info')
+                retry = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+                self.assertTrue(retry['text_sent'])
+                self.assertEqual(retry['text'], wake['text'])
+                helper['acknowledge_wake'](run, 'agent-1', 'agent-1', retry, True, True)
+                self.assertEqual((run / 'agent-1.idle.json').read_bytes(), before[run / 'agent-1.idle.json'])
+                next_wake = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+                self.assertEqual(next_wake['seq'], second['seq'])
+                self.assertFalse(next_wake['text_sent'])
+                after = second['seq']
+
+    def test_render_rejects_reviewed_output_aliases(self):
+        self.approve()
+        original = (self.root / 'PLAN.md').read_bytes()
+        (self.root / 'symlink.html').symlink_to('PLAN.md')
+        os.link(self.root / 'PLAN.md', self.root / 'hardlink.html')
+        for output in ('PLAN.md', str(self.root / 'PLAN.md'), 'reviews/../PLAN.md',
+                       'symlink.html', 'hardlink.html'):
+            with self.subTest(output=output):
+                error = self.run_failing('render', '--agent', 'agent-1', '--out', output)
+                self.assertIn('snapshot', error.lower())
+                self.assertEqual((self.root / 'PLAN.md').read_bytes(), original)
+
+    def test_render_rejects_new_output_inside_reviewed_directory(self):
+        project = self.root / 'project'
+        project.mkdir()
+        (project / 'source.md').write_text('Reviewed content\n')
+        self.call_run('project', 'init', '--paths', 'project')
+        (self.root / 'project-alias').symlink_to(project, target_is_directory=True)
+        for output in (project / 'TRANSCRIPT.html', project / 'source.md', project,
+                       self.root / 'project-alias/new.html'):
+            with self.subTest(output=str(output)):
+                result = subprocess.run([sys.executable, str(HELPER), '--run', 'project', 'render',
+                                         '--agent', 'agent-1', '--out', str(output)],
+                                        cwd=self.root, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('snapshot', result.stderr.lower())
+                self.assertEqual((project / 'source.md').read_text(), 'Reviewed content\n')
+                self.assertFalse((project / 'TRANSCRIPT.html').exists())
+                self.assertFalse((project / 'new.html').exists())
+
+    def test_render_rejects_output_inside_missing_snapshot_directory(self):
+        project = self.root / 'project'
+        project.mkdir()
+        source = project / 'source.md'
+        source.write_text('Reviewed content\n')
+        self.call_run('project', 'init', '--paths', 'project')
+        source.unlink()
+        project.rmdir()
+        result = subprocess.run([sys.executable, str(HELPER), '--run', 'project', 'render',
+                                 '--agent', 'agent-1', '--out', 'project/TRANSCRIPT.html'],
+                                cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('snapshot', result.stderr.lower())
+        self.assertFalse(project.exists())
+
+    def test_render_tolerates_disappearing_alias_candidates(self):
+        helper = runpy.run_path(str(HELPER))
+        validate = helper['validate_transcript_output']
+        validate.__globals__['ROOT'] = self.root / '.reviews'
+        output = self.root / 'TRANSCRIPT.html'
+        output.write_text('Previous transcript\n')
+        original_samefile = Path.samefile
+        for folder in (self.root / '.reviews/other', self.root / 'project'):
+            with self.subTest(folder=str(folder)):
+                folder.mkdir()
+                candidate = folder / '.heartbeat.json.pending.tmp'
+                candidate.write_text('Pending update\n')
+                destination = folder / 'heartbeat.json'
+
+                def move_before_comparing(path, other):
+                    if other == candidate:
+                        candidate.replace(destination)
+                    return original_samefile(path, other)
+
+                with mock.patch.object(Path, 'samefile', move_before_comparing):
+                    validate([str(self.root / 'PLAN.md'), str(folder)], 'test', output)
+                self.assertTrue(destination.exists())
+                self.assertEqual(output.read_text(), 'Previous transcript\n')
+
+    def test_render_alias_scan_preserves_unrelated_errors(self):
+        helper = runpy.run_path(str(HELPER))
+        with mock.patch.object(Path, 'samefile', side_effect=PermissionError('Access denied')):
+            with self.assertRaises(PermissionError):
+                helper['same_existing_file'](self.root / 'message.md', self.root / 'PLAN.md')
+
+    def test_render_preserves_helper_managed_files(self):
+        self.approve()
+        message = next((self.root / '.reviews/test/agent-1').glob('*.json'))
+        for target in (self.root / '.reviews/test/state.json', self.root / '.reviews/test/meta.json', message):
+            name = target.name
+            before = target.read_bytes()
+            alias = self.root / ('alias-' + name)
+            os.link(target, alias)
+            for output in (str(target), str(alias)):
+                with self.subTest(output=output):
+                    self.assertIn('review state', self.run_failing(
+                        'render', '--agent', 'agent-1', '--out', output).lower())
+                    self.assertEqual(target.read_bytes(), before)
+
+    def test_render_preserves_explicit_work_folder_file(self):
+        report = self.root / 'research/report/REPORT.md'
+        report.parent.mkdir(parents=True)
+        report.write_text('Reviewed report\n')
+        self.call_run('report', 'init', '--paths', str(report))
+        result = subprocess.run([sys.executable, str(HELPER), '--run', 'report', 'render',
+                                 '--agent', 'agent-1', '--out', str(report)],
+                                cwd=self.root, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('snapshot', result.stderr.lower())
+        self.assertEqual(report.read_text(), 'Reviewed report\n')
+
     def test_render_remains_available_with_missing_snapshot(self):
         self.approve()
         (self.root / 'PLAN.md').unlink()
@@ -1083,6 +1290,20 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         transcript = (self.root / 'reviews/test/TRANSCRIPT.html').read_text()
         self.assertIn('<td>consensus</td><td>STALE_REVISION</td>', transcript)
         self.assertIn('Missing snapshot path: PLAN.md', transcript)
+
+    def test_render_remains_available_with_symlink_loop_snapshot(self):
+        self.approve()
+        plan = self.root / 'PLAN.md'
+        plan.unlink()
+        plan.symlink_to('PLAN.md')
+        self.call('render', '--agent', 'agent-1')
+        transcript = (self.root / 'reviews/test/TRANSCRIPT.html').read_text()
+        self.assertIn('<td>consensus</td><td>STALE_REVISION</td>', transcript)
+        self.assertIn('Symlink snapshot path is unsupported: PLAN.md', transcript)
+        for output in ('PLAN.md', 'PLAN.md/TRANSCRIPT.html'):
+            self.assertIn('snapshot', self.run_failing(
+                'render', '--agent', 'agent-1', '--out', output).lower())
+        self.assertTrue(plan.is_symlink())
 
     def test_render_follows_question_and_answer_references(self):
         self.write_message('B 1B1 PLAN.md:1 "refresh failure" -> "add ttl"\nD 1D1 PLAN.md:2 "logging detail"')
