@@ -55,7 +55,7 @@ Slots: agent-1=<CLI>, agent-2=<CLI> · Roles: executor=<slot>, reporter=<slot> (
 Reply "go" to start, or tell me what to change.
 ```
 
-If the question, case, sources, or exclusions are unclear, the slot that ran `init` asks the user before drawing roles and sending `KICK`. Settling exclusions up front avoids re-running research after the user lifts a constraint.
+If the question, case, sources, or exclusions are unclear, the slot that ran `init` asks the user before drawing roles and sending `KICK`; this is the one exception to review §2 (reporter only), because no reporter exists before `KICK`. Settling exclusions up front avoids re-running research after the user lifts a constraint.
 
 ## 2. Phases
 
@@ -80,7 +80,7 @@ Each slot's `<slot>-coverage.md` lists its subagents (name, concern, sources ass
 
 Give every subagent brief the current decision ledger (section 2a), so subagents do not re-apply a constraint the user has lifted.
 
-**3 Cross-check.** After both `NOTES`, read the peer's notes and coverage file; send `GAP` for any area or source neither coverage file lists. Open the sources of findings rated `high`, directly or through a verification subagent, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
+**3 Cross-check.** After both `NOTES`, read the peer's notes and coverage file; send `GAP` for any area or source neither coverage file lists. Open the sources of findings rated `high`, directly or through a verification subagent, then answer with `CONFIRM`, `DISPUTE`, or `GAP` (all three as `control --kind info` in this phase). Findings rated `med` or `low` are not source-checked by the peer: a `[u]` one stays a labelled candidate in `FINDINGS.md`, and the file's header states that only `high` findings were peer-verified. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
 
 **4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. It also writes `OPTIONS.md` (review §4 options table) with every option found, including those ruled out by the kickoff exclusions, each with the exclusion or evidence that decided it, so the user sees what was explored, not only what survived. The peer checks it against both notes files and the decision ledger (missing ids, contradicted revisions, re-applied exclusions, unlabelled `[u]`/inference claims) and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the kickoff `Deliverable` (if any), the top findings, the open questions, and the executor's proposed `REPORT.md` text (review §6 proposed changes), and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; "write the report" approves that proposed text, and later `REPORT.md` edits follow review §6 proposed changes. Deeper research returns to phase 2 for the named topic.
 
@@ -92,7 +92,7 @@ Give every subagent brief the current decision ledger (section 2a), so subagents
 5. Recommendation: the kickoff `Deliverable` first (if any), what to apply here, alternatives with tradeoffs, next steps.
 6. Open questions and sources.
 
-**6 Approval.** The peer reviews `REPORT.md` against `FINDINGS.md` and the sources (review §4, §7). A blocker is a wrong or unsourced claim, a finding missing that changes the recommendation, or a recommendation that ignores the case. After the current revision's `REPORT_APPROVED`, the executor copies `REPORT.md` unchanged to the user-authorized "Save copy to" path, if any (if a file already exists there, ask the user before overwriting); links relative to `research/<id>/` are reported to the user, not silently rewritten.
+**6 Approval.** The peer reviews `REPORT.md` against `FINDINGS.md` and the sources (review §4, §7). A blocker is a wrong or unsourced claim, a finding missing that changes the recommendation, or a recommendation that ignores the case. After the current revision's `REPORT_APPROVED`, the executor copies `REPORT.md` unchanged to the user-authorized "Save copy to" path, if any (if a file already exists there, the executor sends `Q` and the reporter asks the user before it overwrites); links relative to `research/<id>/` are reported to the user, not silently rewritten.
 
 ### 2a. Decision ledger
 
@@ -111,7 +111,7 @@ When an agent's context runs low, or the user asks for a restart, that agent wri
 | `F <id> [v\|u\|p] "<finding>" src=<url\|file:line> rel=high\|med\|low` | notes file line | sourced finding; `[v\|u\|p]` = verification (phase 2), `rel` = relevance to the case |
 | `NOTES <file> "<n> findings"` | `control --kind info` | own research done |
 | `CONFIRM <ids>` | `control --kind info` | peer findings verified at the source |
-| `DISPUTE <id> "<why not>" src=<url\|file:line>` | `control --kind info` | finding wrong or outdated (in phase 6: `publish`) |
+| `DISPUTE <id> "<why not>" src=<url\|file:line>` | phases 3 to 5: `control --kind info`; phase 6: `publish` (review §3 form) | finding wrong or outdated |
 | `GAP "<missing area>"` | `control --kind info` | area neither notes file covers |
 | `MERGED <file>` | `control --kind info` | executor merged `FINDINGS.md` |
 

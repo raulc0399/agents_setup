@@ -1035,6 +1035,66 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.call('render', '--agent', 'agent-2', '--out', str(out))
         self.assertIn('Unresolved: 2Q3 open', out.read_text())
 
+    def test_finished_releases_own_editor_lock(self):
+        self.call('begin-edit', '--agent', 'agent-1', '--text-file', 'message.md')
+        self.call('event', '--agent', 'agent-1', '--kind', 'FINISHED')
+        self.assertNotIn('editor', self.state())
+        self.publish('agent-2', 'APPROVED')
+
+    def test_snapshot_ignores_review_folders(self):
+        project = self.root / 'proj'
+        (project / 'reviews/proj').mkdir(parents=True)
+        (project / 'research/proj').mkdir(parents=True)
+        (project / 'research/other').mkdir(parents=True)
+        (project / 'PLAN.md').write_text('plan\n')
+        (project / 'reviews/proj/proposed-changes.diff').write_text('a\n')
+        (project / 'research/proj/REPORT.md').write_text('a\n')
+        (project / 'research/other/data.md').write_text('a\n')
+        initialized = self.call_run('proj', 'init', '--paths', 'proj')
+        (project / 'reviews/proj/proposed-changes.diff').write_text('b\n')
+        (project / 'research/proj/REPORT.md').write_text('b\n')
+        self.assertEqual(self.call_run('proj', 'revise', '--agent', 'agent-1')['revision'], initialized['revision'])
+        # Only the run's own folders are skipped; another research/ folder is ordinary project content.
+        (project / 'research/other/data.md').write_text('b\n')
+        self.assertNotEqual(self.call_run('proj', 'revise', '--agent', 'agent-1')['revision'], initialized['revision'])
+
+    def test_explicit_report_inside_research_folder_is_snapshotted(self):
+        report = self.root / 'research/r/REPORT.md'
+        report.parent.mkdir(parents=True)
+        report.write_text('')
+        initialized = self.call_run('r', 'init', '--approval-scope', 'report-ready', '--paths', 'research/r/REPORT.md')
+        report.write_text('# Report\n')
+        self.assertNotEqual(self.call_run('r', 'revise', '--agent', 'agent-1')['revision'], initialized['revision'])
+
+    def test_responding_to_must_name_existing_peer_message(self):
+        self.assertIn('responding', self.run_failing('publish', '--agent', 'agent-1', '--status', 'APPROVED',
+                                                     '--text-file', 'message.md', '--responding-to', '999',
+                                                     *self.expected_review()).lower())
+        self.assertIn('responding', self.run_failing('control', '--agent', 'agent-1', '--kind', 'info',
+                                                     '--text-file', 'message.md', '--responding-to', '1').lower())
+        peer = self.control('info')
+        self.call('control', '--agent', 'agent-1', '--kind', 'info', '--text-file', 'message.md',
+                  '--responding-to', str(peer['seq']))
+
+    def test_drain_wait_logs_no_waiting_event(self):
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        history = (self.root / '.reviews/test/history.log').read_text()
+        self.assertNotIn('WAITING', history)
+        subprocess.run([sys.executable, str(HELPER), '--run', 'test', 'wait', '--agent', 'agent-1',
+                        '--after', '0', '--timeout', '1', '--interval', '0.5'], cwd=self.root, capture_output=True)
+        self.assertIn('WAITING', (self.root / '.reviews/test/history.log').read_text())
+
+    def test_event_accepts_only_lifecycle_kinds(self):
+        for kind in ('BLOCKED', 'APPROVED'):
+            with self.subTest(kind=kind):
+                self.assertIn('invalid choice', self.run_failing('event', '--agent', 'agent-1', '--kind', kind))
+
+    def call_run(self, run, *args):
+        result = subprocess.run([sys.executable, str(HELPER), '--run', run, *args],
+                                cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
 
 if __name__ == '__main__':
     unittest.main()

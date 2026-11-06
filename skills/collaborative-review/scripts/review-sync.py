@@ -30,6 +30,8 @@ WAKE_MODES = ('guarded', 'pane', 'none')
 WAKE_QUIET_SECS = 4
 AUTO_WAKE_SECS = 60
 NUDGE_SECS = 300
+SNAPSHOT_EXCLUDES = {'.git', '.reviews', '__pycache__'}
+WORK_FOLDERS = ('reviews', 'research')
 ROLE_KINDS = {'decision': 'reporter', 'scope': 'reporter', 'logoff': 'reporter'}
 FINDING_ID = re.compile(r'\b([12][A-Z]+\d+)\b')
 TRANSCRIPT_STYLE = ('body{font:14px/1.5 system-ui,sans-serif;margin:24px;max-width:1100px;color:#1d2228;background:#fff}'
@@ -200,8 +202,14 @@ def verify_helper(run, allow_legacy=False):
     event(run, 'system', 'HELPER', f'Legacy helper fingerprint pinned; old approvals invalidated; round={state["round"]}')
 
 
-def snapshot(paths):
-    """Hash exact contents of explicit files/directories. Must exclude review files."""
+def is_work_folder(relative_parts, run_id):
+    """reviews/<run-id> and research/<run-id> hold the run's own files (diffs, transcript, options, notes)."""
+    return any(relative_parts[i:i + 2] == (folder, run_id) for folder in WORK_FOLDERS
+               for i in range(len(relative_parts) - 1))
+
+
+def snapshot(paths, run_id):
+    """Hash exact contents of explicit files/directories; under a directory, the run's work folders are skipped."""
     all_files = set()
     for raw in paths:
         p = Path(raw)
@@ -212,7 +220,8 @@ def snapshot(paths):
             sys.exit(f'Missing snapshot path: {raw}')
         choices = p.rglob('*') if p.is_dir() else [p]
         for item in choices:
-            if any(x in {'.git', '.reviews', '__pycache__'} for x in item.parts):
+            relative = item.relative_to(p).parts
+            if any(x in SNAPSHOT_EXCLUDES for x in item.parts) or is_work_folder(relative, run_id):
                 continue
             if item.is_symlink():
                 sys.exit(f'Symlink snapshot path is unsupported: {item}')
@@ -624,7 +633,7 @@ def main():
     render.add_argument('--out', help='Output path; default reviews/<run-id>/TRANSCRIPT.html')
     ev = sub.add_parser('event')
     ev.add_argument('--agent', choices=AGENTS, required=True)
-    ev.add_argument('--kind', choices=['REVIEWING', 'PROGRESS', 'BLOCKED', 'APPROVED', 'FINISHED'], required=True)
+    ev.add_argument('--kind', choices=['REVIEWING', 'PROGRESS', 'FINISHED'], required=True)
     ev.add_argument('--details', default='')
     args = ap.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', args.run):
@@ -640,7 +649,7 @@ def main():
                     sys.exit('Existing run has different paths or approval scope; use a new run id.')
                 verify_helper(run)
             else:
-                revision = snapshot(args.paths)
+                revision = snapshot(args.paths, args.run)
                 atomic_json(run / 'meta.json', {'paths': args.paths, 'approval_scope': args.approval_scope, 'helper_sha256': helper_fingerprint(), 'created': now()})
                 atomic_json(run / 'state.json', {'revision': revision, 'round': 1, 'consensus': 'PENDING', 'approval_scope': args.approval_scope, 'startup_ready': False})
                 event(run, 'system', 'STARTED', f'run={args.run}')
@@ -656,7 +665,7 @@ def main():
             atomic_json(run / f'{args.agent}.activity.json', {'time': time.time(), 'at': now(), 'cmd': args.cmd})
     if args.cmd == 'event':
         with locked(run):
-            if args.kind in ('REVIEWING', 'BLOCKED', 'APPROVED'):
+            if args.kind == 'REVIEWING':
                 require_startup_ready(read_json(run / 'state.json'))
                 require_active_session(run, args.agent)
             if args.kind == 'FINISHED':
@@ -664,6 +673,12 @@ def main():
                 if session:
                     session['active'] = False
                     atomic_json(run / f'{args.agent}.session.json', session)
+                # A finished slot must not keep the peer locked out of publish and revise.
+                state = read_json(run / 'state.json')
+                if state.get('editor') == args.agent:
+                    state.pop('editor', None)
+                    state.pop('editing_since', None)
+                    atomic_json(run / 'state.json', state)
             event(run, args.agent, args.kind, args.details.replace('\n', ' ')[:160])
         return
 
@@ -744,7 +759,7 @@ def main():
                 sys.exit(f'{editor} is editing; only the editor runs revise.')
             state.pop('editor', None)
             state.pop('editing_since', None)
-            new = snapshot(read_json(run / 'meta.json')['paths'])
+            new = snapshot(read_json(run / 'meta.json')['paths'], args.run)
             if new != state['revision']:
                 state.update(revision=new, round=state['round']+1, consensus='PENDING', gates=[])
                 event(run, args.agent, 'REVISION', f'round={state["round"]} hash={new[:12]}')
@@ -780,13 +795,15 @@ def main():
                 error = ack_submission_error(run, args.agent, body)
                 if error:
                     sys.exit(error)
+            if args.responding_to and not read_json(run / peer_of(args.agent) / f'{args.responding_to:08d}.json'):
+                sys.exit('--responding-to must name an existing peer message sequence (crash recovery reads it).')
             if args.cmd == 'publish' and state.get('editor'):
                 sys.exit(f'{state["editor"]} is editing; wait for its revise. Use control for other messages.')
             if args.cmd == 'publish' and (args.expected_revision != state['revision'] or args.expected_round != state['round']):
                 sys.exit('Review revision or round changed. Re-review before publishing.')
             if args.cmd == 'publish' and args.gate and args.status != 'APPROVED':
                 sys.exit('--gate is only valid with APPROVED.')
-            actual = snapshot(meta['paths']) if args.cmd == 'publish' else state['revision']
+            actual = snapshot(meta['paths'], args.run) if args.cmd == 'publish' else state['revision']
             if actual != state['revision']:
                 sys.exit('Reviewed code/plan changed. Run revise and re-review before publishing.')
             if args.cmd == 'control' and args.kind in ('scope', 'stop'):
@@ -820,7 +837,7 @@ def main():
     if args.cmd == 'check':
         with locked(run):
             state = read_json(run / 'state.json')
-            actual = snapshot(read_json(run / 'meta.json')['paths'])
+            actual = snapshot(read_json(run / 'meta.json')['paths'], args.run)
             refresh_consensus(run, state, actual)
             atomic_json(run / 'status.json', state)
             print(json.dumps(state))
@@ -830,7 +847,9 @@ def main():
         peer = peer_of(args.agent)
         begin = time.monotonic()
         with locked(run):
-            event(run, args.agent, 'WAITING', f'for={peer} after={args.after}')
+            # A drain (timeout 0) runs at every turn start; logging each one buries the user's tail.
+            if args.timeout > 0:
+                event(run, args.agent, 'WAITING', f'for={peer} after={args.after}')
             atomic_json(run / f'{args.agent}.cursor.json', {'after': args.after, 'at': now()})
         while True:
             with locked(run):
