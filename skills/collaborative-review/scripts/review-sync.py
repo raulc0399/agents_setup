@@ -100,20 +100,22 @@ def wait_report(run, agent, result):
     return {'result': result, 'peer': peer_of(agent), 'peer_last_event': last_event(run, peer_of(agent))}
 
 
+def message_time(message):
+    # Older messages lack the float 'ts'; their second-resolution timestamp still orders them.
+    if message.get('ts') is not None:
+        return message['ts']
+    try:
+        return dt.datetime.fromisoformat(message['timestamp']).timestamp()
+    except (KeyError, ValueError):
+        return 0
+
+
 def all_messages(run):
     messages = []
     for agent in AGENTS:
         if (run / agent).exists():
             messages += [read_json(path) for path in sorted((run / agent).glob('*.json'))]
-    # Older messages lack the float 'ts'; their second-resolution timestamp still orders them.
-    def order(message):
-        if message.get('ts'):
-            return message['ts']
-        try:
-            return dt.datetime.fromisoformat(message['timestamp']).timestamp()
-        except (KeyError, ValueError):
-            return 0
-    return sorted(messages, key=lambda m: (order(m), m['agent'], m['seq']))
+    return sorted(messages, key=lambda m: (message_time(m), m['agent'], m['seq']))
 
 
 def message_label(message):
@@ -122,18 +124,52 @@ def message_label(message):
             f'· rev {str(message.get("revision", ""))[:12]} · {message.get("timestamp", "")}')
 
 
+def finding_threads(messages):
+    """Follow explicit Q/A references without joining unrelated lines in the same message."""
+    entries = []
+    references = {}
+    for message in messages:
+        for line in message.get('body', '').splitlines():
+            ids = list(dict.fromkeys(FINDING_ID.findall(line)))
+            if not ids:
+                continue
+            entries.append((message, line, ids))
+            fields = line.split(maxsplit=2)
+            if len(fields) > 1 and fields[0] in ('Q', 'A') and fields[1] == ids[0]:
+                references.setdefault(ids[0], set()).update(ids[1:])
+
+    threads = {}
+    for message, line, ids in entries:
+        related = set()
+        pending = ids.copy()
+        while pending:
+            finding = pending.pop()
+            if finding in related:
+                continue
+            related.add(finding)
+            pending.extend(references.get(finding, ()))
+        for finding in related:
+            threads.setdefault(finding, []).append((message, line))
+    return threads
+
+
 def render_transcript(run, out):
     """Self-contained HTML: threads per finding id, controls and decisions, all messages, history."""
     meta = read_json(run / 'meta.json')
     state = read_json(run / 'state.json')
+    snapshot_error = None
+    try:
+        actual = snapshot(meta['paths'], run.name)
+    except (OSError, SystemExit) as error:
+        actual = None
+        snapshot_error = str(error)
+    refresh_consensus(run, state, actual)
+
     messages = all_messages(run)
-    threads = {}
+    threads = finding_threads(messages)
     controls = []
     for message in messages:
         for line in message.get('body', '').splitlines():
-            ids = FINDING_ID.findall(line)
-            for finding in dict.fromkeys(ids):
-                threads.setdefault(finding, []).append((message, line))
             if message.get('type') == 'control' and message.get('kind') != 'info' or re.match(r'^(KICK|ACK|IMP|OFF)\b', line.strip()):
                 controls.append((message, line))
     roles = state.get('roles') or {}
@@ -145,6 +181,8 @@ def render_transcript(run, out):
                  ('revision', state['revision']), ('round', state['round']), ('consensus', state.get('consensus')),
                  ('executor', roles.get('executor', 'not pinned')), ('reporter', roles.get('reporter', 'not pinned')),
                  ('rendered', now()))) + '</table>']
+    if snapshot_error:
+        parts.append('<p>Snapshot could not be verified: ' + html.escape(snapshot_error) + '</p>')
     summary_path = out.parent / 'SUMMARY.md'
     if summary_path.exists():
         parts.append('<h2>Summary</h2><section><pre>' + html.escape(summary_path.read_text(encoding='utf-8')) + '</pre></section>')
@@ -220,7 +258,7 @@ def snapshot(paths, run_id):
             sys.exit(f'Missing snapshot path: {raw}')
         choices = p.rglob('*') if p.is_dir() else [p]
         for item in choices:
-            relative = item.relative_to(p).parts
+            relative = (p.name, *item.relative_to(p).parts)
             if any(x in SNAPSHOT_EXCLUDES for x in item.parts) or is_work_folder(relative, run_id):
                 continue
             if item.is_symlink():
@@ -444,7 +482,7 @@ def awaiting_answer(run, agent, latest):
     if not latest or not any(control_lines(latest.get('body', ''), op) for op in ANSWER_OPCODES):
         return False
     own = sorted((run / agent).glob('*.json')) if (run / agent).exists() else []
-    return not own or read_json(own[-1])['timestamp'] < latest['timestamp']
+    return not own or message_time(read_json(own[-1])) < message_time(latest)
 
 
 def auto_wake(run, agent, session_id, entries, auto_wake_secs, nudge_secs):
@@ -455,6 +493,13 @@ def auto_wake(run, agent, session_id, entries, auto_wake_secs, nudge_secs):
     activity = read_json(run / f'{agent}.activity.json') or {'time': 0}
     if time.time() - activity['time'] < auto_wake_secs:
         return None
+    last = read_json(run / f'{agent}.wake.json')
+    if last and last.get('session_id') != session_id:
+        last = None
+    # Finish the text already in this session's pane before considering a newer peer message.
+    if last and not last['delivered'] and last['text_sent']:
+        return last
+
     latest = read_json(entries[-1])
     unread = latest['seq'] > cursor['after']
     if not unread and not awaiting_answer(run, agent, latest):
@@ -463,7 +508,6 @@ def auto_wake(run, agent, session_id, entries, auto_wake_secs, nudge_secs):
     text = (f'{WAKE_PREFIX} run={run.name} peer={peer_of(agent)} after={cursor["after"]}' if unread else
             f'{WAKE_PREFIX} run={run.name} peer={peer_of(agent)} unanswered seq={latest["seq"]} after={cursor["after"]}')
     wake = {'source': source, 'seq': latest['seq'], 'text': text, 'text_sent': False, 'session_id': session_id}
-    last = read_json(run / f'{agent}.wake.json')
     if not last or last['seq'] != latest['seq'] or last['source'] != source:
         return wake
     if not last['delivered']:
@@ -509,7 +553,7 @@ def acknowledge_wake(run, agent, session_id, wake, text_sent, delivered):
         if not session or not session['active'] or session['id'] != session_id:
             return
         if wake['source'] in ('unread', 'unanswered'):
-            atomic_json(run / f'{agent}.wake.json', {'source': wake['source'], 'seq': wake['seq'], 'time': time.time(),
+            atomic_json(run / f'{agent}.wake.json', {**wake, 'session_id': session_id, 'time': time.time(),
                                                       'text_sent': text_sent, 'delivered': delivered})
             return
         idle_path = run / f'{agent}.idle.json'
@@ -523,7 +567,7 @@ def acknowledge_wake(run, agent, session_id, wake, text_sent, delivered):
         if delivered and wake['source'] == 'message':
             # The auto wake must not repeat a wake the idle marker already delivered.
             atomic_json(run / f'{agent}.wake.json', {'source': 'unread', 'seq': wake['seq'], 'time': time.time(),
-                                                      'text_sent': True, 'delivered': True})
+                                                      'session_id': session_id, 'text_sent': True, 'delivered': True})
         if delivered and wake['source'] == 'stale':
             outage_path = run / f'{agent}.peer-stale.json'
             outage = read_json(outage_path)
@@ -753,6 +797,7 @@ def main():
     if args.cmd == 'revise':
         with locked(run):
             state = read_json(run / 'state.json')
+            require_active_session(run, args.agent)
             require_role(state, args.agent, 'executor')
             editor = state.get('editor')
             if editor and editor != args.agent:

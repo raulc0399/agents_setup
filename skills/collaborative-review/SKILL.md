@@ -78,7 +78,7 @@ Reply "go" to start, or tell me what to change.
 ## 2. Roles
 
 - **Reviewers (both):** split the review across your own review subagents (Claude: `Agent`; Codex: `spawn_agent`); verify their findings yourself, you own the verdict. Review subagents cannot replace the active peer's participation.
-  - Split, round 1: agent-1 cuts by concern, one subagent each: (a) requirements, architecture and integration, (b) security and data handling, (c) reliability, performance and edge cases, (d) tests, deployment and rollback. agent-2 cuts by artifact: one subagent per plan section or code module group, each checking all four concerns. The two slots cut the scope along different axes so they do not share blind spots.
+  - Split, round 1: agent-1 cuts by concern, one subagent each: (a) requirements, architecture and integration, (b) security and data handling, (c) reliability, performance and edge cases, (d) tests, deployment and rollback. agent-2 cuts by artifact: divide all plan sections or code modules into at most 4 disjoint groups, one subagent per group, each checking all four concerns. The two slots cut the scope along different axes so they do not share blind spots.
   - Split, round 2 onward: agent-1 re-reads the whole changed section for regressions; agent-2 reviews the diff first. Both still report new blockers in unchanged text.
   - Limits per slot and round: at most 4 review subagents plus 1 verification subagent. Verification runs on the cheap model from the Helper section, review subagents on your own model. Brief every subagent to return only AASM lines without ids (`B <file>:<line> "<trigger → failure>" -> "<smallest fix>"`, `D`, `O`), one per line, nothing else; you assign the ids. Record what you and your subagents covered in `reviews/<run-id>/<slot>-coverage.md` (section 4).
 - **Executor (one):** the only agent that runs `begin-edit`/`revise`, edits snapshot files, writes `skill-update/`, and runs CLIs/tests/tools. It does this work through a cheap-model subagent, a fresh one per `RUN` or edit so no stale context carries over (Claude: a new `Agent` call with the cheap model from the Helper section; Codex: `spawn_agent` with that model and `fork_turns="none"`). The other agent asks with `RUN`. Each agent still runs its own `rs` commands and reads files itself.
@@ -187,7 +187,7 @@ Keep the emoji labels; they add color, and the text labels carry the meaning.
 
 The user may intervene at any time with a direction such as “choose A,” “consider …,” “change scope …,” or “pause.” The reporter relays it through the existing rules in sections 2 and 6, and the agents apply it before any conflicting work. A pause halts work until the user resumes; routine work already authorized needs no new approval.
 
-The user can follow raw events with `tail -f .reviews/<run-id>/history.log`, and read the exchange so far as threads per finding id with `rs --run <id> render --agent <you>`, which writes `reviews/<run-id>/TRANSCRIPT.html` (either slot, any time; the reporter names the path when the user asks what the agents disagree about).
+The user can follow raw events with `tail -f .reviews/<run-id>/history.log`, and read the exchange so far as threads per finding id with `rs --run <id> render --agent <you>`, which writes `reviews/<run-id>/TRANSCRIPT.html` (either slot, any time; the reporter names the path when the user asks what the agents disagree about). The renderer follows explicit Q/A references and rechecks the snapshot; changed or unavailable files are marked `STALE_REVISION`.
 
 ## 9. Self-adaptation
 

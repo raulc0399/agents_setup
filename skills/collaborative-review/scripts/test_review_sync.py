@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -965,6 +966,65 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         time.sleep(0.5)
         self.assertEqual(len(self.tmux_calls()), count)
 
+    def test_auto_wake_finishes_partial_delivery_before_new_message(self):
+        helper = runpy.run_path(str(HELPER))
+        run = self.root / '.reviews/test'
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        first = self.control('info')
+        wake = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+        helper['acknowledge_wake'](run, 'agent-1', 'agent-1', wake, True, False)
+        second = self.control('info')
+
+        retry = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+        self.assertTrue(retry['text_sent'])
+        self.assertEqual(retry['seq'], first['seq'])
+        self.assertEqual(retry['text'], wake['text'])
+        helper['acknowledge_wake'](run, 'agent-1', 'agent-1', retry, True, True)
+        next_wake = helper['pending_wake'](run, 'agent-1', 'agent-1', 0, 300)
+        self.assertEqual(next_wake['seq'], second['seq'])
+        self.assertFalse(next_wake['text_sent'])
+
+    def test_auto_wake_does_not_reuse_previous_session_delivery(self):
+        helper = runpy.run_path(str(HELPER))
+        run = self.root / '.reviews/test'
+        self.run_failing('wait', '--agent', 'agent-1', '--after', '0', '--timeout', '0')
+        self.control('info')
+        for delivered in (False, True):
+            with self.subTest(delivered=delivered):
+                session = json.loads((run / 'agent-1.session.json').read_text())
+                wake = helper['pending_wake'](run, 'agent-1', session['id'], 0, 300)
+                helper['acknowledge_wake'](run, 'agent-1', session['id'], wake, True, delivered)
+                self.call('event', '--agent', 'agent-1', '--kind', 'FINISHED')
+                self.call('start', '--agent', 'agent-1')
+                restarted = json.loads((run / 'agent-1.session.json').read_text())
+
+                next_wake = helper['pending_wake'](run, 'agent-1', restarted['id'], 0, 300)
+                self.assertIsNotNone(next_wake)
+                self.assertFalse(next_wake['text_sent'])
+                self.assertEqual(next_wake['session_id'], restarted['id'])
+
+    def test_unanswered_question_uses_subsecond_message_order(self):
+        helper = runpy.run_path(str(HELPER))
+        run = self.root / '.reviews/test'
+        own = self.send_control('agent-1', 'info', 'A 1A1 "previous answer"')
+        question = self.send_control('agent-2', 'info', 'Q 2Q1 "new question"')
+        second = int(own['ts'])
+        own['ts'] = second + 0.1
+        question.update(timestamp=own['timestamp'], ts=second + 0.2)
+        own_path = run / f'agent-1/{own["seq"]:08d}.json'
+        own_path.write_text(json.dumps(own))
+        self.assertTrue(helper['awaiting_answer'](run, 'agent-1', question))
+
+        own['ts'] = second + 0.3
+        own_path.write_text(json.dumps(own))
+        self.assertFalse(helper['awaiting_answer'](run, 'agent-1', question))
+        own.pop('ts')
+        question.pop('ts')
+        own['timestamp'] = '2026-11-06T12:00:00+00:00'
+        question['timestamp'] = '2026-11-06T12:00:01+00:00'
+        own_path.write_text(json.dumps(own))
+        self.assertTrue(helper['awaiting_answer'](run, 'agent-1', question))
+
     def test_wait_reports_peer_last_event(self):
         self.start_both_agents()
         self.call('event', '--agent', 'agent-2', '--kind', 'PROGRESS', '--details', 'spawned 3 review subagents')
@@ -998,6 +1058,49 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.assertIn('active', self.run_failing('begin-edit', '--agent', 'agent-1', '--text-file', 'message.md'))
         self.assertIn('active', self.run_failing('event', '--agent', 'agent-1', '--kind', 'REVIEWING'))
         self.send_control('agent-1', 'info', 'A 1A9 "done"')
+
+    def test_finished_executor_cannot_revise(self):
+        self.kickoff()
+        self.approve()
+        self.call('event', '--agent', 'agent-1', '--kind', 'FINISHED')
+        before = self.state()
+        (self.root / 'PLAN.md').write_text('Changed after finishing\n')
+        self.assertIn('active', self.run_failing('revise', '--agent', 'agent-1'))
+        self.assertEqual(self.state(), before)
+
+    def test_render_rechecks_snapshot_approval(self):
+        self.approve()
+        (self.root / 'PLAN.md').write_text('Changed after approval\n')
+        self.call('render', '--agent', 'agent-1')
+        transcript = (self.root / 'reviews/test/TRANSCRIPT.html').read_text()
+        self.assertIn('<td>consensus</td><td>STALE_REVISION</td>', transcript)
+        self.assertEqual(self.state()['consensus'], 'STALE_REVISION')
+
+    def test_render_remains_available_with_missing_snapshot(self):
+        self.approve()
+        (self.root / 'PLAN.md').unlink()
+        self.call('render', '--agent', 'agent-1')
+        transcript = (self.root / 'reviews/test/TRANSCRIPT.html').read_text()
+        self.assertIn('<td>consensus</td><td>STALE_REVISION</td>', transcript)
+        self.assertIn('Missing snapshot path: PLAN.md', transcript)
+
+    def test_render_follows_question_and_answer_references(self):
+        self.write_message('B 1B1 PLAN.md:1 "refresh failure" -> "add ttl"\nD 1D1 PLAN.md:2 "logging detail"')
+        self.publish('agent-1', 'BLOCKED')
+        self.send_control('agent-2', 'info', 'Q 2Q1 1B1 "refresh scope?"\nQ 2Q2 1D1 "logging scope?"')
+        self.send_control('agent-1', 'info', 'A 1A1 "2Q1: refresh is in scope"\nA 1A2 "2Q2: log ids only"')
+        self.send_control('agent-2', 'info', 'Q 2Q3 1A1 "which ttl?"')
+        self.send_control('agent-1', 'info', 'A 1A3 "2Q3: use the configured ttl"')
+        self.call('render', '--agent', 'agent-1')
+        transcript = (self.root / 'reviews/test/TRANSCRIPT.html').read_text()
+        thread = transcript.split('id="thread-1B1"')[1].split('</section>')[0]
+        self.assertIn('refresh is in scope', thread)
+        self.assertIn('use the configured ttl', thread)
+        self.assertNotIn('logging scope?', thread)
+        self.assertNotIn('log ids only', thread)
+        self.assertEqual(thread.count('refresh is in scope'), 1)
+        self.assertLess(thread.index('refresh scope?'), thread.index('refresh is in scope'))
+        self.assertLess(thread.index('which ttl?'), thread.index('use the configured ttl'))
 
     def test_render_writes_threaded_transcript(self):
         self.send_control('agent-1', 'info', 'KICK run=test prob="token refresh" exe=agent-1 rep=agent-2')
@@ -1051,6 +1154,7 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         (project / 'research/proj/REPORT.md').write_text('a\n')
         (project / 'research/other/data.md').write_text('a\n')
         initialized = self.call_run('proj', 'init', '--paths', 'proj')
+        self.call_run('proj', 'start', '--agent', 'agent-1')
         (project / 'reviews/proj/proposed-changes.diff').write_text('b\n')
         (project / 'research/proj/REPORT.md').write_text('b\n')
         self.assertEqual(self.call_run('proj', 'revise', '--agent', 'agent-1')['revision'], initialized['revision'])
@@ -1063,8 +1167,22 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         report.parent.mkdir(parents=True)
         report.write_text('')
         initialized = self.call_run('r', 'init', '--approval-scope', 'report-ready', '--paths', 'research/r/REPORT.md')
+        self.call_run('r', 'start', '--agent', 'agent-1')
         report.write_text('# Report\n')
         self.assertNotEqual(self.call_run('r', 'revise', '--agent', 'agent-1')['revision'], initialized['revision'])
+
+    def test_snapshot_ignores_work_folders_at_scope_root(self):
+        for folder in ('reviews', 'research'):
+            with self.subTest(folder=folder):
+                scope = self.root / folder
+                (scope / folder).mkdir(parents=True)
+                (scope / 'source.md').write_text('Reviewed content\n')
+                output = scope / folder / 'TRANSCRIPT.html'
+                initialized = self.call_run(folder, 'init', '--paths', str(scope))
+                self.call_run(folder, 'render', '--agent', 'agent-1', '--out', str(output))
+                checked = self.call_run(folder, 'check', '--agent', 'agent-1')
+                self.assertEqual(checked['revision'], initialized['revision'])
+                self.assertEqual(checked['consensus'], 'PENDING')
 
     def test_responding_to_must_name_existing_peer_message(self):
         self.assertIn('responding', self.run_failing('publish', '--agent', 'agent-1', '--status', 'APPROVED',
