@@ -1,0 +1,30 @@
+[
+  {
+    "id": "render-stale-approval",
+    "trigger": "Approve PLAN.md, change its content, then render the transcript.",
+    "expected_finding": "Rendering must recheck the snapshot and show STALE_REVISION instead of the previous approval.",
+    "source_commit": "f983d299a2ce4e627d57f7b2a5595ba210d598a5",
+    "test": "skills/collaborative-review/scripts/test_review_sync.py::ReviewSyncTests.test_render_rechecks_snapshot_approval"
+  },
+  {
+    "id": "finished-executor-revision",
+    "trigger": "Finish the executor session, change PLAN.md, and invoke revise as that executor.",
+    "expected_finding": "An inactive executor must not revise the run or change its state.",
+    "source_commit": "f983d299a2ce4e627d57f7b2a5595ba210d598a5",
+    "test": "skills/collaborative-review/scripts/test_review_sync.py::ReviewSyncTests.test_finished_executor_cannot_revise"
+  },
+  {
+    "id": "render-reviewed-output-alias",
+    "trigger": "Render with PLAN.md or a symlink or hardlink to that reviewed file as the output path.",
+    "expected_finding": "Reject output paths aliasing reviewed files before overwriting their contents.",
+    "source_commit": "0cd1bbf08f47b4edbe530391b792f9563700dc53",
+    "test": "skills/collaborative-review/scripts/test_review_sync.py::ReviewSyncTests.test_render_rejects_reviewed_output_aliases"
+  },
+  {
+    "id": "partial-wake-mode-transition",
+    "trigger": "Deliver wake text without Enter, switch between automatic and idle waiting, then receive another message.",
+    "expected_finding": "Preserve the partial delivery and send Enter for the original wake before delivering the newer message.",
+    "source_commit": "0cd1bbf08f47b4edbe530391b792f9563700dc53",
+    "test": "skills/collaborative-review/scripts/test_review_sync.py::ReviewSyncTests.test_partial_wake_survives_wake_mode_transitions"
+  }
+]
