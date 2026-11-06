@@ -24,7 +24,7 @@ Answer the user's research question with evidence, for the user's own case, unti
 - Both slots and their research subagents run read-only research tools themselves (web search and fetch, file search, `git log`), overriding review §2; tests, experiments, and snapshot edits stay with the executor.
 - Keep the agent's own context small: delegate research, source verification, cross-checks, and findings/report reviews to subagents, which return only `F`/verdict lines; the parent owns every verdict. Store long subagent results in `research/<id>/<slot>-scratch/`, not in messages.
 - Files in `research/<run-id>/` are owned as listed in section 2; `<slot>-*` files and folders belong to that slot. Never write a file you do not own.
-- The review skill's `reviews/<run-id>/proposed-changes.diff` and `reviews/<run-id>/TRANSCRIPT.html` live in `research/<run-id>/` instead, outside the `REPORT.md` snapshot.
+- The review skill's `reviews/<run-id>/proposed-changes.diff`, `TRANSCRIPT.html` (`rs render --out research/<run-id>/TRANSCRIPT.html`), `SUMMARY.md`, `OPTIONS.md` and `<slot>-coverage.md` live in `research/<run-id>/` instead, outside the `REPORT.md` snapshot.
 
 ## 0. Setup
 
@@ -76,13 +76,13 @@ Each phase has a color; the reporter uses it in every status line (section 4).
 - fit: the user's codebase and constraints, what integrates and what conflicts;
 - risks: licensing, security, cost, lock-in, maintenance.
 
-Verify subagent findings at the source before writing them to your notes; a verification subagent may do this, and you own the verdict and spot-check. Mark each `F` line `[v]` (source opened and supports the claim), `[u]` (subagent-cited, not opened) or `[p]` (proposal or inference). The executor merges `[u]` lines only as labelled candidates; a `[u]` finding the peer confirms (`CONFIRM`, source opened) is merged as `[v]`. Write them to your notes file, one `F` line each (section 3), then send `NOTES research/<id>/<slot>-notes.md "<n> findings"` (control `info`).
+Each slot's `<slot>-coverage.md` lists its subagents (name, concern, sources assigned), the sources opened (URL or `path:lines`) and the areas not covered. Verify subagent findings at the source before writing them to your notes; a verification subagent may do this, and you own the verdict and spot-check. Mark each `F` line `[v]` (source opened and supports the claim), `[u]` (subagent-cited, not opened) or `[p]` (proposal or inference). The executor merges `[u]` lines only as labelled candidates; a `[u]` finding the peer confirms (`CONFIRM`, source opened) is merged as `[v]`. Write them to your notes file, one `F` line each (section 3), then send `NOTES research/<id>/<slot>-notes.md "<n> findings"` (control `info`).
 
 Give every subagent brief the current decision ledger (section 2a), so subagents do not re-apply a constraint the user has lifted.
 
-**3 Cross-check.** After both `NOTES`, read the peer's notes. Open the sources of findings rated `high`, directly or through a verification subagent, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
+**3 Cross-check.** After both `NOTES`, read the peer's notes and coverage file; send `GAP` for any area or source neither coverage file lists. Open the sources of findings rated `high`, directly or through a verification subagent, then answer with `CONFIRM`, `DISPUTE`, or `GAP`. Research a `GAP` and add the result to your own notes. The finding's author answers each `DISPUTE` once, with a revised `F` line or `A <id> "keep: <why>"`. Cross-check ends after these answers; anything still disputed or uncovered goes into the findings as an open question.
 
-**4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. The peer checks it against both notes files and the decision ledger (missing ids, contradicted revisions, re-applied exclusions, unlabelled `[u]`/inference claims) and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the kickoff `Deliverable` (if any), the top findings, the open questions, and the executor's proposed `REPORT.md` text (review §6 proposed changes), and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; "write the report" approves that proposed text, and later `REPORT.md` edits follow review §6 proposed changes. Deeper research returns to phase 2 for the named topic.
+**4 Findings.** The executor merges confirmed findings into `FINDINGS.md`: what exists, how it is used, what is relevant to the case, open questions, with sources. It also writes `OPTIONS.md` (review §4 options table) with every option found, including those ruled out by the kickoff exclusions, each with the exclusion or evidence that decided it, so the user sees what was explored, not only what survived. The peer checks it against both notes files and the decision ledger (missing ids, contradicted revisions, re-applied exclusions, unlabelled `[u]`/inference claims) and sends `ACK <seq>` of the executor's `MERGED` message, or `Q`. The reporter then shows the user the path, the kickoff `Deliverable` (if any), the top findings, the open questions, and the executor's proposed `REPORT.md` text (review §6 proposed changes), and asks: write the report, dig deeper into …, or drop …. The user's answer is relayed as `USR`; "write the report" approves that proposed text, and later `REPORT.md` edits follow review §6 proposed changes. Deeper research returns to phase 2 for the named topic.
 
 **5 Report.** An authoring task (review §6): the executor runs `begin-edit`, writes `REPORT.md`, runs `revise`, and publishes its own review. `REPORT.md` contains:
 1. Question and case.
@@ -123,7 +123,7 @@ As review §8, with the phase and its color at the start of the first line:
 
 ```
 🟡 Phase 2 Research · [<run> · round <n>] 🟦 Topic: <what is being researched or discussed>
-🟨 Options: <real alternatives with brief tradeoffs, or agreed decision: <decision>>
+🟨 Options: <real alternatives with brief tradeoffs, or agreed decision: <decision>> (OPTIONS.md: <k> kept, <r> rejected, <o> open)
 🟩 Agent 1: <position with brief evidence>
 🟪 Agent 2: <position with brief evidence; disagreement: <where> | none>
 🟧 Next: <current action or waiting decision>

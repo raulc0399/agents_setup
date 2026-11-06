@@ -413,6 +413,7 @@ class ReviewSyncTests(unittest.TestCase):
             message.pop('approval_scope')
             path.write_text(json.dumps(message))
         self.assertEqual(self.call('check', '--agent', 'agent-1')['consensus'], 'READY_TO_EXECUTE')
+        self.call('render', '--agent', 'agent-1')
 
     def state(self):
         return json.loads((self.root / '.reviews/test/state.json').read_text())
@@ -997,6 +998,42 @@ sys.exit(results[call - 1] if call <= len(results) else 0)
         self.assertIn('active', self.run_failing('begin-edit', '--agent', 'agent-1', '--text-file', 'message.md'))
         self.assertIn('active', self.run_failing('event', '--agent', 'agent-1', '--kind', 'REVIEWING'))
         self.send_control('agent-1', 'info', 'A 1A9 "done"')
+
+    def test_render_writes_threaded_transcript(self):
+        self.send_control('agent-1', 'info', 'KICK run=test prob="token refresh" exe=agent-1 rep=agent-2')
+        self.write_message('B 1B1 PLAN.md:42 "refresh never expires → stolen token valid forever" -> "add ttl step"\nD 1D1 src/auth.py:88 "log token id"')
+        self.publish('agent-1', 'BLOCKED')
+        self.send_control('agent-2', 'info', 'Q 2Q1 1B1 "is refresh in scope?"')
+        self.send_control('agent-2', 'decision', 'USR "yes, in scope" => KEEP')
+        self.write_message('FIX 1B1 PLAN.md:44\nA 1A1 "see 2Q1"')
+        self.publish('agent-1', 'APPROVED')
+        out = self.root / 'reviews/test/TRANSCRIPT.html'
+        rendered = self.call('render', '--agent', 'agent-1')
+        self.assertEqual(rendered['path'], 'reviews/test/TRANSCRIPT.html')
+        html = out.read_text()
+        self.assertIn('<!doctype html>', html.lower())
+        html = html.replace('&quot;', '"').replace('&gt;', '>')
+        thread = html[html.index('id="thread-1B1"'):]
+        thread = thread[:thread.index('</section>')]
+        for part in ('refresh never expires', 'is refresh in scope?', 'FIX 1B1 PLAN.md:44'):
+            self.assertIn(part, thread)
+        self.assertNotIn('log token id', thread)
+        self.assertIn('USR "yes, in scope" => KEEP', html)
+        self.assertIn('KICK run=test', html)
+        self.assertIn('CONSENSUS', html)
+        self.assertLess(html.index('id="thread-1B1"'), html.index('id="messages"'))
+        body = html[html.index('id="messages"'):]
+        self.assertLess(body.index('is refresh in scope?'), body.index('FIX 1B1'))
+
+    def test_render_accepts_out_path_and_empty_run(self):
+        out = self.root / 'research/test/TRANSCRIPT.html'
+        rendered = self.call('render', '--agent', 'agent-2', '--out', str(out))
+        self.assertEqual(rendered['path'], str(out))
+        self.assertIn('no messages', out.read_text().lower())
+        self.assertFalse((self.root / 'reviews').exists())
+        (out.parent / 'SUMMARY.md').write_text('Unresolved: 2Q3 open\n')
+        self.call('render', '--agent', 'agent-2', '--out', str(out))
+        self.assertIn('Unresolved: 2Q3 open', out.read_text())
 
 
 if __name__ == '__main__':

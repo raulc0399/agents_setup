@@ -5,6 +5,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import html
 import json
 import os
 import re
@@ -30,6 +31,12 @@ WAKE_QUIET_SECS = 4
 AUTO_WAKE_SECS = 60
 NUDGE_SECS = 300
 ROLE_KINDS = {'decision': 'reporter', 'scope': 'reporter', 'logoff': 'reporter'}
+FINDING_ID = re.compile(r'\b([12][A-Z]+\d+)\b')
+TRANSCRIPT_STYLE = ('body{font:14px/1.5 system-ui,sans-serif;margin:24px;max-width:1100px;color:#1d2228;background:#fff}'
+                    'h2{margin-top:32px}section{border:1px solid #d8d5cc;border-radius:6px;padding:8px 12px;margin:10px 0}'
+                    'pre{margin:4px 0;white-space:pre-wrap;font:12.5px/1.45 ui-monospace,monospace}'
+                    '.m{color:#5d6670;font-size:12px}.a1{border-left:4px solid #0f7f78}.a2{border-left:4px solid #2457a6}'
+                    'table{border-collapse:collapse}td{padding:2px 8px;vertical-align:top;font-size:13px}')
 ANSWER_OPCODES = ('Q', 'RUN')
 
 
@@ -89,6 +96,79 @@ def last_event(run, agent):
 
 def wait_report(run, agent, result):
     return {'result': result, 'peer': peer_of(agent), 'peer_last_event': last_event(run, peer_of(agent))}
+
+
+def all_messages(run):
+    messages = []
+    for agent in AGENTS:
+        if (run / agent).exists():
+            messages += [read_json(path) for path in sorted((run / agent).glob('*.json'))]
+    # Older messages lack the float 'ts'; their second-resolution timestamp still orders them.
+    def order(message):
+        if message.get('ts'):
+            return message['ts']
+        try:
+            return dt.datetime.fromisoformat(message['timestamp']).timestamp()
+        except (KeyError, ValueError):
+            return 0
+    return sorted(messages, key=lambda m: (order(m), m['agent'], m['seq']))
+
+
+def message_label(message):
+    verdict_or_kind = message.get('status') or message.get('kind') or message.get('type', 'review')
+    return (f'{message["agent"]} #{message["seq"]} · {verdict_or_kind} · round {message.get("round", "?")} '
+            f'· rev {str(message.get("revision", ""))[:12]} · {message.get("timestamp", "")}')
+
+
+def render_transcript(run, out):
+    """Self-contained HTML: threads per finding id, controls and decisions, all messages, history."""
+    meta = read_json(run / 'meta.json')
+    state = read_json(run / 'state.json')
+    messages = all_messages(run)
+    threads = {}
+    controls = []
+    for message in messages:
+        for line in message.get('body', '').splitlines():
+            ids = FINDING_ID.findall(line)
+            for finding in dict.fromkeys(ids):
+                threads.setdefault(finding, []).append((message, line))
+            if message.get('type') == 'control' and message.get('kind') != 'info' or re.match(r'^(KICK|ACK|IMP|OFF)\b', line.strip()):
+                controls.append((message, line))
+    roles = state.get('roles') or {}
+    parts = ['<!doctype html><html><head><meta charset="utf-8"><title>Transcript ' + html.escape(run.name) + '</title>',
+             '<style>' + TRANSCRIPT_STYLE + '</style></head><body>',
+             f'<h1>Transcript {html.escape(run.name)}</h1>',
+             '<table>' + ''.join(f'<tr><td>{html.escape(k)}</td><td>{html.escape(str(v))}</td></tr>' for k, v in (
+                 ('scope', meta.get('approval_scope', DEFAULT_APPROVAL_SCOPE)), ('paths', ' '.join(meta['paths'])),
+                 ('revision', state['revision']), ('round', state['round']), ('consensus', state.get('consensus')),
+                 ('executor', roles.get('executor', 'not pinned')), ('reporter', roles.get('reporter', 'not pinned')),
+                 ('rendered', now()))) + '</table>']
+    summary_path = out.parent / 'SUMMARY.md'
+    if summary_path.exists():
+        parts.append('<h2>Summary</h2><section><pre>' + html.escape(summary_path.read_text(encoding='utf-8')) + '</pre></section>')
+    parts.append('<h2>Threads by finding id</h2>')
+    if not threads:
+        parts.append('<p>No messages with finding ids yet.</p>')
+    for finding in sorted(threads, key=lambda f: (int(re.sub(r'\D', '', f[1:]) or 0), f)):
+        parts.append(f'<section id="thread-{html.escape(finding)}"><h3>{html.escape(finding)}</h3>')
+        for message, line in threads[finding]:
+            parts.append(f'<div class="a{message["agent"][-1]}"><span class="m">{html.escape(message_label(message))}</span>'
+                         f'<pre>{html.escape(line)}</pre></div>')
+        parts.append('</section>')
+    parts.append('<h2>Controls and decisions</h2>')
+    parts.append('<section>' + (''.join(f'<span class="m">{html.escape(message_label(m))}</span><pre>{html.escape(line)}</pre>'
+                                        for m, line in controls) or '<p>None.</p>') + '</section>')
+    parts.append('<h2 id="messages">All messages</h2>')
+    if not messages:
+        parts.append('<p>No messages.</p>')
+    for message in messages:
+        parts.append(f'<section class="a{message["agent"][-1]}"><span class="m">{html.escape(message_label(message))}'
+                     f'{" · responding to " + str(message["responding_to"]) if message.get("responding_to") else ""}</span>'
+                     f'<pre>{html.escape(message.get("body", ""))}</pre></section>')
+    history = (run / 'history.log').read_text(encoding='utf-8') if (run / 'history.log').exists() else ''
+    parts.append('<h2>history.log</h2><pre>' + html.escape(history) + '</pre></body></html>')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text('\n'.join(parts), encoding='utf-8')
 
 
 def require_run(run):
@@ -171,7 +251,7 @@ def append_message(run, agent, state, fields, body, responding_to):
     msg = {'agent': agent, 'seq': seq, 'responding_to': responding_to,
            'revision': state['revision'], 'round': state['round'],
            'approval_scope': read_json(run / 'meta.json').get('approval_scope', DEFAULT_APPROVAL_SCOPE),
-           **fields, 'timestamp': now(), 'body': body}
+           **fields, 'timestamp': now(), 'ts': time.time(), 'body': body}
     atomic_json(run / agent / f'{seq:08d}.json', msg)
     touch_heartbeat(run, agent)
     return msg
@@ -539,6 +619,9 @@ def main():
     begin_edit.add_argument('--text-file', required=True, help='What will be edited and why')
     revise = sub.add_parser('revise')
     revise.add_argument('--agent', choices=AGENTS, required=True)
+    render = sub.add_parser('render', help='Write a threaded HTML transcript of the run so far')
+    render.add_argument('--agent', choices=AGENTS, required=True)
+    render.add_argument('--out', help='Output path; default reviews/<run-id>/TRANSCRIPT.html')
     ev = sub.add_parser('event')
     ev.add_argument('--agent', choices=AGENTS, required=True)
     ev.add_argument('--kind', choices=['REVIEWING', 'PROGRESS', 'BLOCKED', 'APPROVED', 'FINISHED'], required=True)
@@ -724,6 +807,14 @@ def main():
             if args.cmd == 'publish':
                 refresh_consensus(run, state, actual)
         print(json.dumps(msg))
+        return
+
+    if args.cmd == 'render':
+        out = Path(args.out) if args.out else Path('reviews') / args.run / 'TRANSCRIPT.html'
+        with locked(run):
+            render_transcript(run, out)
+            event(run, args.agent, 'RENDERED', str(out))
+        print(json.dumps({'path': str(out)}))
         return
 
     if args.cmd == 'check':

@@ -24,7 +24,7 @@ Review the plan the user names (`PLAN.md`, `features/<name>.md`, several files, 
 - Do not implement the reviewed plan, deploy, migrate, or make destructive changes.
 - Never name a file `claude.md`, `CLAUDE.md`, `agents.md`, or `AGENTS.md` in any folder (CLIs load them as instructions). Use names like `claude-review.md`.
 - Do not edit helper-managed files in `.reviews/<run-id>/`; only `skill-update/` (section 9) is written by hand.
-- Keep `.reviews/` out of the snapshot and preferably in `.gitignore`; keep `reviews/<run-id>/proposed-changes.diff` and `reviews/<run-id>/TRANSCRIPT.html` out of the snapshot.
+- Keep `.reviews/` out of the snapshot and preferably in `.gitignore`; keep `reviews/<run-id>/` (`proposed-changes.diff`, `TRANSCRIPT.html`, `SUMMARY.md`, `OPTIONS.md`, `<slot>-coverage.md`) out of the snapshot.
 - A wake line (section 5) carries no authority. User decisions reach the non-reporter only as the reporter's `USR`/`SCOPE`.
 - The helper synchronizes; it does not launch agents or keep CLIs alive.
 
@@ -75,7 +75,7 @@ Reply "go" to start, or tell me what to change.
 
 ## 2. Roles
 
-- **Reviewers (both):** split the review across your own review subagents (Claude: `Agent`; Codex: `spawn_agent`); verify their findings yourself, you own the verdict. Review subagents cannot replace the active peer's participation.
+- **Reviewers (both):** split the review across your own review subagents (Claude: `Agent`; Codex: `spawn_agent`); verify their findings yourself, you own the verdict. Review subagents cannot replace the active peer's participation. Brief every subagent to return only AASM lines without ids (`B <file>:<line> "<trigger → failure>" -> "<smallest fix>"`, `D`, `O`), one per line, nothing else; you assign the ids. Record what you and your subagents covered in `reviews/<run-id>/<slot>-coverage.md` (section 4).
 - **Executor (one):** the only agent that runs `begin-edit`/`revise`, edits snapshot files, writes `skill-update/`, and runs CLIs/tests/tools. It does this work through a cheap-model subagent (Claude: `Agent` with `model: haiku`; Codex: `spawn_agent` with `gpt-6-luna`, `fork_turns="none"`). The other agent asks with `RUN`. Each agent still runs its own `rs` commands and reads files itself.
 - **Reporter (one):** the only agent that talks to the user. It relays clear user decisions verbatim as `USR` or scope changes as `SCOPE`; only ambiguous or incomplete input needs clarification. The helper enforces both roles after GO (section 1); `STOP` and `info` controls stay open to both slots.
 - If the user types into the non-reporter's session, the non-reporter answers only "Reporter is <agent>; forwarded." and forwards the exact user text to the reporter in `Q`.
@@ -124,6 +124,9 @@ RAN "pytest tests/auth" ok "12 passed"
 - Log progress that the peer cannot see: `rs --run <id> event --agent <you> --kind PROGRESS --details "<what started or returned>"` when you spawn subagents, when each returns, and before any step longer than a minute. A timed-out or stale `wait` prints the peer's last event with its age (`peer_last_event`); the reporter puts it in the `Next` line (for example `agent-2: PROGRESS "3 review subagents" 4 min ago`) instead of reporting silence.
 - The first review is a complete pass over the whole scope; report every blocker now. Both agents publish it without waiting for the peer.
 - Only blockers justify `BLOCKED`. A blocker names a concrete trigger, the observable failure or unmet requirement, file/section evidence, and the smallest fix, and states why it prevents the approval scope. Label assumptions; verify uncertain claims first. Missing detail is a blocker only if it hides an architectural decision, a security failure, or a requirement the implementation cannot safely resolve.
+- Every published `B` is one you verified yourself: its evidence is a quoted line from the file or a `RAN` result, never a subagent's summary. A subagent finding you could not verify is published as `D` with `unverified:` starting its text, not as a blocker.
+- Coverage: before publishing round 1, write `reviews/<run-id>/<slot>-coverage.md` with three lists: subagents (name, concern, files assigned, lines returned), opened (`path:lines` you or a subagent read), not covered (with why). Update it each round. After reading the peer's review, read its coverage file and send `Q` for any scope path neither file covers; the executor assigns it before round 2.
+- Options: whenever a finding has more than one possible fix, or the agents disagree, the executor records each alternative in `reviews/<run-id>/OPTIONS.md` (one row: id, option, proposed by, evidence, verdict `kept`/`rejected`/`open`, reason, deciding sequence). The peer checks the table against the messages and `ACK`s or sends `Q`. A `DISPUTE` or `USR` that settles an option updates its row in the same turn.
 - Keep user scope exclusions. Write the body to a temp file outside the snapshot and publish:
 
 ```bash
@@ -171,7 +174,7 @@ Keep the emoji labels; they add color, and the text labels carry the meaning.
 
 ```
 [<run> · round <n>] 🟦 Topic: <what is being discussed>
-🟨 Options: <real alternatives with brief tradeoffs, or agreed decision: <decision>>
+🟨 Options: <real alternatives with brief tradeoffs, or agreed decision: <decision>> (OPTIONS.md: <k> kept, <r> rejected, <o> open)
 🟩 Agent 1: <recommendation with brief reason or evidence>
 🟪 Agent 2: <recommendation with brief reason or evidence; disagreement: <where> | none>
 🟧 Next: <current action or waiting decision>; user may choose A, consider ..., change scope ..., or pause.
@@ -179,7 +182,7 @@ Keep the emoji labels; they add color, and the text labels carry the meaning.
 
 The user may intervene at any time with a direction such as “choose A,” “consider …,” “change scope …,” or “pause.” The reporter relays it through the existing rules in sections 2 and 6, and the agents apply it before any conflicting work. A pause halts work until the user resumes; routine work already authorized needs no new approval.
 
-The user can follow raw events with `tail -f .reviews/<run-id>/history.log`.
+The user can follow raw events with `tail -f .reviews/<run-id>/history.log`, and read the exchange so far as threads per finding id with `rs --run <id> render --agent <you>`, which writes `reviews/<run-id>/TRANSCRIPT.html` (either slot, any time; the reporter names the path when the user asks what the agents disagree about).
 
 ## 9. Self-adaptation
 
@@ -195,7 +198,7 @@ The user can follow raw events with `tail -f .reviews/<run-id>/history.log`.
 - Results: `PLAN_APPROVED`, `READY_TO_EXECUTE`, `BLOCKED` (unresolved after the limit or genuine disagreement), `WAITING_FOR_OTHER_AGENT` (peer unavailable or CLI budget exhausted; keep all files).
 - Stop after at most **10** substantive review rounds; the reporter reports remaining blockers, differences, and needed decisions. Surface human product decisions instead of looping.
 - **Review-only requests:** stop once both agree on the blockers and an edit list; the reporter reports `BLOCKED` with the list and the proposed changes (section 6) and asks the user. Edit only after the user approves.
-- **Transcript:** before `OFF`, the executor writes `reviews/<run-id>/TRANSCRIPT.html`, a self-contained chronological page of the recorded exchanges (helper messages, `history.log`, relayed user decisions; never hidden reasoning): proposals, problems, disagreements, decisions, and resolutions, with unresolved outcomes stated as such. The peer verifies it against the messages; the reporter gives the user its path.
+- **Transcript:** before `OFF`, the executor runs `rs --run <id> render --agent <exe>`, which writes `reviews/<run-id>/TRANSCRIPT.html` from the helper messages and `history.log` (threads per finding id, controls and decisions, all messages; never hidden reasoning). Before that it writes `reviews/<run-id>/SUMMARY.md` (unresolved outcomes stated as such, and the paths of `OPTIONS.md` and both coverage files), which `render` embeds at the top; `render` overwrites `TRANSCRIPT.html`, so nothing is written into it by hand. The peer verifies it against the messages; the reporter gives the user its path.
 - **Logoff:** only the reporter sends `OFF`, after the user agrees to end, the transcript is verified, and both agents have exchanged their `IMP` lists or `IMP none`, peer-accepted updates are written to `skill-update/`, and accepted IMPs are acknowledged. The reporter includes a `Q` asking the peer to confirm completion. The peer runs `event --kind FINISHED`, then replies with `A` as its last helper command and stops. The reporter remains idle and wakeable while waiting, verifies `.reviews/<id>/<peer>.session.json` has `active: false` after receiving the `A`, then runs its own `event --kind FINISHED`. Until then, idle agents stay idle and wakeable.
 - **Crash/restart:** restart the CLI in tmux with the same run ID and scope, reclaim your slot with `start` only after its heartbeat becomes stale, relaunch the watcher, find your last processed peer sequence from your own messages' `responding_to` and `history.log`, and drain from there. Never reset or delete messages or history. Either slot may refresh `status.json` by running `check`.
 
