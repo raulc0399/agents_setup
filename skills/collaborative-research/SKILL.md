@@ -52,6 +52,10 @@ python3 "$REVIEW" --run research-001 check
 
 Adapters consume helper-generated task/snapshot/language JSON on stdin and emit UTF-8 AASM on stdout; logs go to stderr. Follow the shared skill's `COV` and final `VOTE` requirements. Workers must review the immutable captured inputs and report genuine coverage, findings, questions, and `APPROVED` or `BLOCKED` verdicts; a successful process exit is insufficient. Collect and cross-check research evidence before scheduling the final challenge.
 
+Reviewers must understand the user's case, trace how supporting claims lead to the recommendation, and examine conflicting evidence, failure cases and assumptions. Name actual verification/check results in `COV.evidence`, mark partial/unreviewed coverage and untested uncertainty explicitly, and explain each finding's condition, observed behavior and impact with concrete support and fix.
+
+Use the shared skill's `dispatch` command for bounded automatic scheduling after `plan`. Keep routine peer messages internal; only explicit unanswered `Q`/`GAP`/`DISPUTE` messages schedule followup work. In human discussion, restate the stable item ID, subject, consequence and decision question. Use the shared `discussion begin/end` and durable `notifications --after` queue for background updates; the lead/host adapter must explicitly manage the hold and delivery cursor. This does not detect typing, suppress host tool traces or pause the research workers.
+
 The final challenger has a distinct identity and receives the structured research records, source captures, verification state, and reviews in its task brief. Approval binds both the captured input revision and this structured context fingerprint. Changing a claim, source, recommendation, or other challenge input invalidates the old challenge; schedule and complete a fresh challenge. Do not describe the generated report as a separately snapshotted, exact-text approved artifact.
 
 ## Deliver and resume

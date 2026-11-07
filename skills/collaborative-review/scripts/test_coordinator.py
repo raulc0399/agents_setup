@@ -28,6 +28,85 @@ class CoordinatorTests(unittest.TestCase):
         payload.update(kwargs)
         return self.coordinator.enqueue_task(kind, payload)
 
+    def test_availability_matches_targeted_claim_and_is_readonly(self):
+        task = self.enqueue(reviewer='alice')
+        before = self.store.events()
+        available = self.coordinator.availability()
+        self.assertEqual(available['runnable_task_ids'], [task['id']])
+        self.assertEqual(before, self.store.events())
+        self.assertEqual(self.coordinator.claim_task('alice', task_id=task['id'])['id'], task['id'])
+        self.now += 41
+        available = self.coordinator.availability()
+        self.assertTrue(available['stalled'])
+        self.assertIn('recovery', [b['code'] for t in available['tasks'] for b in t['blockers']])
+
+    def test_progress_is_explicit_idempotent_and_lease_bound(self):
+        task = self.enqueue()
+        claimed = self.coordinator.claim_task('alice')
+        lease = claimed['data']['lease_id']
+        first = self.coordinator.record_progress(task['id'], 'alice', lease, 'Traced callers', ['src:1'])
+        self.now += 2
+        self.coordinator.renew_task(task['id'], 'alice', lease)
+        again = self.coordinator.record_progress(task['id'], 'alice', lease, 'Traced callers', ['src:1'])
+        self.assertEqual(first['data']['progress'], again['data']['progress'])
+        with self.assertRaises(ValueError):
+            self.coordinator.record_progress(task['id'], 'bob', lease, 'Wrong worker')
+
+    def test_discussion_uses_only_unprotected_remaining_budget(self):
+        self.store.set_meta('budget_seconds', 50)
+        review = self.enqueue(timeout_seconds=20)
+        self.store.put_record('review_plan', 'plan', {'request': {'revision': 'rev'},
+            'task_ids': [review['id']], 'challenge_budget_seconds': 20})
+        discussion = self.enqueue('discussion', timeout_seconds=40, worker='peer')
+        claim = self.coordinator.claim_task('peer', task_id=discussion['id'])
+        self.assertEqual(claim['data']['attempt_budget_seconds'], 10)
+
+    def test_availability_reports_actual_failed_dependency_and_budget(self):
+        first = self.enqueue(reviewer='alice')
+        dependent = self.coordinator.enqueue_task('review', first['data']['payload'], [first['id']])
+        claim = self.coordinator.claim_task('alice', task_id=first['id'])
+        self.coordinator.fail_task(first['id'], 'alice', claim['data']['lease_id'], 'bad output')
+        available = self.coordinator.availability()
+        row = next(row for row in available['tasks'] if row['task_id'] == dependent['id'])
+        self.assertIn('is failed', row['blockers'][0]['reason'])
+        self.assertIsNone(self.coordinator.claim_task('alice', task_id=dependent['id']))
+        self.store.set_meta('budget_seconds', 1)
+        fresh = self.enqueue(reviewer='bob')
+        row = next(row for row in self.coordinator.availability()['tasks'] if row['task_id'] == fresh['id'])
+        self.assertIn('budget', [blocker['code'] for blocker in row['blockers']])
+        self.assertIsNone(self.coordinator.claim_task('bob', task_id=fresh['id']))
+
+    def test_progress_rejects_string_evidence_and_old_revision(self):
+        task = self.enqueue()
+        claim = self.coordinator.claim_task('alice')
+        with self.assertRaises(ValueError):
+            self.coordinator.record_progress(task['id'], 'alice', claim['data']['lease_id'], 'Read files', 'src:1')
+        self.store.set_meta('revision', 'new')
+        with self.assertRaises(ValueError):
+            self.coordinator.record_progress(task['id'], 'alice', claim['data']['lease_id'], 'Read files')
+
+    def test_running_availability_does_not_report_claim_budget_or_capacity(self):
+        task = self.enqueue()
+        self.coordinator.claim_task('alice')
+        row = self.coordinator.availability()['tasks'][0]
+        self.assertEqual([blocker['code'] for blocker in row['blockers']], ['running'])
+
+    def test_targeted_availability_does_not_expose_unrelated_runnable_tasks(self):
+        task = self.enqueue()
+        missing = self.coordinator.availability(task_id='missing')
+        self.assertEqual(missing['runnable_task_ids'], [])
+        self.assertEqual([row['task_id'] for row in missing['tasks']], ['missing'])
+        self.assertEqual(missing['tasks'][0]['blockers'][0]['code'], 'missing')
+        claimed = self.coordinator.claim_task('alice', task_id=task['id'])
+        self.coordinator.complete_task(task['id'], 'alice', claimed['data']['lease_id'], {})
+        completed = self.coordinator.availability(task_id=task['id'])
+        self.assertEqual(completed['tasks'][0]['blockers'][0]['code'], 'terminal')
+        stale = self.enqueue()
+        self.store.set_meta('revision', 'new')
+        old = self.coordinator.availability(task_id=stale['id'])
+        self.assertEqual(old['runnable_task_ids'], [])
+        self.assertIn('revision', [blocker['code'] for blocker in old['tasks'][0]['blockers']])
+
     def test_identity_dependencies_and_idempotence(self):
         first = self.enqueue(reviewer='alice')
         dependent = self.coordinator.enqueue_task('review', first['data']['payload'], [first['id']])

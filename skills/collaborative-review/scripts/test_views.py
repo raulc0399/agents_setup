@@ -1,10 +1,13 @@
 """Operator status reflects one read snapshot and never writes review state."""
 import tempfile
+import json
+import subprocess
+import sys
 import os
 import socket
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from review_core.store import Store
 from review_core.views import status_view, format_status
@@ -24,8 +27,9 @@ class ViewTests(unittest.TestCase):
     def task(self, identity, status, revision='rev', **fields):
         return self.store.put_record('task', identity, {
             'kind': 'review', 'payload': {'revision': revision, 'reviewer': identity,
-                                        'scope_paths': ['a', 'b']},
-            'status': status, 'reserved_seconds': 0, **fields})
+                                        'scope_paths': ['a', 'b'], 'timeout_seconds': 10},
+            'status': status, 'reserved_seconds': 0, 'worker': identity,
+            'dependencies': [], 'spent_seconds': 0, 'attempt': 0, **fields})
 
     def view(self, store=None):
         with patch('review_core.cli.readiness', return_value=self.approval) as readiness:
@@ -51,10 +55,65 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(view['budget']['remaining_seconds'], 68)
         self.assertEqual(view['budget']['reserved_seconds'], 20)
         actions = {item['action'] for item in view['operator_decisions']}
-        self.assertTrue({'respond', 'recover', 'run', 'authorize', 'retry', 'resume', 'resolve gaps'} <= actions)
+        self.assertTrue({'respond', 'recover', 'retry', 'resume', 'resolve gaps',
+                         'Provide an explicit current scope authorization'} <= actions)
         text = format_status(view)
         for expected in ('Run paused', 'reviewer-1', 'uncertain', 'Approval: BLOCKED', 'challenge missing', '68 remaining'):
             self.assertIn(expected, text)
+
+    def test_pending_and_reported_progress(self):
+        self.task('ready', 'pending')
+        self.task('waiting', 'pending')
+        self.task('working', 'running', lease_expires=99999999999,
+                  progress={'summary': 'Traced caller', 'at': 10, 'attempt': 1}, attempt=1)
+        self.task('heartbeat', 'running', lease_expires=99999999999, renewed_at=20)
+        coordinator = Mock()
+        coordinator.availability.return_value = {'tasks': [
+            {'task_id': 'ready', 'worker': 'ready', 'ready': True, 'blockers': []},
+            {'task_id': 'waiting', 'worker': 'waiting', 'ready': False, 'blockers': [
+                {'code': 'dependency', 'reason': 'Await working', 'action': 'Complete working', 'owner': 'working'}]}]}
+        with patch('review_core.cli.readiness', return_value=self.approval), patch('review_core.views.time.time', return_value=30):
+            view = status_view(self.store, coordinator)
+        self.assertEqual({row['id'] for row in view['active_tasks']}, {'working', 'heartbeat'})
+        self.assertEqual([row['id'] for row in view['queued_tasks']], ['ready'])
+        self.assertEqual([row['id'] for row in view['blocked_tasks']], ['waiting'])
+        details = {item['id']: item for item in view['task_details']}
+        self.assertEqual(details['waiting']['wait_owner'], 'working')
+        self.assertEqual(details['working']['reported_progress']['age_seconds'], 20)
+        self.assertIsNone(details['heartbeat']['reported_progress'])
+        for expected in ('queued', 'blocked', 'Await working', 'Complete working', 'Traced caller', 'No progress reported'):
+            self.assertIn(expected, format_status(view))
+
+    def test_expired_running_is_recovery_and_renewal_is_not_transition(self):
+        self.task('expired', 'running', lease_expires=1, execution={'terminated': True})
+        transition = self.store.events()[-1]
+        self.task('expired', 'running', lease_expires=1, execution={'terminated': True})
+        view = self.view()
+        detail = next(item for item in view['task_details'] if item['id'] == 'expired')
+        self.assertEqual(detail['state'], 'recovery required')
+        self.assertEqual(detail['wait_owner'], 'operator')
+        self.assertEqual(detail['last_transition']['at'], transition['at'])
+        self.assertIn('0 working', format_status(view))
+        self.assertIn('Recover expired task lease', format_status(view))
+
+    def test_short_ids_terminate_when_one_task_id_prefixes_another(self):
+        parent = 'task-' + 25 * 'a'
+        child = parent + '-child'
+        self.task(parent, 'completed')
+        self.task(child, 'completed')
+        script = (
+            'import json, sys; from unittest.mock import patch; '
+            'from review_core.store import Store; from review_core.views import status_view; '
+            'store = Store(sys.argv[1], readonly=True); '
+            'mock = patch("review_core.cli.readiness", return_value={"result": "BLOCKED", "blockers": []}); '
+            'mock.start(); print(json.dumps(status_view(store)["task_details"]))'
+        )
+        result = subprocess.run([sys.executable, '-c', script, str(self.path)],
+                                capture_output=True, text=True, timeout=5, check=True, cwd=Path(__file__).resolve().parent)
+        details = {item['id']: item for item in json.loads(result.stdout)}
+        self.assertEqual(details[parent]['short_id'], parent)
+        self.assertTrue(child.startswith(details[child]['short_id']))
+        self.assertNotEqual(details[parent]['short_id'], details[child]['short_id'])
 
     def test_readonly_has_no_mutation(self):
         self.task('worker', 'pending')
@@ -103,7 +162,7 @@ class ViewTests(unittest.TestCase):
         self.assertNotIn('retired', view['uncovered_paths'])
         self.assertFalse(any(item['id'] == 'retired' for item in view['operator_decisions']))
         self.store.put_record('review_plan', 'plan', {
-            'request': {'revision': 'rev'}, 'task_ids': ['retired']})
+            'request': {'revision': 'rev'}, 'task_ids': ['retired'], 'challenge_budget_seconds': 10})
         view = self.view()
         self.assertEqual(view['uncovered_paths']['retired'], ['a', 'b'])
         self.assertTrue(any(item['action'] == 'retry' and item['id'] == 'retired'

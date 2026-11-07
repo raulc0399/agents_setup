@@ -46,6 +46,24 @@ python3 "$REVIEW" --run design-review export
 
 Both reviewers must supply real evidence and reviewed coverage for every captured file; missing or blocked results keep `check` blocked. `plan --risk NAME --specialist NAME` adds requested specialist work, which needs additional `work` invocations. Workers may run concurrently within `--max-workers`; each `work` invocation runs one task. `check` exits 0 for approved, 1 for blocked, 2 for invalid requests; `finish` marks the run complete only after checks approve.
 
+### Quiet continuous dispatch and discussion
+
+After authorization and `plan`, `dispatch` promptly schedules claimable reviews, visible explicit peer questions and the final challenge within worker capacity and existing budget. It returns concrete blockers when no work can progress; it never retries failures, recovers uncertain effects or authorizes actions. Completion means the queue drained; `check` determines approval.
+
+```bash
+python3 "$REVIEW" --run design-review dispatch --timeout-seconds 300 --recipient lead-chat -- "$ADAPTER" > /absolute/path/review-dispatch.log 2>&1 &
+python3 "$REVIEW" --run design-review discussion begin --recipient lead-chat
+# Discuss one item while workers continue.
+python3 "$REVIEW" --run design-review discussion end --recipient lead-chat
+python3 "$REVIEW" --run design-review notifications --recipient lead-chat --after 0
+```
+
+Use the host's supported background facility or the shell launch above. The controller queues one concise completion/blocker summary without foreground wake prompts or routine peer output. A lead/host adapter must explicitly call discussion begin/end and deliver notifications; none is bundled. Holds affect only that recipient's presentation queue, never workers or explicit `status` requests. Save the last delivered sequence after delivery succeeds; held messages remain durable and replayable. Updates and holds belong to the current revision. Helpers cannot detect typing, hide host tool traces or automatically mute chat UI. Both one lead with subagents and separate chats use explicit recipient identities.
+
+Only applied unanswered `Q`, `GAP` and `DISPUTE` peer messages schedule one current discussion assignment per source message after blind reviews finish. `NOTE` prose and `A` replies do not wake workers. Discussion results answer assigned IDs using `A` or report an explicit blocking `GAP`, without `VOTE`; failed tasks require explicit recovery. Assignments track question content versions: answered or edited questions supersede pending work and invalidate stale responses; changed unanswered assignments run after prior running work finishes. A blocking `GAP` reply from a discussion worker does not schedule another automatic discussion; an explicit followup `Q` can. Unapplied questions return an explicit blocker. Peer communication remains internal during human discussion.
+
+Present a stable finding/question ID, short subject, concrete consequence and decision question; give short done/doing/blocked/next updates with actual evidence and location. Reviewers understand the user's case, trace callers/data flow, examine failure paths, conflicting assumptions and blast radius, and run relevant checks when feasible. `COV.evidence` names exact observed checks/results, partial/unreviewed coverage and untested limitations. Finding claims explain condition, behavior and impact with an exact target, actual evidence and proposed fix; no fixed finding cap applies.
+
 ### AASM worker and message contract
 
 Worker communication uses the strict [AASM language](skills/collaborative-review/references/aasm.md). The adapter receives helper-generated JSON on stdin: `task`, `snapshot`, and frozen `language` metadata (`id`, `digest`, `definitions`, `builtin_schemas`, `instructions`). `snapshot.root` is an isolated writable copy of pinned inputs. Environment supplies `REVIEW_RUN_DIR`, `TASK_ID`, and `LEASE_ID`. Emit UTF-8 AASM commands on stdout and logs on stderr; do not construct result JSON envelopes.

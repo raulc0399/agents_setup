@@ -88,7 +88,14 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
                      'file evidence, coverage, and a revision-bound verdict. Do not consult peer reviews. '
                      'Return only AASM commands using the supplied language schemas: B/D/O for findings, '
                      'COV for explicit file coverage, and one final VOTE referencing your COV IDs. '
-                     'Use exact path:line or path:start-end locations; explain reasoning in text fields.')
+                     'Use exact path:line or path:start-end locations; explain reasoning in text fields. '
+                     'First understand intended behavior and the user case, trace relevant callers and data flow, '
+                     'and examine failure paths, conflicting assumptions and blast radius. Run relevant checks '
+                     'when feasible; COV evidence must name actual checks and observed results, with partial '
+                     'or unreviewed coverage explicit. Distinguish untested hypotheses and limitations from '
+                     'verified observations. Each finding claim must explain the triggering condition, observed '
+                     'behavior and impact, with a concrete target, proposed fix and supporting evidence. '
+                     'Do not impose a finding count limit.')
             if focus:
                 brief += ' Pay particular attention to ' + focus + '.'
             payload = dict(revision=revision, brief=brief, scope_paths=paths,

@@ -9,7 +9,7 @@ from .authorization import authorize_task, canonical_paths
 from .findings import finding_gaps
 
 
-ACTIONS = {'review': 'review', 'challenge': 'review', 'specialist': 'review',
+ACTIONS = {'discussion': 'review', 'review': 'review', 'challenge': 'review', 'specialist': 'review',
            'inspect': 'inspect', 'execute': 'execute'}
 TERMINAL = {'completed', 'failed', 'cancelled'}
 BUDGET_ROUNDOFF_SECONDS = 1e-9
@@ -127,44 +127,106 @@ class Coordinator:
             protected.append(reserve)
         return math.fsum(protected)
 
-    def claim_task(self, worker, capabilities=None, lease_seconds=300):
+    def _claimability(self, task, worker, capabilities, tasks):
+        """One predicate for readonly availability and transactional claims."""
+        data = task['data']
+        payload = data['payload']
+        blockers = []
+        def block(code, reason, action, owner='operator'):
+            blockers.append(dict(code=code, reason=reason, action=action, owner=owner))
+        if self.store.get_meta('status') in ('paused', 'complete'):
+            block('pause', 'Run is ' + self.store.get_meta('status'), 'Resume or open the run explicitly')
+        if data['status'] != 'pending':
+            if data['status'] == 'uncertain' or (data['status'] == 'running' and self.clock() >= data['lease_expires']):
+                block('recovery', 'Task effects or expired lease require recovery', 'Inspect and record an explicit recovery decision')
+            elif data['status'] in TERMINAL:
+                block('terminal', 'Task is ' + data['status'], 'Select pending work or make an explicit retry decision')
+            else:
+                block('running', 'Task already has a running lease', 'Wait for the worker result', data.get('worker') or worker)
+            return blockers, 0, None
+        if any(t['data']['status'] == 'uncertain' for t in tasks):
+            block('uncertain', 'Uncertain task effects block claims', 'Resolve uncertain effects explicitly')
+        if payload['revision'] != self.store.get_meta('revision'):
+            block('revision', 'Task revision is not current', 'Schedule current revision work')
+        if not self._challenge_is_current(data):
+            block('stale_challenge', 'Challenge evidence context changed', 'Schedule a replacement challenge')
+        active = [t['data'] for t in tasks if t['data']['status'] == 'running']
+        if any(t['worker'] == worker for t in active):
+            block('worker_busy', 'Worker already holds a lease', 'Wait for this worker', worker)
+        if len(active) >= self.store.get_meta('max_workers', 1):
+            block('capacity', 'All worker slots are occupied', 'Wait for a worker result')
+        intended = payload.get('worker') or payload.get('reviewer')
+        if intended is not None and intended != worker:
+            block('worker', 'Task is assigned to ' + intended, 'Use the assigned worker', intended)
+        if capabilities is not None and data['kind'] not in capabilities:
+            block('capability', 'Worker cannot perform this task kind', 'Use a capable worker', worker)
+        for dependency in data['dependencies']:
+            required = self.store.get_record('task', dependency)
+            state = required['data']['status'] if required else 'missing'
+            if state != 'completed':
+                block('dependency', 'Dependency ' + dependency + ' is ' + state,
+                      'Resolve dependency explicitly' if state in TERMINAL | {'missing', 'uncertain'} else 'Wait for dependency',
+                      (required['data'].get('worker') if required else None) or 'operator')
+        budget = self.store.get_meta('budget_seconds', 0) - self.store.get_meta('spent_seconds', 0)
+        budget -= math.fsum(t.get('reserved_seconds', 0) for t in active)
+        available = budget - self._earmarked_seconds(task, tasks)
+        timeout = self._attempt_seconds(data, tasks)
+        if data['kind'] == 'discussion':
+            timeout = min(timeout, max(0, available))
+        if timeout <= 0 or available <= 0 or timeout > available + BUDGET_ROUNDOFF_SECONDS:
+            block('budget', 'Task has no sufficient unprotected budget', 'Make an explicit budget or task decision')
+        timeout = min(timeout, max(0, available))
+        if (data['kind'] == 'execute' and active) or any(t['kind'] == 'execute' for t in active):
+            block('execution', 'Execution requires exclusive worker access', 'Wait for active work to finish')
+        grant = None
+        try:
+            grant = authorize_task(self.store, ACTIONS[data['kind']], payload['revision'], payload['scope_paths'], now=self.clock())
+        except PermissionError as error:
+            block('authorization', str(error), 'Provide an explicit current scope authorization')
+        return blockers, timeout, grant
+
+    def availability(self, worker=None, capabilities=None, task_id=None):
+        if worker is not None:
+            _text(worker, 'worker')
+        if task_id is not None:
+            _text(task_id, 'task_id')
+        with self.store.read_transaction():
+            revision = self.store.get_meta('revision')
+            tasks = self.store.list_records('task')
+            rows = []
+            for task in tasks:
+                data = task['data']
+                if task_id is not None:
+                    if task['id'] != task_id:
+                        continue
+                elif data['status'] not in ('pending', 'running', 'uncertain') or (data['status'] == 'pending' and data['payload']['revision'] != revision):
+                    continue
+                identity = worker or data['payload'].get('worker') or data['payload'].get('reviewer') or 'worker-' + task['id']
+                blockers, _, _ = self._claimability(task, identity, capabilities, tasks)
+                rows.append(dict(task_id=task['id'], worker=identity, ready=not blockers, blockers=blockers))
+            if task_id is not None and not rows:
+                rows.append(dict(task_id=task_id, worker=worker or 'worker-' + task_id, ready=False,
+                    blockers=[dict(code='missing', reason='Unknown task ' + task_id,
+                                   action='Select an existing pending task', owner='operator')]))
+            runnable = [row['task_id'] for row in rows if row['ready']]
+            live = any(t['data']['status'] == 'running' and self.clock() < t['data']['lease_expires'] for t in tasks)
+            return dict(revision=revision, tasks=rows, runnable_task_ids=runnable,
+                        stalled=bool(rows) and not runnable and not live)
+
+    def claim_task(self, worker, capabilities=None, lease_seconds=300, task_id=None):
         _text(worker, 'worker')
         _positive(lease_seconds, 'lease_seconds')
         with self.store.transaction():
-            if self.store.get_meta('status') in ('paused', 'complete'):
-                return None
             tasks = self.store.list_records('task')
-            if any(t['data']['status'] == 'uncertain' for t in tasks):
-                return None
-            active = [t['data'] for t in tasks if t['data']['status'] == 'running']
-            if any(t['worker'] == worker for t in active) or len(active) >= self.store.get_meta('max_workers', 1):
-                return None
-            budget = self.store.get_meta('budget_seconds', 0) - self.store.get_meta('spent_seconds', 0)
-            budget -= math.fsum(t.get('reserved_seconds', 0) for t in active)
             for task in tasks:
                 data = task['data']
-                payload = data['payload']
-                if data['status'] != 'pending' or payload['revision'] != self.store.get_meta('revision'):
+                if data['status'] != 'pending' or (task_id is not None and task['id'] != task_id):
                     continue
-                if not self._challenge_is_current(data):
+                blockers, timeout, grant = self._claimability(task, worker, capabilities, tasks)
+                if blockers:
                     continue
-                intended = payload.get('worker') or payload.get('reviewer')
-                if intended is not None and intended != worker:
-                    continue
-                if capabilities is not None and data['kind'] not in capabilities:
-                    continue
-                if any(self.store.get_record('task', d)['data']['status'] != 'completed' for d in data['dependencies']):
-                    continue
-                timeout = self._attempt_seconds(data, tasks)
-                available = budget - self._earmarked_seconds(task, tasks)
-                if timeout <= 0 or available <= 0 or timeout > available + BUDGET_ROUNDOFF_SECONDS or (data['kind'] == 'execute' and active) or any(t['kind'] == 'execute' for t in active):
-                    continue
-                timeout = min(timeout, available)
                 now = self.clock()
-                try:
-                    grant = authorize_task(self.store, ACTIONS[data['kind']], payload['revision'], payload['scope_paths'], now=now)
-                except PermissionError:
-                    continue
+                data.pop('progress', None)
                 data.update(status='running', worker=worker, lease_id='lease-' + uuid.uuid4().hex,
                             lease_expires=now + min(lease_seconds, timeout), started_at=now, finished_at=None,
                             attempt=data['attempt'] + 1, reserved_seconds=timeout,
@@ -174,6 +236,24 @@ class Coordinator:
                 self.store.set_meta('status', 'running')
                 return self.store.put_record('task', task['id'], data, actor=worker, event='task.claimed')
             return None
+
+    def record_progress(self, task_id, worker, lease_id, summary, evidence=()):
+        _text(summary, 'summary')
+        if not isinstance(evidence, (list, tuple)):
+            raise ValueError('evidence must be a list or tuple')
+        evidence = list(evidence)
+        if not all(isinstance(item, str) and item.strip() for item in evidence):
+            raise ValueError('evidence must contain nonempty strings')
+        with self.store.transaction():
+            task = self._leased(task_id, worker, lease_id)
+            data = task['data']
+            if data['payload']['revision'] != self.store.get_meta('revision'):
+                raise ValueError('Task revision is not current')
+            previous = data.get('progress', {})
+            if previous.get('summary') == summary and previous.get('evidence') == evidence and previous.get('attempt') == data['attempt']:
+                return task
+            data['progress'] = dict(summary=summary, evidence=evidence, at=self.clock(), attempt=data['attempt'])
+            return self.store.put_record('task', task_id, data, actor=worker, event='task.progress')
 
     def _leased(self, task_id, worker, lease_id, allow_stopped=False):
         task = self.store.get_record('task', task_id)
@@ -267,6 +347,7 @@ class Coordinator:
                                                   'after_attempt': data['attempt']})
             data.update(status='pending', worker=None, lease_id=None, lease_expires=None,
                         started_at=None, finished_at=None, result=None, error=None, reserved_seconds=0)
+            data.pop('progress', None)
             data.pop('execution', None)
             data.pop('cancellation_requested', None)
             return self.store.put_record('task', task_id, data, actor='operator', event='task.retried')
@@ -326,7 +407,7 @@ class Coordinator:
         if any((t['data']['status'] == 'running' and t['data']['kind'] == 'execute') or
                (t['data']['status'] in ('pending', 'running') and
                 t['data']['payload']['revision'] == revision and
-                t['data']['kind'] in ('execute', 'review', 'challenge', 'specialist'))
+                t['data']['kind'] in ('execute', 'review', 'challenge', 'specialist', 'discussion'))
                for t in self.store.list_records('task')):
             blockers.append('Current execution or review tasks remain active')
         if any(t['data']['status'] == 'uncertain' for t in self.store.list_records('task')):

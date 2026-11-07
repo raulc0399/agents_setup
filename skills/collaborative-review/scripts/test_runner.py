@@ -79,6 +79,14 @@ print('VOTE verdict=APPROVED evidence=["covered"]')
         self.assertEqual((Path(manifest['root']) / 'code.py').read_text(), 'original')
         self.assertIsNone(self.run_worker('raise Exception("duplicate")'))
 
+    def test_targeted_dispatch_does_not_claim_earlier_task(self):
+        selected = self.coordinator.enqueue_task('review', dict(revision=self.store.get_meta('revision'),
+            scope_paths=['code.py'], brief='Selected review', reviewer='reviewer-1', timeout_seconds=10))
+        result = run_next_task(self.coordinator, 'reviewer-1', [sys.executable, '-c', RESULT_WORKER],
+                               task_id=selected['id'])
+        self.assertEqual(result['id'], selected['id'])
+        self.assertEqual(self.store.get_record('task', self.task['id'])['data']['status'], 'pending')
+
     def test_identity_mismatch_does_not_dispatch(self):
         self.assertIsNone(run_next_task(self.coordinator, 'reviewer-2', [sys.executable, '-c', 'raise Exception()']))
         self.assertEqual(self.store.get_record('task', self.task['id'])['data']['status'], 'pending')

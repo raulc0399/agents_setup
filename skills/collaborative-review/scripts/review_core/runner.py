@@ -138,7 +138,7 @@ def _exchange(coordinator, task, command, workspace, request, timeout):
                 stream.close()
 
 
-def run_next_task(coordinator, worker, command, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, dialect_id=BASE_DIALECT):
+def run_next_task(coordinator, worker, command, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, dialect_id=BASE_DIALECT, task_id=None):
     """Claim one task and return its terminal envelope, or None when none is claimable.
 
     stdin: {task: {id, kind, revision, brief, scope_paths, worker, attempt},
@@ -151,7 +151,7 @@ def run_next_task(coordinator, worker, command, timeout_seconds=DEFAULT_TIMEOUT_
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError('timeout_seconds must be positive and finite')
     dialect = get_dialect(coordinator.store, dialect_id, participant=worker)
-    task = coordinator.claim_task(worker, lease_seconds=timeout_seconds)
+    task = coordinator.claim_task(worker, lease_seconds=timeout_seconds, task_id=task_id)
     if task is None:
         return None
     data = task['data']

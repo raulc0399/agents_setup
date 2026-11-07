@@ -19,7 +19,7 @@ APPROVAL_SCOPES = ('technical-plan', 'implementation-ready', 'report-ready')
 RUN_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*')
 DEFAULT_BUDGET_SECONDS = 3600
 DEFAULT_TASK_SECONDS = 300
-READ_COMMANDS = frozenset(('check', 'status', 'inspect', 'export', 'handoff'))
+READ_COMMANDS = frozenset(('check', 'status', 'inspect', 'export', 'handoff', 'notifications'))
 
 
 def _positive(value):
@@ -55,8 +55,13 @@ def _parser():
     work.add_argument('--dialect', default='aasm-1')
     work.add_argument('--timeout-seconds', type=_positive, default=DEFAULT_TASK_SECONDS)
     work.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- executable [arguments]')
+    dispatch = commands.add_parser('dispatch', help='run ready workers and follow-ups without routine output')
+    dispatch.add_argument('--dialect', default='aasm-1')
+    dispatch.add_argument('--timeout-seconds', type=_positive, default=DEFAULT_TASK_SECONDS)
+    dispatch.add_argument('--recipient', default='coordinator', help='recipient of the final queued update')
+    dispatch.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- executable [arguments]')
     task = commands.add_parser('task', help='manual task lifecycle operations')
-    task.add_argument('action', choices=('enqueue', 'claim', 'submit', 'fail', 'cancel', 'renew', 'retry'))
+    task.add_argument('action', choices=('enqueue', 'claim', 'submit', 'fail', 'cancel', 'renew', 'retry', 'progress'))
     task.add_argument('--data', help='administrative JSON request file, or - for stdin')
     task.add_argument('--body', help='AASM task submission file, or - for stdin')
     task.add_argument('--worker')
@@ -77,6 +82,12 @@ def _parser():
     inbox = message_actions.add_parser('inbox')
     inbox.add_argument('--worker', required=True)
     inbox.add_argument('--after', type=int, default=0)
+    discussion = commands.add_parser('discussion', help='defer user-facing updates while discussion is active')
+    discussion.add_argument('action', choices=('begin', 'end'))
+    discussion.add_argument('--recipient', required=True)
+    notifications = commands.add_parser('notifications', help='read queued human summaries without waking a chat')
+    notifications.add_argument('--recipient', required=True)
+    notifications.add_argument('--after', type=int, default=0)
     dialect = commands.add_parser('dialect', help='define, test and agree immutable language extensions')
     dialect_actions = dialect.add_subparsers(dest='dialect_action', required=True)
     propose = dialect_actions.add_parser('propose')
@@ -281,11 +292,15 @@ def _coordinator(store):
         prepared = prepare_result(store, author, result.get('aasm'), result.get('dialect_id'))
         if json.dumps(prepared, sort_keys=True) != json.dumps(result, sort_keys=True):
             raise ValueError('Worker result differs from its parsed AASM body')
+        if data['kind'] == 'discussion' and _supersede_discussion_result(store, task):
+            return
         review_task = data['kind'] in ('review', 'challenge', 'specialist')
         if review_task and 'verdict' not in prepared:
             raise ValueError('Review tasks require a final VOTE')
         apply_operations(store, author, revision, prepared['operations'], task_id=task['id'],
                          allow_vote=review_task, dialect_id=prepared['dialect_id'])
+        if data['kind'] == 'discussion':
+            _discussion_reply(store, task, prepared)
         if data['kind'] == 'review':
             coordinator.record_review(author, revision, result.get('verdict'),
                                       result.get('evidence_ids', []), task_id=task['id'])
@@ -299,6 +314,56 @@ def _coordinator(store):
 
     coordinator = Coordinator(store, result_handler=ingest)
     return coordinator
+
+
+def _supersede_discussion_result(store, task):
+    """Keep a raced response for audit without applying it to changed questions."""
+    data = task['data']
+    assigned = data['payload'].get('question_ids', [])
+    versions = data['payload'].get('question_versions')
+    if (not isinstance(assigned, list) or not assigned or not isinstance(versions, dict)
+            or set(versions) != set(assigned)
+            or any(isinstance(version, bool) or not isinstance(version, int) or version < 1
+                   for version in versions.values())):
+        raise ValueError('Discussion requires versioned assigned questions')
+    questions = [store.get_record('question', identity) for identity in assigned]
+    if any(question is None or question['data']['revision'] != data['payload']['revision']
+           for question in questions):
+        raise ValueError('Discussion question is missing or stale')
+    if all(question['data']['status'] == 'unanswered'
+           and question['data']['content_version'] == versions[question['id']] for question in questions):
+        return False
+    reason = 'Discussion assignment changed before the response completed'
+    data.update(status='cancelled', error=reason, discussion_superseded=True, result_disposition='superseded')
+    if data.get('attempts'):
+        data['attempts'][-1].update(status='cancelled', error=reason)
+    store.put_record('task', task['id'], data, actor=data['worker'], event='discussion.superseded')
+    return True
+
+
+def _discussion_reply(store, task, result):
+    from .messages import send_message
+
+    data = task['data']
+    payload = data['payload']
+    source = store.get_record('message', payload.get('message_id', 'missing'))
+    if (source is None or source['data']['revision'] != payload['revision']
+            or source['data']['recipient'] != data['worker']
+            or source['data']['sender'] != payload.get('reply_recipient')
+            or source['id'] != payload.get('reply_to')):
+        raise ValueError('Discussion must reply to its assigned current conversation')
+    question_ids = payload.get('question_ids')
+    if not isinstance(question_ids, list) or not question_ids:
+        raise ValueError('Discussion requires assigned questions')
+    questions = [store.get_record('question', identity) for identity in question_ids]
+    if any(question is None or question['data']['revision'] != payload['revision'] for question in questions):
+        raise ValueError('Discussion question is missing or stale')
+    if any(question['data']['status'] != 'answered' for question in questions):
+        if not any(operation['op'] == 'GAP' for operation in result['operations']):
+            raise ValueError('Answer assigned questions or report an explicit GAP with the missing evidence')
+    send_message(store, data['worker'], payload['reply_recipient'], result['aasm'],
+                 dialect_id=result['dialect_id'], task_id=task['id'], lease_id=data['lease_id'],
+                 reply_to=source['id'], message_id='reply-' + data['lease_id'])
 
 
 def readiness(store, coordinator=None):
@@ -380,8 +445,22 @@ def _dispatch(store, args):
         command = args.worker_command
         if command and command[0] == '--':
             command = command[1:]
-        return run_next_task(coordinator, args.worker, command, timeout_seconds=args.timeout_seconds,
-                             dialect_id=args.dialect)
+        result = run_next_task(coordinator, args.worker, command, timeout_seconds=args.timeout_seconds,
+                               dialect_id=args.dialect)
+        return result if result is not None else {'state': 'blocked', 'availability': coordinator.availability(args.worker)}
+    if args.command == 'dispatch':
+        from .dispatcher import dispatch_run
+        command = args.worker_command
+        if command and command[0] == '--':
+            command = command[1:]
+        return dispatch_run(store.run_dir, command, timeout_seconds=args.timeout_seconds,
+                            dialect_id=args.dialect, recipient=args.recipient)
+    if args.command == 'discussion':
+        from .notifications import set_discussion_active
+        return set_discussion_active(store, args.recipient, args.action == 'begin')
+    if args.command == 'notifications':
+        from .notifications import read_notifications
+        return read_notifications(store, args.recipient, after=args.after)
     if args.command == 'task':
         if args.action == 'submit':
             from .aasm_records import prepare_result
@@ -394,8 +473,13 @@ def _dispatch(store, args):
         actions = {'enqueue': coordinator.enqueue_task, 'claim': coordinator.claim_task,
                    'fail': coordinator.fail_task,
                    'cancel': coordinator.cancel_task, 'renew': coordinator.renew_task,
-                   'retry': coordinator.retry_task}
-        return actions[args.action](**_object(args.data))
+                   'retry': coordinator.retry_task, 'progress': coordinator.record_progress}
+        request = _object(args.data)
+        result = actions[args.action](**request)
+        if args.action == 'claim' and result is None:
+            return {'state': 'blocked', 'availability': coordinator.availability(
+                request.get('worker'), request.get('capabilities'), task_id=request.get('task_id'))}
+        return result
     if args.command == 'message':
         from .messages import send_message, read_messages
         from .aasm_records import apply_operations
@@ -501,7 +585,7 @@ def main(argv=None):
                         (args.command == 'message' and args.message_action == 'inbox') or
                         (args.command == 'dialect' and args.dialect_action in ('show', 'export')))
             with Store(_run_dir(args), readonly=readonly) as store:
-                if args.command != 'inspect':
+                if args.command not in ('inspect', 'discussion', 'notifications'):
                     _require_snapshot(store)
                 result = _dispatch(store, args)
         if args.command == 'status' and not args.json:
@@ -510,6 +594,9 @@ def main(argv=None):
         else:
             print(json.dumps(result, indent=2, allow_nan=False))
         if args.command in ('check', 'finish') and result['result'] != 'APPROVED':
+            return 1
+        if args.command == 'dispatch' and (result['state'] == 'blocked' or
+                (result.get('plan_exists') and result['approval']['result'] != 'APPROVED')):
             return 1
         if args.command == 'doctor' and not result['ok']:
             return 1

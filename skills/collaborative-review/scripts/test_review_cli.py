@@ -100,7 +100,10 @@ class ReviewCliTests(unittest.TestCase):
         self.assertEqual(changed['changed_paths'], ['input.txt'])
         self.cli('check', expected=1)
         self.cli('plan')
-        self.assertIsNone(self.work('reviewer-1'))
+        blocked = self.work('reviewer-1')
+        self.assertEqual(blocked['state'], 'blocked')
+        self.assertTrue(any(reason['code'] == 'authorization' for task in blocked['availability']['tasks']
+                            for reason in task['blockers']))
         self.grant()
         self.assertEqual(self.work('reviewer-1')['data']['status'], 'completed')
         self.assertEqual(self.work('reviewer-2')['data']['status'], 'completed')

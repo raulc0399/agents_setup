@@ -118,7 +118,11 @@ def schedule_challenge(store, coordinator):
             raise ValueError('Plan challenge reserve is exhausted')
         brief = ('Challenge the integrated plan, changes, integration surfaces, assumptions, '
                  'research claims, approvals, findings, questions, and recovery decisions. '
-                 'Report every actionable issue using AASM B/D/O commands with exact file locations. '
+                 'Trace intended behavior, relevant callers and data flow; examine failure paths, conflicts '
+                 'and blast radius. Run relevant checks when feasible and cite exact observed results in COV '
+                 'evidence; mark partial or unreviewed coverage and untested uncertainty explicitly. '
+                 'Report every actionable issue using AASM B/D/O commands with exact file locations, '
+                 'triggering condition, observed behavior, impact, concrete fix and actual evidence. '
                  'Return only AASM commands using the supplied language schemas. '
                  'Include COV for every scope path on this revision, then one final VOTE. Example:\n'
                  'COV id=coverage-example paths=["scope/file.py"] status=reviewed evidence=["concrete evidence"]\n'

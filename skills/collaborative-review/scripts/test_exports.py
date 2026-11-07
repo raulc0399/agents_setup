@@ -45,6 +45,17 @@ class ExportTests(unittest.TestCase):
         export_run(self.store, self.approval)
         self.assertIn('| selected | [unused]', Path(paths['OPTIONS.md']).read_text())
 
+    def test_summary_contains_finding_context_and_actual_review_methods(self):
+        self.row('finding', 'F-1', revision='current', claim='When input is empty, lookup fails and drops the request',
+                 paths=['src/lookup.py'], locations=['src/lookup.py:12-14'], evidence=['Observed KeyError in check'],
+                 proposed_fix='Handle empty input', severity='high', status='open')
+        self.row('coverage', 'C-1', revision='current', author='reviewer-1', paths=['src/lookup.py'],
+                 status='partial', evidence=['Traced caller; test lookup failed; network untested'])
+        summary = Path(export_run(self.store, self.approval)['SUMMARY.md']).read_text()
+        for expected in ('F-1', 'src/lookup.py:12-14', 'Observed KeyError in check', 'Handle empty input',
+                         'reviewer-1', 'partial', 'Traced caller; test lookup failed; network untested'):
+            self.assertIn(expected, summary)
+
     def test_transcript_escapes_content_and_only_links_existing_safe_anchors(self):
         evil = '\"><script>alert(1)</script><img src=x onerror=alert(2)>'
         self.row('question', evil, revision='current', text=evil, answer_id='javascript:alert(1)')

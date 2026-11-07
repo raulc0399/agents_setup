@@ -107,13 +107,17 @@ def _summary(records, revision, approval):
              _md(row['data'].get('access_date', '')), _md(row['data'].get('sha256', '')),
              _md(row['data'].get('excerpt', '')), _md(row['data'].get('revision', ''))]
             for row in rows('source')])])
-        lines.extend(['', '### Findings', '', _table(['ID', 'Claim', 'Severity', 'Verified', 'Status', 'Proposed fix', 'Revision'], [
+        lines.extend(['', '### Findings', '', _table(['ID', 'Paths', 'Locations', 'Claim', 'Evidence', 'Severity', 'Verified', 'Status', 'Proposed fix', 'Revision'], [
             [_ref('finding', row['id'], records)] + [_md(row['data'].get(field, '')) for field in
-             ('claim', 'severity', 'verified', 'status', 'proposed_fix', 'revision')] for row in rows('finding')])])
+             ('paths', 'locations', 'claim', 'evidence', 'severity', 'verified', 'status', 'proposed_fix', 'revision')] for row in rows('finding')])])
         lines.extend(['', '### Questions', '', _table(['ID', 'Question', 'Status', 'Answer', 'Revision'], [
             [_ref('question', row['id'], records), _md(row['data'].get('text', '')), _md(row['data'].get('status', '')),
              _refs('answer', [row['data']['answer_id']] if row['data'].get('answer_id') else [], records),
              _md(row['data'].get('revision', ''))] for row in rows('question')])])
+        lines.extend(['', '### Review methods and limitations', '', _table(
+            ['ID', 'Reviewer', 'Paths', 'Coverage status', 'Recorded checks, results and limitations', 'Revision'], [
+                [_ref('coverage', row['id'], records)] + [_md(row['data'].get(field, '')) for field in
+                 ('author', 'paths', 'status', 'evidence', 'revision')] for row in rows('coverage')])])
         lines.extend(['', '### Reviews', '', _table(['Reviewer', 'Verdict', 'Revision'], [
             [_md(row['data'].get('reviewer', '')), _md(row['data'].get('verdict', '')),
              _md(row['data'].get('revision', ''))] for row in rows('review')])])
