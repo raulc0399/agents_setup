@@ -40,6 +40,7 @@ def _parser():
     create.add_argument('--approval-scope', choices=APPROVAL_SCOPES, default='technical-plan')
     create.add_argument('--budget-seconds', type=_positive, default=DEFAULT_BUDGET_SECONDS)
     create.add_argument('--max-workers', type=int, choices=range(1, 33), default=2)
+    create.add_argument('--participants', nargs='+', help='explicit participants for task-independent messaging')
     authorize = commands.add_parser('authorize', help='operator confirms scoped actions interactively')
     authorize.add_argument('--actions', nargs='+', default=['review', 'inspect'])
     authorize.add_argument('--paths', nargs='+')
@@ -49,13 +50,48 @@ def _parser():
     plan = commands.add_parser('plan', help='enqueue two independent reviews')
     plan.add_argument('--risk', action='append', default=[])
     plan.add_argument('--specialist', action='append', default=[])
-    work = commands.add_parser('work', help='run one task with a trusted JSON stdin/stdout adapter')
+    work = commands.add_parser('work', help='run one task: helper JSON input, formal AASM output')
     work.add_argument('--worker', required=True)
+    work.add_argument('--dialect', default='aasm-1')
     work.add_argument('--timeout-seconds', type=_positive, default=DEFAULT_TASK_SECONDS)
     work.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- executable [arguments]')
     task = commands.add_parser('task', help='manual task lifecycle operations')
     task.add_argument('action', choices=('enqueue', 'claim', 'submit', 'fail', 'cancel', 'renew', 'retry'))
-    task.add_argument('--data', required=True, help='JSON object file, or - for stdin')
+    task.add_argument('--data', help='administrative JSON request file, or - for stdin')
+    task.add_argument('--body', help='AASM task submission file, or - for stdin')
+    task.add_argument('--worker')
+    task.add_argument('--task-id')
+    task.add_argument('--lease-id')
+    task.add_argument('--dialect', default='aasm-1')
+    message = commands.add_parser('message', help='send or read formal agent messages')
+    message_actions = message.add_subparsers(dest='message_action', required=True)
+    send = message_actions.add_parser('send')
+    send.add_argument('--worker', required=True)
+    send.add_argument('--to', required=True)
+    send.add_argument('--body', required=True)
+    send.add_argument('--task-id')
+    send.add_argument('--lease-id')
+    send.add_argument('--reply-to')
+    send.add_argument('--id')
+    send.add_argument('--dialect', default='aasm-1')
+    inbox = message_actions.add_parser('inbox')
+    inbox.add_argument('--worker', required=True)
+    inbox.add_argument('--after', type=int, default=0)
+    dialect = commands.add_parser('dialect', help='define, test and agree immutable language extensions')
+    dialect_actions = dialect.add_subparsers(dest='dialect_action', required=True)
+    propose = dialect_actions.add_parser('propose')
+    propose.add_argument('--worker', required=True)
+    propose.add_argument('--manifest', required=True)
+    test = dialect_actions.add_parser('test')
+    test.add_argument('--worker', required=True)
+    test.add_argument('--id', required=True)
+    test.add_argument('--readback', required=True)
+    ack = dialect_actions.add_parser('ack')
+    ack.add_argument('--worker', required=True)
+    ack.add_argument('--id', required=True)
+    for action in ('show', 'export'):
+        show = dialect_actions.add_parser(action)
+        show.add_argument('--id', required=True)
     record = commands.add_parser('record', help='validate and persist a structured record')
     record.add_argument('kind', choices=('finding', 'finding-update', 'question', 'answer', 'option',
                                        'question-update', 'option-update', 'coverage', 'coverage-update',
@@ -85,7 +121,6 @@ def _parser():
     proposal.add_argument('--evidence', action='append', default=[])
     doctor = commands.add_parser('doctor', help='check local runtime prerequisites')
     doctor.add_argument('--project', type=Path, default=Path.cwd())
-    doctor.add_argument('--legacy-tmux', action='store_true')
     doctor.add_argument('worker_command', nargs=argparse.REMAINDER)
     evaluate = commands.add_parser('evaluate', help='score supplied runs against known cases')
     evaluate.add_argument('--cases', type=Path, required=True)
@@ -106,6 +141,10 @@ def _object(path):
     if not isinstance(value, dict):
         raise ValueError('request must be a JSON object')
     return value
+
+
+def _read_body(path):
+    return sys.stdin.read() if str(path) == '-' else Path(path).read_text(encoding='utf-8')
 
 
 def _run_dir(args):
@@ -166,6 +205,11 @@ def _create(args):
                 'max_workers': args.max_workers, 'challenge_required': True}
     metadata = {**policies, 'project_root': str(project), 'paths': args.paths,
                 'status': 'initializing', 'created_at': time.time(), 'spent_seconds': 0}
+    if args.participants is not None:
+        if len(set(args.participants)) != len(args.participants) or any(
+                not name.strip() or name != name.strip() or name == 'coordinator' for name in args.participants):
+            raise ValueError('participants must be unique nonempty worker names')
+        metadata['participants'] = args.participants
     with Store(run, create=True, metadata=metadata) as store:
         try:
             snapshot = create_snapshot(project, args.paths, run.parent, run.name)
@@ -223,27 +267,35 @@ def _record(store, coordinator, kind, data):
 
 def _coordinator(store):
     from .coordinator import Coordinator
-    from . import findings
+    from .aasm_records import prepare_result, apply_operations
+    from .challenge import current_context_fingerprint
+    from .messages import send_message
 
     def ingest(task, result):
         data = task['data']
         revision = data['payload']['revision']
         author = data['worker']
-        writers = {'findings': findings.create_finding, 'questions': findings.create_question,
-                   'options': findings.create_option, 'coverage': findings.create_coverage}
-        for kind, writer in writers.items():
-            entries = result.get(kind, [])
-            if not isinstance(entries, list):
-                raise ValueError(kind + ' must be a list')
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    raise ValueError(kind + ' entries must be objects')
-                if entry.get('revision', revision) != revision or entry.get('author', author) != author:
-                    raise ValueError('worker result identity or revision does not match its lease')
-                writer(store, **{**entry, 'author': author, 'revision': revision})
+        challenge = data['kind'] == 'challenge' and 'context_fingerprint' in data['payload']
+        if challenge and data['payload']['context_fingerprint'] != current_context_fingerprint(store):
+            raise ValueError('Challenge context changed during the task')
+        prepared = prepare_result(store, author, result.get('aasm'), result.get('dialect_id'))
+        if json.dumps(prepared, sort_keys=True) != json.dumps(result, sort_keys=True):
+            raise ValueError('Worker result differs from its parsed AASM body')
+        review_task = data['kind'] in ('review', 'challenge', 'specialist')
+        if review_task and 'verdict' not in prepared:
+            raise ValueError('Review tasks require a final VOTE')
+        apply_operations(store, author, revision, prepared['operations'], task_id=task['id'],
+                         allow_vote=review_task, dialect_id=prepared['dialect_id'])
         if data['kind'] == 'review':
             coordinator.record_review(author, revision, result.get('verdict'),
                                       result.get('evidence_ids', []), task_id=task['id'])
+        send_message(store, author, 'coordinator', prepared['aasm'],
+                     dialect_id=prepared['dialect_id'], task_id=task['id'], lease_id=data['lease_id'],
+                     message_id='result-' + data['lease_id'])
+        if challenge:
+            # Bind only this atomic result's effects; later evidence still changes the context.
+            data['completion_context_fingerprint'] = current_context_fingerprint(store)
+            store.put_record('task', task['id'], data, actor=author, event='task.context_bound')
 
     coordinator = Coordinator(store, result_handler=ingest)
     return coordinator
@@ -328,13 +380,53 @@ def _dispatch(store, args):
         command = args.worker_command
         if command and command[0] == '--':
             command = command[1:]
-        return run_next_task(coordinator, args.worker, command, timeout_seconds=args.timeout_seconds)
+        return run_next_task(coordinator, args.worker, command, timeout_seconds=args.timeout_seconds,
+                             dialect_id=args.dialect)
     if args.command == 'task':
+        if args.action == 'submit':
+            from .aasm_records import prepare_result
+            if args.data or not all((args.body, args.worker, args.task_id, args.lease_id)):
+                raise ValueError('submit requires --body, --worker, --task-id and --lease-id')
+            result = prepare_result(store, args.worker, _read_body(args.body), args.dialect)
+            return coordinator.complete_task(args.task_id, args.worker, args.lease_id, result)
+        if not args.data or any((args.body, args.worker, args.task_id, args.lease_id)):
+            raise ValueError('Administrative task actions require only --data')
         actions = {'enqueue': coordinator.enqueue_task, 'claim': coordinator.claim_task,
-                   'submit': coordinator.complete_task, 'fail': coordinator.fail_task,
+                   'fail': coordinator.fail_task,
                    'cancel': coordinator.cancel_task, 'renew': coordinator.renew_task,
                    'retry': coordinator.retry_task}
         return actions[args.action](**_object(args.data))
+    if args.command == 'message':
+        from .messages import send_message, read_messages
+        from .aasm_records import apply_operations
+        if args.message_action == 'inbox':
+            return read_messages(store, args.worker, after=args.after)
+        def apply(operations, envelope):
+            return apply_operations(store, args.worker, envelope['revision'], operations,
+                                    task_id=args.task_id, dialect_id=envelope['dialect_id'])
+        return send_message(store, args.worker, args.to, _read_body(args.body),
+                            dialect_id=args.dialect, reply_to=args.reply_to, message_id=args.id,
+                            task_id=args.task_id, lease_id=args.lease_id, apply=apply)
+    if args.command == 'dialect':
+        from .dialects import (propose_dialect, test_dialect, acknowledge_dialect,
+                               dialect_status, export_dialect, get_dialect)
+        if args.dialect_action == 'propose':
+            manifest = _object(args.manifest)
+            fields = {'name', 'version', 'participants', 'definitions', 'examples'}
+            if set(manifest) - fields - {'author', 'id', 'base', 'digest'}:
+                raise ValueError('Unknown dialect manifest fields')
+            if manifest.get('base', 'aasm-1') != 'aasm-1':
+                raise ValueError('Unsupported base dialect')
+            return propose_dialect(store, author=args.worker, dialect_id=manifest.get('id'),
+                                   **{key: manifest[key] for key in fields if key in manifest})
+        if args.dialect_action == 'test':
+            return test_dialect(store, args.id, args.worker, _read_json(args.readback))
+        if args.dialect_action == 'ack':
+            return acknowledge_dialect(store, args.id, args.worker)
+        if args.dialect_action == 'export':
+            return export_dialect(store, args.id)
+        manifest = get_dialect(store, args.id) if args.id == 'aasm-1' else export_dialect(store, args.id)
+        return {'manifest': manifest, 'agreement': dialect_status(store, args.id)}
     if args.command == 'record':
         return _record(store, coordinator, args.kind, _object(args.data))
     if args.command == 'inspect':
@@ -400,12 +492,15 @@ def main(argv=None):
             command = args.worker_command
             if command and command[0] == '--':
                 command = command[1:]
-            result = diagnose(args.project, worker_command=command or None, legacy_tmux=args.legacy_tmux)
+            result = diagnose(args.project, worker_command=command or None)
         elif args.command == 'evaluate':
             from .evaluation import evaluate
             result = evaluate(_read_json(args.cases), _read_json(args.results))
         else:
-            with Store(_run_dir(args), readonly=args.command in READ_COMMANDS) as store:
+            readonly = (args.command in READ_COMMANDS or
+                        (args.command == 'message' and args.message_action == 'inbox') or
+                        (args.command == 'dialect' and args.dialect_action in ('show', 'export')))
+            with Store(_run_dir(args), readonly=readonly) as store:
                 if args.command != 'inspect':
                     _require_snapshot(store)
                 result = _dispatch(store, args)

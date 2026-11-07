@@ -17,6 +17,16 @@ class FindingsTests(unittest.TestCase):
     def finding(self, **kwargs):
         return f.create_finding(self.store, **dict(author='reviewer', revision='rev', claim='Wrong result', proposed_fix='Correct result', paths=['src/a.py'], **kwargs))
 
+    def test_optional_typed_locations_preserve_old_callers(self):
+        self.assertNotIn('locations', self.finding()['data'])
+        row = self.finding(locations=['src/a.py:2-4'])
+        self.assertEqual(['src/a.py:2-4'], row['data']['locations'])
+        for location in ['src/a.py:0', 'src/a.py:4-2', 'missing.py:2', 'src//a.py:2']:
+            with self.subTest(location=location), self.assertRaises(ValueError):
+                self.finding(locations=[location])
+        with self.assertRaises(ValueError):
+            f.update_finding(self.store, finding_id=row['id'], actor='r', paths=[])
+
     def test_stable_id_and_complete_gap_list(self):
         first = self.finding(finding_id='f1', verified=True, evidence=['a.py:3'])
         self.assertEqual(first, self.finding(finding_id='f1', verified=True, evidence=['a.py:3']))

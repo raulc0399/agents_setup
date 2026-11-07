@@ -26,11 +26,15 @@ Before claiming work, an operator must run `authorize` in a terminal, inspect th
 
 ## Worker evidence and records
 
-The trusted adapter receives one JSON object on stdin containing `task` and `snapshot`; `snapshot.root` is its isolated writable workspace. Emit exactly one JSON object on stdout; send logs to stderr. Include `evidence_ids` and typed `coverage`; review/challenge outputs also require `verdict: APPROVED|BLOCKED`. Findings, questions, and options may accompany the result. Evidence references attest what the worker checked; strings alone do not prove a claim.
+Read [the AASM reference](references/aasm.md) for the strict grammar, operation schemas, and dialect negotiation. Adapters receive helper-generated JSON containing `task`, `snapshot`, and frozen `language` schemas on stdin; `snapshot.root` is their isolated workspace. Emit only UTF-8 AASM commands on stdout, logs on stderr. The helper generates JSON envelopes and persists validated bodies, metadata, and typed records in SQLite; agents do not author those envelopes.
 
-Coverage entries name concrete snapshot paths, `status: reviewed|partial|unreviewed`, and nonempty `evidence`. Give challenge coverage explicit stable `coverage_id` values and reference those same IDs in `evidence_ids`; cover every scope path. Verify every claimed blocker against actual files or check output; mark unverified issues accordingly. Report every distinct actionable finding with its location, consequence, and proposed correction.
+Use `COV` with actual paths, status, and observed evidence, then exactly one final `VOTE` for review/challenge results. Its evidence IDs reference stored coverage; approved coverage must span the task scope. Use `B` only for verified blockers with actual snapshot `at` locations, claims, fixes and evidence; `D`/`O` are nonblocking. Report every distinct actionable finding without inventing evidence.
 
-Use `record <kind> --data <JSON-file-or->` for typed manual records. Use `task` lifecycle commands for existing interactive worker sessions; submission requires the current worker and lease. Never bypass validation by writing directly to the Store. Use `inspect` to read/search authorized pinned inputs without an arbitrary shell-command allowlist.
+For interactive sessions, `task claim --data <JSON-file-or->` takes a worker identity and returns `id` plus `data.lease_id`; submit with `task submit --worker <name> --task-id <id> --lease-id <lease> --body <AASM-file-or->`. Administrative lifecycle and `record` commands retain explicit JSON inputs. Never write the database directly. Use `inspect` for authorized pinned input reads.
+
+Use `message send --worker <name> --to <peer> --task-id <id> --lease-id <lease> --body <AASM-file-or->` and `message inbox --worker <name> --after <sequence>`. Bind discussion to the actual task and lease; peer inboxes remain closed until all initial blind reviews complete. Explicit `create --participants <names...>` enables authorized task-independent participants.
+
+The fixed `aasm-1` grammar permits declarative vocabulary extensions, never executable plugins or authorization changes. Propose an immutable dialect, have every named participant independently test all example readbacks and ACK only after passing, then select the accepted version using `--dialect` on `work`, `task submit`, or `message send`. Preserve exact version/digest meaning. Exported definitions need fresh proposal/tests/ACKs in another run. Conformance proves interpretation consistency, not superior review quality.
 
 ## Changes, retries, and recovery
 
@@ -38,4 +42,4 @@ Apply separately authorized input changes outside the snapshot, then run `revise
 
 Use `status --json` and `handoff` for current work, decisions, and checkpoints. `pause --reason <text>` prevents new claims; `resume` recovers expired readonly work. Cancellation of running work retains its lease/capacity until termination is acknowledged. Explicit `task retry --data <JSON-file>` takes `task_id` and `reason`, preserving history for failed/cancelled current tasks; do not loop retries without diagnosing the failure. Possibly live processes must terminate first. Uncertain execution effects require operator-confirmed `recover` with evidence; never blindly repeat mutations.
 
-Protocol changes go through `protocol-proposal` for future runs. Active runs execute their pinned bundle; do not weaken their policies in place. For an existing `scripts/review-sync.py` run (`meta.json` without `run.db`), read [the retained legacy protocol](references/legacy-protocol.md) and use that helper; never convert its state or use its random-role/tmux workflow for new runs.
+Protocol changes go through `protocol-proposal` for future runs. Active runs execute their pinned bundle; negotiated dialects add immutable data definitions without weakening code or policies. The retired file-based helper is no longer shipped; leave existing user state untouched and create a new coordinator run.

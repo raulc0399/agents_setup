@@ -21,9 +21,9 @@ for entry in request['snapshot']['files']:
     paths.append(path)
     proofs.append(path + ':sha256:' + hashlib.sha256(content).hexdigest())
 identity = 'coverage-' + request['task']['id']
-print(json.dumps({'verdict': 'APPROVED', 'evidence_ids': [identity],
-    'coverage': [{'coverage_id': identity, 'paths': paths, 'status': 'reviewed',
-                  'evidence': proofs, 'finding_ids': []}]}))
+print('COV id=' + identity + ' paths=' + json.dumps(paths) +
+      ' status=reviewed evidence=' + json.dumps(proofs))
+print('VOTE verdict=APPROVED evidence=' + json.dumps([identity]))
 '''
 
 

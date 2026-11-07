@@ -200,6 +200,67 @@ class ChallengeTests(unittest.TestCase):
         self.store.set_meta('challenge_required', False)
         self.assertEqual(challenge_gaps(self.store), [])
 
+    def test_language_agreement_and_peer_messages_invalidate_challenge(self):
+        self.reviews()
+        for kind, record_id, data in (
+                ('dialect', 'terms', {'definitions': [{'op': 'CHECK'}]}),
+                ('dialect_test', 'readback', {'passed': True}),
+                ('dialect_ack', 'ack', {'participant': 'reviewer-1'}),
+                ('message', 'peer', {'revision': 'rev', 'sender': 'reviewer-1', 'body': 'NOTE text=changed'}),
+                ('aasm_domain', 'domain', {'revision': 'rev', 'author': 'reviewer-2', 'operation': 'CHECK'})):
+            with self.subTest(kind=kind):
+                task = schedule_challenge(self.store, self.coordinator)
+                self.complete(task)
+                self.assertEqual(challenge_gaps(self.store), [])
+                self.store.put_record(kind, record_id, data)
+                self.assertTrue(challenge_gaps(self.store))
+
+    def test_challenger_messages_do_not_invalidate_their_own_result(self):
+        self.reviews()
+        task = schedule_challenge(self.store, self.coordinator)
+        self.complete(task)
+        self.store.put_record('message', 'result', dict(revision='rev', sender='challenger', body='VOTE verdict=APPROVED'))
+        self.store.put_record('aasm_domain', 'domain', dict(revision='rev', author='challenger', operation='CHECK'))
+        self.assertEqual(current_context_fingerprint(self.store), task['data']['payload']['context_fingerprint'])
+        self.assertEqual(challenge_gaps(self.store), [])
+
+    def test_task_result_binds_its_own_effects_but_later_edits_require_review(self):
+        from review_core.aasm_records import prepare_result
+        from review_core.cli import _coordinator
+        self.reviews()
+        task = schedule_challenge(self.store, self.coordinator)
+        coordinator = _coordinator(self.store)
+        claimed = coordinator.claim_task('challenger')
+        body = ('ASSUME id=observed text="Nonblocking observation" paths=["a.py"] blocking=false\n'
+                'COV id=proof paths=["a.py"] status=reviewed evidence=["read:a.py"]\n'
+                'VOTE verdict=APPROVED evidence=["proof"]')
+        result = prepare_result(self.store, 'challenger', body)
+        completed = coordinator.complete_task(task['id'], 'challenger', claimed['data']['lease_id'], result)
+        self.assertEqual(challenge_gaps(self.store), [])
+        self.assertEqual(schedule_challenge(self.store, coordinator)['id'], task['id'])
+        self.assertEqual(completed, self.store.get_record('task', task['id']))
+        assumption = self.store.get_record('assumption', 'observed')
+        assumption['data']['statement'] = 'Changed by a later reviewer'
+        self.store.put_record('assumption', 'observed', assumption['data'], actor='reviewer-1')
+        self.assertTrue(challenge_gaps(self.store))
+        self.assertNotEqual(schedule_challenge(self.store, coordinator)['id'], task['id'])
+
+    def test_changed_context_during_challenge_cannot_be_bound_as_reviewed(self):
+        from review_core.aasm_records import prepare_result
+        from review_core.cli import _coordinator
+        self.reviews()
+        task = schedule_challenge(self.store, self.coordinator)
+        coordinator = _coordinator(self.store)
+        claimed = coordinator.claim_task('challenger')
+        self.store.put_record('question', 'late', dict(revision='rev', text='New evidence'))
+        result = prepare_result(self.store, 'challenger',
+            'COV id=proof paths=["a.py"] status=reviewed evidence=["read:a.py"]\n'
+            'VOTE verdict=APPROVED evidence=["proof"]')
+        with self.assertRaisesRegex(ValueError, 'context'):
+            coordinator.complete_task(task['id'], 'challenger', claimed['data']['lease_id'], result)
+        self.assertIsNone(self.store.get_record('coverage', 'proof'))
+        self.assertEqual(self.store.get_record('task', task['id'])['data']['status'], 'running')
+
 
 if __name__ == '__main__':
     unittest.main()

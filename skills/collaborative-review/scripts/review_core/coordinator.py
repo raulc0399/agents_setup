@@ -215,7 +215,7 @@ class Coordinator:
             completed = self._finish(task, 'completed', result=result)
             if self.result_handler is not None:
                 self.result_handler(completed, result)
-            return completed
+            return self.store.get_record('task', task_id)
 
     def fail_task(self, task_id, worker, lease_id, error):
         _text(error, 'error')

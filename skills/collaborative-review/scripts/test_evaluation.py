@@ -103,7 +103,9 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(set(case), {'id', 'trigger', 'expected_finding', 'source_commit', 'test'})
             path, symbol = case['test'].split('::')
             repository = Path(__file__).resolve().parents[3]
-            self.assertIn('def ' + symbol.split('.')[-1] + '(', (repository / path).read_text())
+            source = (repository / path).read_text()
+            self.assertIn('class ' + symbol.split('.')[0] + '(', source)
+            self.assertIn('def ' + symbol.split('.')[-1] + '(', source)
 
 
 if __name__ == '__main__':

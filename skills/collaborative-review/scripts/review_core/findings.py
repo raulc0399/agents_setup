@@ -83,12 +83,25 @@ def _existing(store, kind, record_id):
     return record
 
 
+def _locations(store, locations, paths):
+    locations = _strings(locations, 'locations')
+    for location in locations:
+        match = re.fullmatch(r'(.+):([1-9][0-9]*)(?:-([1-9][0-9]*))?', location)
+        if not match or (match[3] is not None and int(match[3]) < int(match[2])):
+            raise ValueError('Invalid finding location')
+        if _paths(store, [match[1]])[0] not in paths:
+            raise ValueError('Finding location must belong to finding paths')
+    return locations
+
+
 def _finding(store, data):
     _text(data['author'], 'author')
     _revision(store, data['revision'])
     _text(data['claim'], 'claim')
     _text(data['proposed_fix'], 'proposed_fix')
     data['paths'] = _paths(store, data['paths'])
+    if 'locations' in data:
+        data['locations'] = _locations(store, data['locations'], data['paths'])
     data['evidence'] = _strings(data['evidence'], 'evidence')
     data['resolution_evidence'] = _strings(data['resolution_evidence'], 'resolution_evidence')
     _bool(data['verified'], 'verified')
@@ -102,8 +115,10 @@ def _finding(store, data):
     return data
 
 
-def create_finding(store, *, author, revision, claim, proposed_fix, paths=(), evidence=(), severity='medium', verified=False, blocking=True, status='open', resolution_evidence=(), finding_id=None):
+def create_finding(store, *, author, revision, claim, proposed_fix, paths=(), evidence=(), severity='medium', verified=False, blocking=True, status='open', resolution_evidence=(), finding_id=None, locations=None):
     data = _finding(store, dict(author=author, revision=revision, claim=claim, proposed_fix=proposed_fix, paths=paths, evidence=evidence, severity=severity, verified=verified, blocking=blocking, status=status, resolution_evidence=resolution_evidence))
+    if locations is not None:
+        data['locations'] = _locations(store, locations, data['paths'])
     return _create(store, 'finding', finding_id, data)
 
 

@@ -10,7 +10,7 @@ import math
 
 CONTEXT_KINDS = ('finding', 'question', 'answer', 'option', 'assumption', 'source',
                  'claim', 'recommendation', 'review', 'authorization', 'authorization_revocation',
-                 'integration_surface', 'recovery')
+                 'integration_surface', 'recovery', 'dialect', 'dialect_test', 'dialect_ack')
 
 
 def _plan(store):
@@ -55,6 +55,10 @@ def _context(store):
     records['coverage'] = [record for record in store.list_records('coverage')
                            if record['data'].get('revision') == revision
                            and record['data'].get('author') not in challengers]
+    for kind in ('message', 'aasm_domain'):
+        records[kind] = [record for record in store.list_records(kind)
+                         if record['data'].get('revision') == revision
+                         and record['data'].get('sender', record['data'].get('author')) not in challengers]
     recovery = [dict(id=task['id'], kind=task['data']['kind'],
                      recovery_decisions=task['data'].get('recovery_decisions', []),
                      error=task['data'].get('error'))
@@ -85,6 +89,13 @@ def schedule_challenge(store, coordinator):
         if reviewer in identities:
             raise ValueError('Challenger identity must differ from independent reviewers')
         context, fingerprint = _context(store)
+        for task in store.list_records('task'):
+            data = task['data']
+            if (data['kind'] == 'challenge' and data['status'] == 'completed'
+                    and data['payload'].get('budget_plan_id') == plan['id']
+                    and data['payload'].get('revision') == context['revision']
+                    and data.get('completion_context_fingerprint') == fingerprint):
+                return task
         task_id = 'challenge-' + hashlib.sha256((plan['id'] + fingerprint).encode()).hexdigest()
         existing = store.get_record('task', task_id)
         if existing is not None:
@@ -107,14 +118,12 @@ def schedule_challenge(store, coordinator):
             raise ValueError('Plan challenge reserve is exhausted')
         brief = ('Challenge the integrated plan, changes, integration surfaces, assumptions, '
                  'research claims, approvals, findings, questions, and recovery decisions. '
-                 'Report every actionable issue. Return verdict APPROVED or BLOCKED, evidence_ids, '
-                 'and explicit reviewed coverage for every scope path on this exact revision. '
-                 'Return one JSON object with this schema: '
-                 '{"verdict":"APPROVED","evidence_ids":["coverage-<taskid>"],'
-                 '"coverage":[{"coverage_id":"coverage-<taskid>","paths":["<scope path>"],'
-                 '"status":"reviewed","evidence":["<concrete evidence reference>"]}]}. '
-                 'Use verdict BLOCKED when issues prevent approval. Supply explicit stable '
-                 'coverage_id values and list those same IDs in evidence_ids; include all scope paths. '
+                 'Report every actionable issue using AASM B/D/O commands with exact file locations. '
+                 'Return only AASM commands using the supplied language schemas. '
+                 'Include COV for every scope path on this revision, then one final VOTE. Example:\n'
+                 'COV id=coverage-example paths=["scope/file.py"] status=reviewed evidence=["concrete evidence"]\n'
+                 'VOTE verdict=APPROVED evidence=["coverage-example"]\n'
+                 'Use verdict=BLOCKED when issues prevent approval; use stable IDs unique to this task. '
                  'Context: ' + json.dumps(context, sort_keys=True))
         payload = dict(revision=context['revision'], brief=brief, reviewer=reviewer,
                        required_action='review', scope_paths=reviews[0]['data']['payload']['scope_paths'],
@@ -143,7 +152,8 @@ def challenge_gaps(store):
                  if task['data']['kind'] == 'challenge'
                  and task['data']['payload'].get('revision') == store.get_meta('revision')
                  and task['data']['payload'].get('budget_plan_id') == plan['id']
-                 and task['data']['payload'].get('context_fingerprint') == fingerprint]
+                 and task['data'].get('completion_context_fingerprint',
+                                      task['data']['payload'].get('context_fingerprint')) == fingerprint]
         reason = 'A challenge of the current review context is required'
         for task in tasks:
             data = task['data']

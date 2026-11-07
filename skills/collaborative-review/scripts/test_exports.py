@@ -128,6 +128,18 @@ class ExportTests(unittest.TestCase):
             readiness.assert_called_once_with(store)
             self.assertIn('BLOCKED', Path(paths['SUMMARY.md']).read_text())
 
+    def test_aasm_messages_keep_lines_dialects_and_safe_reply_links(self):
+        body = 'NOTE text="<script>unsafe</script>"\nNOTE text=second'
+        self.row('dialect', 'terms:1', definitions=[{'meaning': '<custom meaning>'}])
+        self.row('message', 'first', revision='current', body=body, dialect_id='terms:1')
+        self.row('message', 'reply', revision='current', body='NOTE text=reply', reply_to='first')
+        paths = export_run(self.store, self.approval)
+        transcript = Path(paths['TRANSCRIPT.html']).read_text()
+        self.assertIn('<pre>NOTE text=&quot;&lt;script&gt;unsafe&lt;/script&gt;&quot;\nNOTE text=second</pre>', transcript)
+        self.assertIn('<dt>reply_to</dt><dd><a href="#' + _anchor('message', 'first') + '">first</a>', transcript)
+        self.assertIn('<dt>dialect_id</dt><dd><a href="#' + _anchor('dialect', 'terms:1') + '">terms:1</a>', transcript)
+        self.assertNotIn('<custom meaning>', transcript)
+
 
 if __name__ == '__main__':
     unittest.main()

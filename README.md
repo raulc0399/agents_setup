@@ -42,29 +42,40 @@ python3 "$REVIEW" --run design-review check
 python3 "$REVIEW" --run design-review export
 ```
 
-`authorize` displays the exact revision, actions and paths and requires the operator to type `APPROVE` in a terminal; there is no unattended approval flag. Review permission does not authorize implementing recommendations, deployment or destructive actions. Commands enforce scoped authorization within a trusted local process model; this is not an OS sandbox. `doctor` performs local temporary-file and subprocess lock probes without launching your adapter, installing packages or contacting accounts; successful probes cannot certify storage durability. Use `--legacy-tmux` only to check the optional legacy dependency.
+`authorize` displays the exact revision, actions and paths and requires the operator to type `APPROVE` in a terminal; there is no unattended approval flag. Review permission does not authorize implementing recommendations, deployment or destructive actions. Commands enforce scoped authorization within a trusted local process model; this is not an OS sandbox. `doctor` performs local temporary-file and subprocess lock probes without launching your adapter, installing packages or contacting accounts; successful probes cannot certify storage durability.
 
 Both reviewers must supply real evidence and reviewed coverage for every captured file; missing or blocked results keep `check` blocked. `plan --risk NAME --specialist NAME` adds requested specialist work, which needs additional `work` invocations. Workers may run concurrently within `--max-workers`; each `work` invocation runs one task. `check` exits 0 for approved, 1 for blocked, 2 for invalid requests; `finish` marks the run complete only after checks approve.
 
-### Adapter contract
+### AASM worker and message contract
 
-The trusted executable receives one JSON object on stdin and emits one JSON result on stdout; send logs to stderr. No provider-specific command flags are assumed. Input contains `task` (`id`, `kind`, `revision`, `brief`, `scope_paths`, `worker`, `attempt`) and `snapshot` (`root`, `revision`, `files`). `snapshot.root` is an isolated writable copy of the pinned inputs; use it as the review workspace. Environment supplies `REVIEW_RUN_DIR`, `TASK_ID`, `LEASE_ID`. Adapters must preserve independent reviewer identities and do actual review before returning a verdict.
+Worker communication uses the strict [AASM language](skills/collaborative-review/references/aasm.md). The adapter receives helper-generated JSON on stdin: `task`, `snapshot`, and frozen `language` metadata (`id`, `digest`, `definitions`, `builtin_schemas`, `instructions`). `snapshot.root` is an isolated writable copy of pinned inputs. Environment supplies `REVIEW_RUN_DIR`, `TASK_ID`, and `LEASE_ID`. Emit UTF-8 AASM commands on stdout and logs on stderr; do not construct result JSON envelopes.
 
-Output requires `evidence_ids` (nonempty strings) and `coverage` objects with `paths`, `status` (`reviewed`, `partial`, `unreviewed`), `evidence` and `finding_ids`; review/challenge tasks also require `verdict` (`APPROVED` or `BLOCKED`). Evidence must describe actual observations. Optional `findings`, `questions`, `options` use the validated record schemas in `review_core/findings.py`; findings include `claim`, `proposed_fix`, `paths`, `evidence`, `severity`, `verified`, `blocking`. The coordinator binds adapter records to the leased author and revision and validates submissions atomically. Never return a canned approval.
+For example, after actually reviewing `design.md` and observing the stated evidence:
 
-For a challenge, give each coverage object an explicit `coverage_id` and include that same ID in `evidence_ids`; its reviewed paths must cover the full task scope. A file reference alone cannot substitute for the challenge's stored coverage record.
+```text
+COV id=coverage-reviewer-1 paths=["design.md"] status=reviewed evidence=["Checked every requirement against the design"]
+VOTE verdict=APPROVED evidence=["coverage-reviewer-1"]
+```
 
-Existing interactive agents can use the manual task interface without an adapter:
+Use factual observations, unique stable IDs, and full task coverage; a canned verdict is invalid. Review/challenge results require exactly one final `VOTE` referencing coverage IDs. `B` records verified blockers; `D`/`O` record nonblocking findings; `Q`, `A`, and `OPT` make disagreements explicit. The helper validates scope, references, real snapshot locations, identity and lease, then atomically stores typed records, normalized operations, and its JSON envelope in SQLite `run.db`. AASM is the body language; JSON carries metadata; SQLite is durable state. None grants authorization.
+
+Interactive workers can claim and submit without an adapter:
 
 ```bash
 printf '%s\n' '{"worker":"reviewer-1"}' | python3 "$REVIEW" --run design-review task claim --data -
 python3 "$REVIEW" --run design-review inspect --paths design.md
-python3 "$REVIEW" --run design-review task submit --data /absolute/path/to/actual-task-submission.json
+python3 "$REVIEW" --run design-review task submit --worker reviewer-1 --task-id <claimed-id> --lease-id <claimed-lease> --body /absolute/path/to/review.aasm
 ```
 
-The claim returns the task envelope with `id` and `data.lease_id`; submission contains `task_id`, `worker`, `lease_id`, and `result` with the same validated result contract above. Review only the pinned inputs, renew a long-running lease with `task renew --data FILE` (`task_id`, `worker`, `lease_id`, `lease_seconds`), and repeat for reviewer-2 and challenger. `task fail`, `cancel`, and explicit `retry` accept the corresponding `Coordinator` method arguments in `review_core/coordinator.py`; retries retain attempt history.
+The claim returns `id` and `data.lease_id`. Review pinned inputs, renew long work using `task renew --data FILE` (`task_id`, `worker`, `lease_id`, `lease_seconds`), and repeat for reviewer-2 and challenger. Task `fail`, `cancel`, and `retry` retain their administrative JSON inputs and attempt history. Retries share the original allocation; exhaustion requires a new task or run.
 
-Retries share the task's original time allocation. An exhausted allocation requires a new task or run; retrying does not increase the budget.
+For task-bound discussion, use `message send --worker reviewer-1 --to reviewer-2 --task-id <id> --lease-id <lease> --body /absolute/path/to/message.aasm`; read with `message inbox --worker reviewer-2 --after 0`. `--body -` reads stdin; `--reply-to <message-id>` links a reply. Messages bind to the current task/revision/lease. Blind reviewers cannot read peer messages until every initial blind review completes. For task-independent conversations, declare identities at `create --participants NAME NAME ...`; scoped review authorization is still required. Metadata and IDs are generated by the helper.
+
+### Negotiated dialects
+
+`aasm-1` is always available. Grammar stays fixed; new named operations are immutable declarative schemas with explicit meanings, optional builtin expansions, and executable conformance examples. They cannot run code or change authorization. Unmapped extensions remain typed domain records. Code and policy stay pinned for the run.
+
+Use `dialect propose --worker <author> --manifest FILE`, then each named participant supplies all independent example readbacks with `dialect test --worker <name> --id <dialect-id> --readback FILE` and runs `dialect ack --worker <name> --id <dialect-id>`. Only passing participants can ACK; every required ACK is needed before use. `dialect show --id <id>` reports agreement; `dialect export --id <id>` emits reusable immutable definition/example data. Import by proposing, testing, and ACKing again; changed definitions require a new name/version. Select an accepted version with `work --dialect`, `task submit --dialect`, or `message send --dialect`. See the AASM reference for manifest/readback shapes.
 
 ### Revisions, reports and recovery
 
@@ -76,12 +87,12 @@ Retries share the task's original time allocation. An exhausted allocation requi
 
 ### Research and evaluation
 
-`record KIND --data FILE` (or `--data -` for stdin) validates a JSON object against the corresponding public function in `review_core/findings.py`, `assumptions.py`, or `research.py`; manual callers supply author/revision where required. Sources retain supplied content, locator, access date and hash; no automatic fetch occurs. Claims use `source_ids`; `record claim-verify` accepts `claim_id`, `actor`, `evidence`, optional `verification`, `contradictions`, `source_ids`. Record recommendations against supported claims, and verify blocking assumptions before approval. `report-ready` additionally checks research support.
+Agents submit research using AASM `SRC`, `F`, `CONFIRM`, `GAP`, and `REC`. The separate administrative `record KIND --data FILE` interface (or `--data -` for stdin) validates a JSON object against the corresponding public function in `review_core/findings.py`, `assumptions.py`, or `research.py`; manual callers supply author/revision where required. Sources retain supplied content, locator, access date and hash; no automatic fetch occurs. Claims use `source_ids`; `record claim-verify` accepts `claim_id`, `actor`, `evidence`, optional `verification`, `contradictions`, `source_ids`. Record recommendations against supported claims, and verify blocking assumptions before approval. `report-ready` additionally checks research support.
 
 ```bash
 python3 "$REVIEW" evaluate --cases /absolute/path/to/cases.json --results /absolute/path/to/measured-results.json
 ```
 
-Both files contain JSON arrays. Cases require nonempty `id`, `trigger`, `expected_finding`, `source_commit`, `test`; the repository's grounded cases are in `skills/collaborative-review/scripts/fixtures/review-evaluation.json`. Each measured run requires unique `run_id`, `strategy`, `detected_ids`, nonnegative finite `elapsed_seconds` and `cost`, and a shared `currency`. Unknown detections count as false positives, missed case IDs as misses; output compares supplied strategies without model calls or invented measurements.
+Both files contain JSON arrays. Cases require nonempty `id`, `trigger`, `expected_finding`, `source_commit`, `test`; the repository's grounded cases are in `skills/collaborative-review/scripts/fixtures/review-evaluation.json`. Each measured run requires unique `run_id`, `strategy`, `detected_ids`, nonnegative finite `elapsed_seconds` and `cost`, and a shared `currency`. Unknown detections count as false positives, missed case IDs as misses; output compares supplied strategies without model calls or invented measurements. Parser/dialect conformance tests establish deterministic interpretation, not better review quality; no language superiority is claimed without measured runs.
 
-Existing `review-sync.py` runs retain their legacy helper and state format; the new coordinator does not convert them. Read the retained [legacy review protocol](skills/collaborative-review/references/legacy-protocol.md) or [legacy research protocol](skills/collaborative-research/references/legacy-protocol.md) for those runs. Use a new run ID for `review.py`.
+The retired file-based helper is no longer shipped. Existing user run data is left untouched; use a new run ID for this coordinator.

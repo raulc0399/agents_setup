@@ -23,10 +23,10 @@ class DoctorTests(unittest.TestCase):
             self.assertFalse(diagnose(root)['ok'])
             self.assertFalse(root.exists())
 
-    def test_missing_command_and_optional_tmux(self):
+    def test_missing_command(self):
         with tempfile.TemporaryDirectory() as temporary, patch('review_core.doctor.shutil.which', return_value=None):
-            checks = diagnose(temporary, ['absent-worker'], legacy_tmux=True)['checks']
-            self.assertEqual([row['name'] for row in checks if not row['ok']], ['worker_command', 'legacy_tmux'])
+            checks = diagnose(temporary, ['absent-worker'])['checks']
+            self.assertEqual([row['name'] for row in checks if not row['ok']], ['worker_command'])
 
     def test_storage_failure_is_structured(self):
         with tempfile.TemporaryDirectory() as temporary, patch('review_core.doctor.sqlite3.connect', side_effect=sqlite3.OperationalError('disk unavailable')):

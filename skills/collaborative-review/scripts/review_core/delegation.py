@@ -85,7 +85,10 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
         tasks = []
         for kind, reviewer, focus in roles:
             brief = ('Independently review every pinned scope file. Report all actionable findings with '
-                     'file evidence, coverage, and a revision-bound verdict. Do not consult peer reviews.')
+                     'file evidence, coverage, and a revision-bound verdict. Do not consult peer reviews. '
+                     'Return only AASM commands using the supplied language schemas: B/D/O for findings, '
+                     'COV for explicit file coverage, and one final VOTE referencing your COV IDs. '
+                     'Use exact path:line or path:start-end locations; explain reasoning in text fields.')
             if focus:
                 brief += ' Pay particular attention to ' + focus + '.'
             payload = dict(revision=revision, brief=brief, scope_paths=paths,

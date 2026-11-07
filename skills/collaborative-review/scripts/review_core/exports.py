@@ -9,7 +9,8 @@ import tempfile
 
 RECORD_KINDS = ('option', 'coverage', 'question', 'answer', 'finding', 'review',
                 'assumption', 'source', 'claim', 'recommendation', 'task',
-                'authorization', 'authorization_revocation')
+                'authorization', 'authorization_revocation', 'message', 'dialect',
+                'dialect_test', 'dialect_ack', 'aasm_note', 'aasm_domain', 'protocol_proposal')
 EXPORT_NAMES = ('OPTIONS.md', 'COVERAGE.md', 'DECISIONS.md', 'SUMMARY.md', 'TRANSCRIPT.html')
 
 
@@ -125,11 +126,12 @@ def _anchor(kind, record_id):
 
 
 def _transcript(records, events, approval):
-    targets = {(kind, row['id']): _anchor(kind, row['id']) for kind in ('question', 'answer', 'finding')
+    targets = {(kind, row['id']): _anchor(kind, row['id']) for kind in records
                for row in records[kind]}
 
     fields = {'question_id': 'question', 'answer_id': 'answer',
-              'finding_id': 'finding', 'finding_ids': 'finding'}
+              'finding_id': 'finding', 'finding_ids': 'finding', 'reply_to': 'message',
+              'dialect_id': 'dialect', 'task_id': 'task', 'source_ids': 'source', 'claim_ids': 'claim'}
 
     def render(value, field=None):
         if isinstance(value, dict):
@@ -139,6 +141,8 @@ def _transcript(records, events, approval):
             return '<ul>' + ''.join('<li>' + render(item, field) + '</li>' for item in value) + '</ul>'
         text = str(value)
         escaped = html.escape(text, quote=True)
+        if field == 'body':
+            return '<pre>' + escaped + '</pre>'
         target = targets.get((fields.get(field), text))
         if isinstance(value, str) and target:
             return '<a href="#' + target + '">' + escaped + '</a>'

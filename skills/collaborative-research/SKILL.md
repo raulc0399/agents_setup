@@ -5,7 +5,7 @@ description: Research a question for the user's case with captured sources, inde
 
 # Collaborative research
 
-Use the installed `collaborative-review/SKILL.md` for the shared coordinator and worker adapter contract. Codex installs skills under `~/.agents/skills`; Claude installs them under `~/.claude/skills`. New runs use that skill's `scripts/review.py`, SQLite records, and generated exports. For an existing `review-sync.py` run (`meta.json` without `run.db`), read [the retained legacy research protocol](references/legacy-protocol.md); never migrate its state implicitly.
+Use the installed `collaborative-review/SKILL.md` for the shared coordinator and worker adapter contract. Codex installs skills under `~/.agents/skills`; Claude installs them under `~/.claude/skills`. New runs use that skill's `scripts/review.py`, SQLite records, and generated exports.
 
 Research approval covers a recommendation for the user's question, context, and constraints. It does not authorize implementing the recommendation, deployment, destructive actions, installations, or experiments. Keep project inputs read-only. The adapter executes trusted local code in an isolated snapshot copy; authorization checks are not an operating-system sandbox.
 
@@ -27,39 +27,15 @@ The operator confirms the displayed exact authorization by typing `APPROVE` in a
 
 Prefer official documentation, repositories, papers, and changelogs. Open each cited source. For prices, releases, policies, and other changing facts, check freshness and record the access date; explain outdated or conflicting evidence. The helper does not fetch URLs or prove facts automatically.
 
-Persist records with `record KIND --data FILE.json` or `--data -` for a JSON object on stdin. JSON files are temporary request inputs, not parallel hand-maintained report state. Exact fields match `review_core/research.py` in the shared skill.
+Use AASM bodies through the shared skill's `task submit` or `message send`; read its [AASM reference](../collaborative-review/references/aasm.md) for named operands and dialect agreement. The helper generates JSON transport metadata, validates typed effects, and persists SQLite records. Administrative `record KIND --data FILE` remains available for explicit local tooling; agents do not construct task/message JSON envelopes.
 
-Source example (`record source`):
+Capture sources with `SRC id=<id> locator="<actual URL or path:line>" date="YYYY-MM-DD" content="<captured text>"`, optionally `excerpt="<exact substring>"`. Dates must be actual access dates. Stored sources preserve text, date, locator and content hash; hashes prove identity, not truth. The helper does not fetch sources.
 
-```json
-{"source_id":"source-api","author":"researcher-1","revision":"<captured revision>","locator":"https://docs.example.org/api","access_date":"2026-11-06","content":"<actual captured text>","excerpt":"<exact substring of captured text>"}
-```
+Record an unverified claim with `F id=<id> text="<precise claim>" sources=["<source-id>"]`; defaults are `impact=decision-changing`, `inference=false`, `contradictions=[]`. Mark deductions with `inference=true`; verification cannot turn an inference into a direct statement. Unsourced claims remain unsupported. All references belong to the current revision.
 
-Replace every placeholder with actual evidence; the example URL is a schema illustration, not a source. Supply exactly one of `content` or `file` (a local UTF-8 file). A locator is an HTTP(S) URL or `path:line`; access dates use `YYYY-MM-DD`. Source records preserve captured text, its SHA-256 hash, excerpt, locator, and date; sources are immutable. A hash proves captured-content identity, not the truth of its claims.
+An independent verifier opens the captured source, checks its support for this case, then uses `CONFIRM id=<claim-id> evidence=["<actual support>"]`, optionally `sources=[...]` and `contradictions=[...]`. Only replace contradiction links with `[]` after evidence resolves them; incoming links must be resolved on their declaring claims. Decision-changing claims need a verifier other than their author. Use `GAP id=<id> text="<missing evidence>"` for blocking gaps and explicit questions/findings for disputes; never fabricate verification identities or evidence.
 
-Claim example (`record claim`):
-
-```json
-{"claim_id":"claim-api","author":"researcher-1","revision":"<captured revision>","text":"<claim supported by the captured source>","source_ids":["source-api"],"verification":"unverified","impact":"decision-changing","inference":false,"contradictions":[]}
-```
-
-Use `impact: "not-decision-changing"` only for facts that do not change the decision. Mark deductions explicitly with `inference: true`; unsourced claims remain labeled assumptions. Verification does not turn an inference into a direct source statement. `contradictions` lists current claim IDs; unresolved contradictions affecting the recommendation block readiness. Sources and referenced claims must belong to the current revision.
-
-An independent verifier opens the source and checks that it supports the precise claim for this case, then records `claim-verify`:
-
-```json
-{"claim_id":"claim-api","actor":"researcher-2","evidence":["<source ID/excerpt and explanation of support>"],"verification":"verified","source_ids":["source-api"]}
-```
-
-`verification` is `verified` or `disputed`; evidence is mandatory. `source_ids` optionally attaches or replaces captured support, allowing an unsourced claim to gain evidence. `contradictions` optionally replaces outgoing contradiction links; use `[]` only after evidence resolves the disagreement, and resolve incoming links on their declaring claims. Store history retains each change. Decision-changing verification must identify someone other than the claim's author. Never invent verification, reviewer identities, citations, or coverage.
-
-Recommendation example (`record recommendation`):
-
-```json
-{"recommendation_id":"recommendation-api","author":"researcher-1","revision":"<captured revision>","text":"<recommendation and relevant alternatives>","claim_ids":["claim-api"],"case_basis":"<user constraints and why this recommendation fits>"}
-```
-
-Every recommendation needs current claim references and case-specific reasoning. All its supporting claims require independent verification and captured support regardless of their impact labels. Missing, unverified, disputed, or contradictory decision-changing support blocks report readiness. Resolve every distinct actionable gap; do not stop after a fixed finding count.
+Use `REC id=<id> text="<recommendation>" claims=["<claim-id>"] case="<user constraints and reasoning>"`. Every supporting claim requires independent verification and captured support regardless of impact. Missing, disputed, unverified, or contradictory decision-changing support blocks report readiness. Resolve every distinct actionable gap without a fixed finding count.
 
 ## Independent review and challenge
 
@@ -74,7 +50,7 @@ python3 "$REVIEW" --run research-001 work --worker challenger --timeout-seconds 
 python3 "$REVIEW" --run research-001 check
 ```
 
-Adapters consume the actual task/snapshot JSON on stdin and emit one result JSON object on stdout; logs go to stderr. Follow the shared skill's evidence-ID and typed coverage schema. Workers must review the immutable captured inputs and report genuine coverage, findings, questions, and `APPROVED` or `BLOCKED` verdicts; a successful process exit is insufficient. Collect and cross-check research evidence before scheduling the final challenge.
+Adapters consume helper-generated task/snapshot/language JSON on stdin and emit UTF-8 AASM on stdout; logs go to stderr. Follow the shared skill's `COV` and final `VOTE` requirements. Workers must review the immutable captured inputs and report genuine coverage, findings, questions, and `APPROVED` or `BLOCKED` verdicts; a successful process exit is insufficient. Collect and cross-check research evidence before scheduling the final challenge.
 
 The final challenger has a distinct identity and receives the structured research records, source captures, verification state, and reviews in its task brief. Approval binds both the captured input revision and this structured context fingerprint. Changing a claim, source, recommendation, or other challenge input invalidates the old challenge; schedule and complete a fresh challenge. Do not describe the generated report as a separately snapshotted, exact-text approved artifact.
 

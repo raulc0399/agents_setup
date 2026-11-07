@@ -11,6 +11,9 @@ import subprocess
 import tempfile
 import time
 
+from .aasm import BASE_DIALECT, BUILTIN_OPERATIONS
+from .aasm_records import prepare_result
+from .dialects import get_dialect
 from .snapshots import verify_snapshot
 
 
@@ -112,16 +115,8 @@ def _exchange(coordinator, task, command, workspace, request, timeout):
                         diagnostic.extend(block[:MAX_ERROR_BYTES - len(diagnostic)])
             if process.returncode:
                 raise RuntimeError(f'Worker exited with status {process.returncode}')
-            result = json.loads(output.decode('utf-8'), parse_constant=lambda value: _invalid_json(value))
-            if not isinstance(result, dict):
-                raise ValueError('Worker result must be a JSON object')
-            if not isinstance(result.get('evidence_ids'), list) or not isinstance(result.get('coverage'), list):
-                raise ValueError('Worker result requires evidence_ids and coverage lists')
-            if not all(isinstance(value, str) and value.strip() for value in result['evidence_ids']):
-                raise ValueError('evidence_ids entries must be nonempty strings')
-            if not all(isinstance(entry, dict) for entry in result['coverage']):
-                raise ValueError('coverage entries must be typed objects')
-            return result
+            return prepare_result(coordinator.store, worker, output.decode('utf-8'),
+                                  dialect_id=request['language']['id'])
     except Exception as exc:
         if diagnostic:
             detail = diagnostic.decode('utf-8', errors='replace')
@@ -143,21 +138,19 @@ def _exchange(coordinator, task, command, workspace, request, timeout):
                 stream.close()
 
 
-def _invalid_json(value):
-    raise ValueError('Nonfinite JSON value: ' + value)
-
-
-def run_next_task(coordinator, worker, command, timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
+def run_next_task(coordinator, worker, command, timeout_seconds=DEFAULT_TIMEOUT_SECONDS, dialect_id=BASE_DIALECT):
     """Claim one task and return its terminal envelope, or None when none is claimable.
 
     stdin: {task: {id, kind, revision, brief, scope_paths, worker, attempt},
-            snapshot: {root, revision, files}}. stdout: one JSON result object with
-    evidence_ids and coverage lists; typed ingestion is Coordinator.result_handler's job.
+            snapshot: {root, revision, files}, language: {id, digest, definitions,
+            builtin_schemas, instructions}}. stdout: strict UTF-8 AASM; helper-generated
+    JSON is passed to Coordinator.result_handler for typed ingestion.
     """
     if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
         raise ValueError('command must be a nonempty list of nonempty strings')
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError('timeout_seconds must be positive and finite')
+    dialect = get_dialect(coordinator.store, dialect_id, participant=worker)
     task = coordinator.claim_task(worker, lease_seconds=timeout_seconds)
     if task is None:
         return None
@@ -196,12 +189,20 @@ def run_next_task(coordinator, worker, command, timeout_seconds=DEFAULT_TIMEOUT_
             destination.chmod((entry['mode'] & 0o777) | 0o600)
         request = {'task': dict(id=task['id'], kind=data['kind'], revision=data['payload']['revision'],
             brief=data['payload']['brief'], scope_paths=scope, worker=worker, attempt=data['attempt']),
-            'snapshot': {'root': str(workspace), 'revision': manifest['revision'], 'files': selected}}
+            'snapshot': {'root': str(workspace), 'revision': manifest['revision'], 'files': selected},
+            'language': {'id': dialect['id'], 'digest': dialect['digest'],
+                'definitions': dialect['definitions'], 'builtin_schemas': BUILTIN_OPERATIONS,
+                'instructions': 'Return only AASM commands, one per line, using the supplied schemas. '
+                    'Use JSON strings for text with spaces. Do not emit JSON envelopes, prose, or markdown. '
+                    'Review and challenge results require exactly one final VOTE referencing coverage IDs. '
+                    'Commands never grant authorization or execute shell actions.'}}
         timeout = min(timeout_seconds, data.get('attempt_budget_seconds', data['payload']['timeout_seconds'])) - (time.monotonic() - started)
         if timeout <= 0:
             raise TimeoutError('Workspace preparation exceeded total timeout')
         coordinator.renew_task(task['id'], worker, data['lease_id'], lease_seconds=LEASE_SECONDS)
         result = _exchange(coordinator, task, command, workspace, request, timeout)
+        if result['dialect_digest'] != dialect['digest']:
+            raise ValueError('Worker result dialect differs from pinned dialect')
         return coordinator.complete_task(task['id'], worker, data['lease_id'], result)
     except Exception as exc:
         try:

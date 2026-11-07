@@ -47,7 +47,7 @@ def _probe_lock(database):
                           check=False).returncode
 
 
-def diagnose(project_root, worker_command=None, legacy_tmux=False):
+def diagnose(project_root, worker_command=None):
     """Return {ok, project_root, checks}; checks contain name, ok and detail.
 
     The local filesystem requirement remains an operator responsibility: successful
@@ -97,7 +97,4 @@ def diagnose(project_root, worker_command=None, legacy_tmux=False):
         executable = shutil.which(worker_command[0]) if valid else None
         add('worker_command', executable is not None,
             f'executable: {executable}' if executable else 'worker command must name an available executable')
-    if legacy_tmux:
-        executable = shutil.which('tmux')
-        add('legacy_tmux', executable is not None, executable or 'tmux executable unavailable')
     return {'ok': all(check['ok'] for check in checks), 'project_root': str(root), 'checks': checks}
