@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from review_core.authorization import record_authorization
+from review_core.authorization import record_authorization, revoke_authorization
 from review_core.store import Store
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -49,6 +49,51 @@ class AasmCliTests(unittest.TestCase):
         for key, value in kwargs.items():
             args.extend(['--' + key.replace('_', '-'), value])
         return self.cli(*args, input=body, expected=expected)
+
+    def inspect_task(self):
+        self.send('B id=blocker at=input.txt:1 claim=wrong fix=correct evidence=["snapshot"]')
+        with Store(self.run) as store:
+            revision = store.get_meta('revision')
+            for grant in store.list_records('authorization'):
+                revoke_authorization(store, grant['id'])
+            record_authorization(store, revision, ['inspect'], ['input.txt'])
+        self.cli('task', 'enqueue', '--data', '-', input=json.dumps({
+            'kind': 'inspect', 'payload': {'revision': revision, 'brief': 'Inspect input.txt',
+                'scope_paths': ['input.txt'], 'timeout_seconds': 30}}))
+        return self.cli('task', 'claim', '--data', '-', input='{"worker":"alice"}')
+
+    def submit(self, task, body, expected=0):
+        return self.cli('task', 'submit', '--body', '-', '--worker', 'alice',
+                        '--task-id', task['id'], '--lease-id', task['data']['lease_id'],
+                        input=body, expected=expected)
+
+    def test_inspect_result_cannot_resolve_blocker_atomically(self):
+        task = self.inspect_task()
+        before = self.events()
+        self.submit(task, 'NOTE text=before\nFIX id=blocker evidence=["checked"]', expected=2)
+        self.assertEqual(before, self.events())
+        with Store(self.run, readonly=True) as store:
+            self.assertEqual('open', store.get_record('finding', 'blocker')['data']['status'])
+            self.assertEqual('running', store.get_record('task', task['id'])['data']['status'])
+            self.assertEqual([], store.list_records('aasm_note'))
+        completed = self.submit(task, 'NOTE text=inspected')
+        self.assertEqual('completed', completed['data']['status'])
+
+    def test_completed_inspect_message_requires_additional_review_grant(self):
+        task = self.inspect_task()
+        self.submit(task, 'NOTE text=inspected')
+        args = ['message', 'send', '--worker', 'alice', '--to', 'coordinator',
+                '--task-id', task['id'], '--lease-id', task['data']['lease_id'], '--body', '-']
+        body = 'NOTE text=before\nFIX id=blocker evidence=["checked"]'
+        before = self.events()
+        self.cli(*args, input=body, expected=2)
+        self.assertEqual(before, self.events())
+        with Store(self.run) as store:
+            self.assertEqual('open', store.get_record('finding', 'blocker')['data']['status'])
+            record_authorization(store, store.get_meta('revision'), ['review'], ['input.txt'])
+        self.cli(*args, input=body)
+        with Store(self.run, readonly=True) as store:
+            self.assertEqual('resolved', store.get_record('finding', 'blocker')['data']['status'])
 
     def test_manual_result_binds_worker_task_lease_and_builds_result(self):
         with Store(self.run, readonly=True) as store:

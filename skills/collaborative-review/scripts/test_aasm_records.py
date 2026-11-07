@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from review_core.aasm import parse_document, expand_operations
 from review_core.aasm_records import apply_operations, prepare_result
+from review_core.authorization import record_authorization, revoke_authorization
 from review_core.dialects import propose_dialect, test_dialect as readback, acknowledge_dialect
 from review_core.snapshots import create_snapshot
 from review_core.store import Store
@@ -22,9 +23,69 @@ class AasmRecordsTests(unittest.TestCase):
         self.revision = snapshot['revision']
         self.store = Store(root / 'state', create=True, metadata={'revision': self.revision, 'snapshot': snapshot})
         self.addCleanup(self.store.close)
+        self.grant = record_authorization(self.store, self.revision, ['review'], ['.'])
+        self.baseline_events = self.store.events()
 
     def apply(self, body, author='alice', **kwargs):
         return apply_operations(self.store, author, self.revision, parse_document(body), **kwargs)
+
+    def test_review_authorization_is_current_and_covers_task_scope(self):
+        self.apply('B id=b at=a.py:1 claim=x fix=y evidence=["read"]')
+        revoke_authorization(self.store, self.grant['id'])
+        self.store.put_record('task', 't', {'worker': 'alice', 'payload': {
+            'revision': self.revision, 'scope_paths': ['a.py', 'b.py']}})
+        for revision, actions, paths, expiry in [
+                (self.revision, ['inspect', 'execute'], ['.'], None),
+                ('old', ['review'], ['.'], None),
+                (self.revision, ['review'], ['.'], 0),
+                (self.revision, ['review'], ['a.py'], None)]:
+            record_authorization(self.store, revision, actions, paths, expires_at=expiry)
+            before = self.store.events()
+            with self.subTest(revision=revision, actions=actions, paths=paths, expiry=expiry):
+                with self.assertRaises(PermissionError):
+                    self.apply('NOTE text=before\nFIX id=b evidence=["checked"]', task_id='t')
+                self.assertEqual(before, self.store.events())
+                self.assertEqual('open', self.store.get_record('finding', 'b')['data']['status'])
+        record_authorization(self.store, self.revision, ['review'], ['a.py', 'b.py'])
+        self.apply('FIX id=b evidence=["checked"]', task_id='t')
+        self.assertEqual('resolved', self.store.get_record('finding', 'b')['data']['status'])
+
+    def test_taskless_review_uses_full_run_paths_and_snapshot_fallback(self):
+        revoke_authorization(self.store, self.grant['id'])
+        record_authorization(self.store, self.revision, ['review'], ['a.py'])
+        for paths in (['a.py', 'b.py'], None):
+            self.store.set_meta('paths', paths)
+            before = self.store.events()
+            with self.assertRaises(PermissionError):
+                self.apply('ASSUME id=a text=x paths=["a.py"]')
+            self.assertEqual(before, self.store.events())
+
+    def test_informational_operations_need_no_review_grant(self):
+        revoke_authorization(self.store, self.grant['id'])
+        self.apply('NOTE text=observed\nIMP proposal=idea text=improve')
+        identity = self.accept(1, 'Domain observation')
+        prepared = prepare_result(self.store, 'alice', 'OBS text=observation', identity)
+        apply_operations(self.store, 'alice', self.revision, prepared['operations'], dialect_id=identity)
+        self.assertEqual(1, len(self.store.list_records('aasm_domain')))
+
+    def test_mutating_alias_cannot_bypass_review_authorization(self):
+        self.apply('ASSUME id=a text=x paths=["a.py"]')
+        definition = {'op': 'CHECK', 'meaning': 'Verify assumption', 'fields': {
+            'id': {'type': 'id', 'required': True}}, 'expands_to': {
+                'op': 'VERIFY', 'args': {'id': {'field': 'id'}, 'evidence': {'value': ['checked']}}}}
+        definitions = [definition]
+        body = 'CHECK id=a'
+        examples = [{'body': body, 'expected': expand_operations(parse_document(body, definitions), definitions)}]
+        row = propose_dialect(self.store, 'alice', 'checks', 1, ['alice', 'bob'], definitions, examples)
+        for participant in ['alice', 'bob']:
+            readback(self.store, row['id'], participant, examples)
+            acknowledge_dialect(self.store, row['id'], participant)
+        revoke_authorization(self.store, self.grant['id'])
+        before = self.store.events()
+        with self.assertRaises(PermissionError):
+            apply_operations(self.store, 'alice', self.revision, parse_document(body, definitions), dialect_id=row['id'])
+        self.assertEqual(before, self.store.events())
+        self.assertEqual('unverified', self.store.get_record('assumption', 'a')['data']['status'])
 
     def test_prepare_pure_raw_body_optional_final_vote(self):
         body = 'NOTE text="hello"\n'
@@ -32,7 +93,7 @@ class AasmRecordsTests(unittest.TestCase):
         result = prepare_result(self.store, 'alice', 'VOTE verdict=APPROVED evidence=["c"]')
         self.assertEqual(['c'], result['evidence_ids'])
         self.assertEqual('APPROVED', result['verdict'])
-        self.assertEqual([], self.store.events())
+        self.assertEqual(self.baseline_events, self.store.events())
         for body in ['VOTE verdict=BLOCKED evidence=["c"]\nNOTE text=x', 'VOTE verdict=BLOCKED evidence=["c"]\nVOTE verdict=BLOCKED evidence=["c"]']:
             with self.assertRaises(ValueError):
                 prepare_result(self.store, 'alice', body)
@@ -72,7 +133,7 @@ class AasmRecordsTests(unittest.TestCase):
         for body in invalid:
             with self.subTest(body=body), self.assertRaises(ValueError):
                 self.apply('IMP proposal=before text=rollback\n' + body, allow_vote=True)
-            self.assertEqual([], self.store.events())
+            self.assertEqual(self.baseline_events, self.store.events())
 
     def test_bounds_integrity_unknown_and_stale(self):
         for at in ['a.py:4', 'a.py:1-4', 'missing.py:1']:
@@ -88,7 +149,7 @@ class AasmRecordsTests(unittest.TestCase):
             apply_operations(self.store, 'alice', self.revision, [{'op': 'RUN', 'args': {}}])
         with self.assertRaises(ValueError):
             apply_operations(self.store, 'alice', 'old', parse_document('NOTE text=x'))
-        self.assertEqual([], self.store.events())
+        self.assertEqual(self.baseline_events, self.store.events())
 
     def test_vote_authority_and_scope_on_mutation_targets(self):
         self.apply('B id=b at=a.py:1 claim=x fix=y evidence=["read"]\nASSUME id=a text=x paths=["a.py"]\nCOV id=c paths=["a.py"] status=reviewed evidence=["read"]')

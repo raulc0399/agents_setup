@@ -4,11 +4,13 @@ from pathlib import Path
 import re
 
 from . import assumptions, findings, research
+from .authorization import authorize_task
 from .aasm import BASE_DIALECT, BUILTIN_OPERATIONS, expand_operations, parse_document
 from .dialects import get_dialect
 from .snapshots import _read_file, _safe_path
 
 
+INFORMATIONAL_OPERATIONS = ('NOTE', 'IMP')
 REFERENCE_KINDS = ('finding', 'question', 'answer', 'option', 'coverage', 'source', 'claim',
                    'recommendation', 'assumption', 'message', 'aasm_note', 'aasm_domain',
                    'protocol_proposal', 'review', 'task', 'review_plan', 'authorization',
@@ -130,6 +132,16 @@ def apply_operations(store, author, revision, operations, task_id=None, allow_vo
             raise ValueError('VOTE is only allowed in task results')
         definitions = {item['op']: item for item in dialect['definitions']}
         _scope(store, task_id, author, revision, operations, definitions)
+
+        if any(item['op'] in BUILTIN_OPERATIONS and item['op'] not in INFORMATIONAL_OPERATIONS for item in operations):
+            if task_id is not None:
+                paths = store.get_record('task', task_id)['data']['payload']['scope_paths']
+            else:
+                paths = store.get_meta('paths')
+                if not paths:
+                    paths = [entry['path'] for entry in store.get_meta('snapshot', {}).get('files', [])]
+            authorize_task(store, 'review', revision, paths)
+
         context = dict(author=author, revision=revision)
         for operation in operations:
             op, args = operation['op'], operation['args']

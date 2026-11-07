@@ -39,6 +39,8 @@ Required operands appear without brackets; brackets mean optional. `strings` is 
 
 `FIX` resolves a finding; `REOPEN` reopens it. `DISPUTE` creates a blocking linked question and does not dismiss its finding. `F` creates an unverified claim; `CONFIRM` is independent verification, not automatic source validation. `ASSUME` defaults to blocking; `VERIFY` records evidence of verification. `IMP` only proposes future improvements. `NOTE` has no approval effect.
 
+After dialect expansion, every builtin except `NOTE` and `IMP` requires a current `review` grant covering the task scope, or all run paths for taskless calls; unmapped domain extensions remain informational.
+
 A review/challenge task result requires exactly one final `VOTE`; approval evidence references real reviewed coverage spanning the task scope. A peer message cannot approve a task. References must exist in the current revision or be created in the same atomic body; `NOTE refs` rejects ambiguous record types. Invalid commands, references, scope or locations roll back the whole application. Use factual evidence, not placeholder approvals.
 
 ## Sending and reading
