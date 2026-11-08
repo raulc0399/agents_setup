@@ -459,7 +459,8 @@ impl Store {
         };
         let mut count = 0;
         for mut question in questions {
-            if question.generation != generation {
+            // Share is already durable and has no native transport left to invalidate.
+            if question.generation != generation || question.mode == DeliveryMode::Share {
                 continue;
             }
             question.outcome = match question.outcome {

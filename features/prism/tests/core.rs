@@ -447,6 +447,54 @@ fn question_snapshot_and_delivery_persist_without_resend() {
 }
 
 #[test]
+fn shared_questions_survive_retirement_and_resume() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("shared-thread")).unwrap().id;
+    let publication = publication();
+    let result = store.publish(workspace, &publication).unwrap();
+    let mut request = PrepareQuestion {
+        request_id: Id::new_v4(),
+        generation: 1,
+        selection: Selection {
+            document_id: result.document_id,
+            revision: 1,
+            ids: vec![publication.elements[0].id],
+        },
+        text: "Explain the selected content".into(),
+        mode: DeliveryMode::Share,
+    };
+    let shared = store.prepare_question(workspace, &request).unwrap();
+    request.request_id = Id::new_v4();
+    request.mode = DeliveryMode::Start;
+    let native = store.prepare_question(workspace, &request).unwrap();
+    assert_eq!(
+        store
+            .invalidate_generation(workspace, 1, "disconnected")
+            .unwrap(),
+        1
+    );
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.workspace(&key("shared-thread")).unwrap().id,
+        workspace
+    );
+    assert_eq!(
+        store.question(workspace, shared.request_id).unwrap(),
+        shared
+    );
+    assert!(matches!(
+        store
+            .question(workspace, native.request_id)
+            .unwrap()
+            .outcome,
+        DeliveryOutcome::Failed { .. }
+    ));
+}
+
+#[test]
 fn stale_selection_wrong_generation_and_illegal_delivery_transition_fail() {
     let (mut store, workspace, publication, result) = setup();
     let mut request = PrepareQuestion {
