@@ -655,3 +655,275 @@ fn multiline_document_title_cannot_hide_connection_status() {
     assert!(output.contains("Native transport unavailable"));
     assert!(output.contains("First Second Third"));
 }
+
+#[test]
+fn diagram_mode_uses_visible_records_and_shared_actions() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    key(&mut state, &mut fixture.store, KeyCode::Char('v'));
+    assert_eq!(state.view.as_ref().unwrap().kind, ViewKind::Diagram);
+    assert!(render(&mut state, 160, 40, &connection()).contains("Diagram"));
+    key(&mut state, &mut fixture.store, KeyCode::Char('/'));
+    type_text(&mut state, &mut fixture.store, "Sink");
+    key(&mut state, &mut fixture.store, KeyCode::Enter);
+    key(&mut state, &mut fixture.store, KeyCode::Char('A'));
+    let selection = state.view.as_ref().unwrap().selection.as_ref().unwrap();
+    assert_eq!(selection.ids, vec![Id::from_u128(2), Id::from_u128(4)]);
+    key(&mut state, &mut fixture.store, KeyCode::Char('a'));
+    assert_eq!(
+        state.document().unwrap().elements[&Id::from_u128(2)].accepted_revision,
+        Some(1)
+    );
+    assert_eq!(
+        state.document().unwrap().relationships[&Id::from_u128(3)].accepted_revision,
+        None
+    );
+    key(&mut state, &mut fixture.store, KeyCode::Char('u'));
+    assert_eq!(
+        state.document().unwrap().elements[&Id::from_u128(2)].accepted_revision,
+        None
+    );
+}
+
+#[test]
+fn diagram_mouse_target_follows_pan_resize_and_private_positions() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    key(&mut state, &mut fixture.store, KeyCode::Char('v'));
+    render(&mut state, 200, 40, &connection());
+    state.handle_event(
+        &mut fixture.store,
+        Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)),
+        &connection(),
+    );
+    assert_eq!(
+        state.view.as_ref().unwrap().positions[&Id::from_u128(1)].x,
+        2
+    );
+    for _ in 0..5 {
+        state.handle_event(
+            &mut fixture.store,
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
+            &connection(),
+        );
+    }
+    render(&mut state, 120, 25, &connection());
+    let view = state.view.as_ref().unwrap();
+    let layout = prism::ui::diagram::DiagramLayout::new(state.document().unwrap(), view);
+    let presentation = &state.layout.presentation[&view.id];
+    let mut diagram = prism::ui::diagram::DiagramState {
+        pan_x: presentation.pan_x,
+        pan_y: presentation.pan_y,
+    };
+    let area = ratatui::layout::Rect::new(0, 2, 54, 20);
+    diagram.pan(0, 0, &layout, area);
+    let mut target = None;
+    for row in area.y..area.bottom() {
+        for column in area.x..area.right() {
+            if let Some(id) = diagram.hit_test(column, row, area, &layout) {
+                target = Some((column, row, id));
+                break;
+            }
+        }
+        if target.is_some() {
+            break;
+        }
+    }
+    let (column, row, id) = target.unwrap();
+    state.handle_event(
+        &mut fixture.store,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &connection(),
+    );
+    assert_eq!(
+        state.view.as_ref().unwrap().selection.as_ref().unwrap().ids,
+        vec![id]
+    );
+    assert_eq!(state.document().unwrap().revision, 1);
+}
+
+#[test]
+fn independent_views_restore_order_focus_split_mode_and_drafts() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    let first = state.view.as_ref().unwrap().id;
+    key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+    key(&mut state, &mut fixture.store, KeyCode::Char('e'));
+    type_text(&mut state, &mut fixture.store, "first private draft");
+    key(&mut state, &mut fixture.store, KeyCode::Esc);
+    control(&mut state, &mut fixture.store, 't', &connection());
+    let second = state.view.as_ref().unwrap().id;
+    assert_ne!(first, second);
+    assert!(state.view.as_ref().unwrap().draft.is_empty());
+    assert!(state.view.as_ref().unwrap().selection.is_none());
+    key(&mut state, &mut fixture.store, KeyCode::Char('v'));
+    key(&mut state, &mut fixture.store, KeyCode::Down);
+    key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+    key(&mut state, &mut fixture.store, KeyCode::Char('e'));
+    type_text(&mut state, &mut fixture.store, "second private draft");
+    key(&mut state, &mut fixture.store, KeyCode::Esc);
+    control(&mut state, &mut fixture.store, '\\', &connection());
+    assert_eq!(state.layout.split, Some(first));
+    let restored = fixture.state();
+    assert_eq!(restored.layout.tabs, vec![first, second]);
+    assert_eq!(restored.layout.active, Some(second));
+    assert_eq!(restored.layout.split, Some(first));
+    assert_eq!(restored.focus, Some(Id::from_u128(2)));
+    assert_eq!(restored.view.as_ref().unwrap().kind, ViewKind::Diagram);
+    assert_eq!(
+        restored.view.as_ref().unwrap().draft,
+        "second private draft"
+    );
+    key(&mut state, &mut fixture.store, KeyCode::F(6));
+    assert_eq!(state.view.as_ref().unwrap().id, first);
+    assert_eq!(state.view.as_ref().unwrap().draft, "first private draft");
+    assert_eq!(state.layout.split, Some(second));
+    let document_json = serde_json::to_string(state.document().unwrap()).unwrap();
+    assert!(!document_json.contains("private draft"));
+    assert!(
+        fixture
+            .store
+            .questions(fixture.workspace.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn split_views_share_archive_undo_and_detect_stale_selection() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    let first = state.view.as_ref().unwrap().id;
+    key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+    control(&mut state, &mut fixture.store, '\\', &connection());
+    assert_eq!(state.layout.split, Some(first));
+    key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+    key(&mut state, &mut fixture.store, KeyCode::Char('x'));
+    let output = render(&mut state, 180, 40, &connection());
+    assert!(output.contains("STALE selection"));
+    key(&mut state, &mut fixture.store, KeyCode::F(6));
+    assert!(state.selection_stale());
+    assert_eq!(state.rows().len(), 2);
+    key(&mut state, &mut fixture.store, KeyCode::Char('a'));
+    assert!(state.message.contains("stale"));
+    key(&mut state, &mut fixture.store, KeyCode::Char('u'));
+    assert_eq!(state.rows().len(), 4);
+    assert_eq!(state.document().unwrap().revision, 3);
+}
+
+#[test]
+fn closing_view_never_archives_or_erases_its_private_draft() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    let first = state.view.as_ref().unwrap().id;
+    control(&mut state, &mut fixture.store, 't', &connection());
+    let closed = state.view.as_ref().unwrap().id;
+    key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+    key(&mut state, &mut fixture.store, KeyCode::Char('e'));
+    type_text(&mut state, &mut fixture.store, "saved in closed view");
+    key(&mut state, &mut fixture.store, KeyCode::Esc);
+    control(&mut state, &mut fixture.store, 'w', &connection());
+    assert_eq!(state.layout.tabs, vec![first]);
+    assert_eq!(state.document().unwrap().revision, 1);
+    assert_eq!(
+        fixture
+            .store
+            .views(fixture.workspace.id)
+            .unwrap()
+            .into_iter()
+            .find(|view| view.id == closed)
+            .unwrap()
+            .draft,
+        "saved in closed view"
+    );
+    let mut restored = fixture.state();
+    assert_eq!(restored.layout.tabs, vec![first]);
+    control(&mut restored, &mut fixture.store, 'r', &connection());
+    assert_eq!(restored.view.as_ref().unwrap().id, closed);
+    assert_eq!(
+        restored.view.as_ref().unwrap().draft,
+        "saved in closed view"
+    );
+}
+
+#[test]
+fn split_and_tabs_render_on_narrow_screens_and_route_keyboard_focus() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    let first = state.view.as_ref().unwrap().id;
+    control(&mut state, &mut fixture.store, '\\', &connection());
+    let second = state.view.as_ref().unwrap().id;
+    for (width, height) in [(1, 1), (12, 6), (35, 15), (100, 30), (200, 40)] {
+        render(&mut state, width, height, &connection());
+    }
+    state.handle_event(
+        &mut fixture.store,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &connection(),
+    );
+    assert_eq!(state.layout.active, Some(first));
+    assert_eq!(state.layout.split, Some(second));
+    key(&mut state, &mut fixture.store, KeyCode::Tab);
+    assert_eq!(state.layout.active, Some(second));
+    key(&mut state, &mut fixture.store, KeyCode::BackTab);
+    assert_eq!(state.layout.active, Some(first));
+}
+
+#[test]
+fn refresh_realigns_unicode_editor_cursor_for_draft_and_filter() {
+    for filter in [false, true] {
+        let mut fixture = Fixture::new();
+        let mut state = fixture.state();
+        key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+        key(
+            &mut state,
+            &mut fixture.store,
+            KeyCode::Char(if filter { '/' } else { 'e' }),
+        );
+        type_text(&mut state, &mut fixture.store, "a");
+        let mut changed = state.view.clone().unwrap();
+        if filter {
+            changed.filter = "界".into();
+        } else {
+            changed.draft = "界".into();
+        }
+        fixture
+            .store
+            .save_view(fixture.workspace.id, &changed)
+            .unwrap();
+        state.refresh(&mut fixture.store).unwrap();
+        render(&mut state, 100, 30, &connection());
+        key(&mut state, &mut fixture.store, KeyCode::Char('b'));
+        let view = state.view.as_ref().unwrap();
+        assert_eq!(if filter { &view.filter } else { &view.draft }, "b界");
+    }
+}
+
+#[test]
+fn rapid_typing_and_refresh_preserve_every_character_and_share_once() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+    key(&mut state, &mut fixture.store, KeyCode::Char('e'));
+    let text = "Why is the Source connected to the Sink? 界é🙂";
+    for character in text.chars() {
+        key(&mut state, &mut fixture.store, KeyCode::Char(character));
+        state.refresh(&mut fixture.store).unwrap();
+        render(&mut state, 100, 30, &connection());
+    }
+    assert_eq!(state.view.as_ref().unwrap().draft, text);
+    control(&mut state, &mut fixture.store, 's', &connection());
+    let questions = fixture.store.questions(fixture.workspace.id).unwrap();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0].text, text);
+}

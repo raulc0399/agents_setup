@@ -1,5 +1,6 @@
 pub mod diagram;
 pub mod list;
+pub mod views;
 
 use crate::actions::{ContentAction, PrepareQuestion};
 use crate::model::*;
@@ -26,6 +27,8 @@ use std::time::{Duration, Instant};
 const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const EVENT_WAIT: Duration = Duration::from_millis(50);
 const DETAIL_PAGE_CHARACTERS: usize = 4_096;
+const DIAGRAM_PAN_STEP: i32 = 4;
+const DIAGRAM_MOVE_STEP: i32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct ConnectionInfo {
@@ -60,12 +63,18 @@ pub struct UiState {
     editor_generation: Option<u64>,
     undo: BTreeMap<Id, Vec<Id>>,
     show_help: bool,
+    pub layout: views::ViewLayout,
+    saved_views: BTreeMap<Id, ViewState>,
+    diagram_state: diagram::DiagramState,
+    content_area: Rect,
+    split_area: Rect,
+    tab_areas: Vec<(Rect, Id)>,
 }
 
 impl UiState {
     pub fn new(store: &mut Store, workspace: Workspace) -> Result<Self> {
         let mut state = Self {
-            workspace,
+            workspace: workspace.clone(),
             documents: Vec::new(),
             view: None,
             focus: None,
@@ -81,6 +90,20 @@ impl UiState {
             editor_generation: None,
             undo: BTreeMap::new(),
             show_help: false,
+            layout: store
+                .ui_state(workspace.id)?
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default(),
+            saved_views: store
+                .views(workspace.id)?
+                .into_iter()
+                .map(|view| (view.id, view))
+                .collect(),
+            diagram_state: diagram::DiagramState::default(),
+            content_area: Rect::default(),
+            split_area: Rect::default(),
+            tab_areas: Vec::new(),
         };
         state.refresh(store)?;
         Ok(state)
@@ -111,21 +134,58 @@ impl UiState {
     pub fn refresh(&mut self, store: &mut Store) -> Result<()> {
         self.documents = store.documents(self.workspace.id)?;
         self.questions = store.questions(self.workspace.id)?;
-        if self.view.is_none()
-            && let Some(document) = self.documents.first()
-        {
-            self.load_document(store, document.id)?;
+        self.saved_views = store
+            .views(self.workspace.id)?
+            .into_iter()
+            .map(|view| (view.id, view))
+            .collect();
+        let initial = self.layout.tabs.is_empty() && self.view.is_none();
+        if initial {
+            self.layout.tabs = self
+                .saved_views
+                .keys()
+                .copied()
+                .take(views::MAX_OPEN_VIEWS)
+                .collect();
+        }
+        for document in &self.documents {
+            if self.layout.tabs.len() >= views::MAX_OPEN_VIEWS {
+                break;
+            }
+            if !self
+                .saved_views
+                .values()
+                .any(|view| view.document_id == document.id)
+            {
+                let view = Self::empty_view(document.id);
+                store.save_view(self.workspace.id, &view)?;
+                self.layout.tabs.push(view.id);
+                self.saved_views.insert(view.id, view);
+            }
+        }
+        self.layout.reconcile(&self.saved_views);
+        if self.view.is_none() {
+            if let Some(id) = self.layout.active {
+                self.activate_view(id)?;
+            }
+        } else if let Some(view) = &self.view {
+            self.view = self.saved_views.get(&view.id).cloned();
+        }
+        if let Some(view) = &self.view {
+            let text = if self.input_mode == InputMode::Filter {
+                &view.filter
+            } else {
+                &view.draft
+            };
+            self.editor_cursor = text.floor_char_boundary(self.editor_cursor.min(text.len()));
         }
         self.reconcile_focus();
+        self.persist_layout(store)?;
         Ok(())
     }
 
-    fn load_document(&mut self, store: &mut Store, document_id: Id) -> Result<()> {
-        let saved = store
-            .views(self.workspace.id)?
-            .into_iter()
-            .find(|view| view.document_id == document_id && view.kind == ViewKind::List);
-        let view = saved.unwrap_or_else(|| ViewState {
+    fn empty_view(document_id: Id) -> ViewState {
+        ViewState {
             id: Id::new_v4(),
             document_id,
             kind: ViewKind::List,
@@ -134,28 +194,176 @@ impl UiState {
             hidden: BTreeSet::new(),
             filter: String::new(),
             draft: String::new(),
+        }
+    }
+
+    fn remember_view(&mut self) {
+        if let Some(view) = &self.view {
+            self.saved_views.insert(view.id, view.clone());
+            self.layout.presentation.insert(
+                view.id,
+                views::Presentation {
+                    focus: self.focus,
+                    pan_x: self.diagram_state.pan_x,
+                    pan_y: self.diagram_state.pan_y,
+                    list_offset: self.list_state.offset(),
+                    detail_scroll: self.detail_scroll,
+                    detail_page: self.detail_page,
+                },
+            );
+        }
+    }
+
+    fn persist_layout(&mut self, store: &mut Store) -> Result<()> {
+        self.remember_view();
+        store.save_ui_state(self.workspace.id, &serde_json::to_value(&self.layout)?)?;
+        Ok(())
+    }
+
+    fn activate_view(&mut self, id: Id) -> Result<()> {
+        self.remember_view();
+        let view = self
+            .saved_views
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("View is unavailable"))?;
+        let presentation = self
+            .layout
+            .presentation
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        if self.layout.split == Some(id) {
+            self.layout.split = self.layout.active;
+        }
+        self.layout.active = Some(id);
+        self.focus = presentation.focus.or_else(|| {
+            view.selection
+                .as_ref()
+                .and_then(|selection| selection.ids.first().copied())
         });
-        store.save_view(self.workspace.id, &view)?;
-        self.focus = view
-            .selection
-            .as_ref()
-            .and_then(|selection| selection.ids.first().copied());
         self.editor_cursor = view.draft.len();
         self.view = Some(view);
-        self.list_state = ListState::default();
-        self.detail_scroll = 0;
-        self.detail_page = 0;
+        self.list_state = ListState::default().with_offset(presentation.list_offset);
+        self.diagram_state = diagram::DiagramState {
+            pan_x: presentation.pan_x,
+            pan_y: presentation.pan_y,
+        };
+        self.detail_scroll = presentation.detail_scroll;
+        self.detail_page = presentation.detail_page;
         self.reconcile_focus();
         Ok(())
     }
 
-    fn reconcile_focus(&mut self) {
-        let rows = self.rows();
-        let index = rows
+    fn duplicate_view(&mut self, store: &mut Store) -> Result<()> {
+        if self.layout.tabs.len() >= views::MAX_OPEN_VIEWS {
+            bail!(
+                "At most {} views may be open; close a view first",
+                views::MAX_OPEN_VIEWS
+            );
+        }
+        let original = self
+            .view
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No document published"))?;
+        let mut view = Self::empty_view(original.document_id);
+        view.kind = original.kind.clone();
+        let id = view.id;
+        store.save_view(self.workspace.id, &view)?;
+        self.saved_views.insert(id, view);
+        self.layout.tabs.push(id);
+        self.activate_view(id)
+    }
+
+    fn cycle_view(&mut self, backwards: bool) -> Result<()> {
+        if self.layout.tabs.is_empty() {
+            return Ok(());
+        }
+        let index = self
+            .layout
+            .tabs
             .iter()
-            .position(|row| Some(row.id) == self.focus)
-            .or_else(|| (!rows.is_empty()).then_some(0));
-        self.focus = index.map(|index| rows[index].id);
+            .position(|id| Some(*id) == self.layout.active)
+            .unwrap_or(0);
+        let count = self.layout.tabs.len();
+        let next = if backwards {
+            (index + count - 1) % count
+        } else {
+            (index + 1) % count
+        };
+        self.activate_view(self.layout.tabs[next])
+    }
+
+    fn close_view(&mut self) -> Result<()> {
+        if self.layout.tabs.len() <= 1 {
+            bail!("Keep at least one view open");
+        }
+        let active = self.layout.active;
+        self.layout.tabs.retain(|id| Some(*id) != active);
+        if let Some(id) = active {
+            self.layout.closed.push(id);
+        }
+        let next = self.layout.split.unwrap_or(self.layout.tabs[0]);
+        self.layout.split = None;
+        self.activate_view(next)?;
+        self.message =
+            "View closed; published content and its saved private draft are preserved".into();
+        Ok(())
+    }
+
+    fn reopen_view(&mut self) -> Result<()> {
+        if self.layout.tabs.len() >= views::MAX_OPEN_VIEWS {
+            bail!("Close a view before reopening another");
+        }
+        let id = self
+            .layout
+            .closed
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("No closed view to reopen"))?;
+        self.layout.tabs.push(id);
+        self.activate_view(id)
+    }
+
+    fn toggle_split(&mut self, store: &mut Store) -> Result<()> {
+        if self.layout.split.take().is_some() {
+            return Ok(());
+        }
+        let original = self.layout.active;
+        if self.layout.tabs.len() == 1 {
+            self.duplicate_view(store)?;
+            self.layout.split = original;
+        } else {
+            self.layout.split = self
+                .layout
+                .tabs
+                .iter()
+                .copied()
+                .find(|id| Some(*id) != original);
+        }
+        Ok(())
+    }
+
+    fn diagram_layout(&self) -> Option<diagram::DiagramLayout> {
+        let view = self.view.as_ref()?;
+        (view.kind == ViewKind::Diagram).then(|| {
+            diagram::DiagramLayout::new(self.document().expect("view document exists"), view)
+        })
+    }
+
+    fn visible_ids(&self) -> Vec<Id> {
+        self.diagram_layout().map_or_else(
+            || self.rows().iter().map(|row| row.id).collect(),
+            |layout| layout.visible_ids(),
+        )
+    }
+
+    fn reconcile_focus(&mut self) {
+        let ids = self.visible_ids();
+        let index = ids
+            .iter()
+            .position(|id| Some(*id) == self.focus)
+            .or_else(|| (!ids.is_empty()).then_some(0));
+        self.focus = index.map(|index| ids[index]);
         self.list_state.select(index);
     }
 
@@ -172,6 +380,15 @@ impl UiState {
     }
 
     fn move_focus(&mut self, delta: isize) {
+        if let Some(layout) = self.diagram_layout() {
+            self.focus = layout.focus_navigation(self.focus, delta);
+            if let Some(id) = self.focus {
+                self.diagram_state.reveal(id, &layout, self.content_area);
+            }
+            self.detail_scroll = 0;
+            self.detail_page = 0;
+            return;
+        }
         let rows = self.rows();
         if rows.is_empty() {
             return;
@@ -337,7 +554,12 @@ impl UiState {
         connection: &ConnectionInfo,
     ) -> bool {
         match self.process_event(store, event, connection) {
-            Ok(exit) => exit,
+            Ok(exit) => {
+                if let Err(error) = self.persist_layout(store) {
+                    self.message = format!("Error saving private arrangement: {error}");
+                }
+                exit
+            }
             Err(error) => {
                 self.message = format!("Error: {error}");
                 false
@@ -352,9 +574,55 @@ impl UiState {
         connection: &ConnectionInfo,
     ) -> Result<bool> {
         if let Event::Mouse(mouse) = event {
-            if self.input_mode == InputMode::Browse
-                && self.list_area.contains((mouse.column, mouse.row).into())
-            {
+            if self.input_mode != InputMode::Browse || self.show_help {
+                return Ok(false);
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some((_, id)) = self
+                    .tab_areas
+                    .iter()
+                    .find(|(area, _)| area.contains((mouse.column, mouse.row).into()))
+                {
+                    self.activate_view(*id)?;
+                    return Ok(false);
+                }
+                if self.split_area.contains((mouse.column, mouse.row).into()) {
+                    if let Some(id) = self.layout.split {
+                        self.activate_view(id)?;
+                    }
+                    return Ok(false);
+                }
+            }
+            if let Some(layout) = self.diagram_layout() {
+                if self.content_area.contains((mouse.column, mouse.row).into()) {
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            self.diagram_state
+                                .pan(0, DIAGRAM_PAN_STEP, &layout, self.content_area)
+                        }
+                        MouseEventKind::ScrollUp => {
+                            self.diagram_state
+                                .pan(0, -DIAGRAM_PAN_STEP, &layout, self.content_area)
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(id) = self.diagram_state.hit_test(
+                                mouse.column,
+                                mouse.row,
+                                self.content_area,
+                                &layout,
+                            ) {
+                                self.focus = Some(id);
+                                self.detail_scroll = 0;
+                                self.detail_page = 0;
+                                self.toggle_selection(store)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return Ok(false);
+            }
+            if self.list_area.contains((mouse.column, mouse.row).into()) {
                 match mouse.kind {
                     MouseEventKind::ScrollDown => self.move_focus(1),
                     MouseEventKind::ScrollUp => self.move_focus(-1),
@@ -406,14 +674,61 @@ impl UiState {
             }
             return Ok(false);
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('t') => self.duplicate_view(store)?,
+                KeyCode::Char('w') => self.close_view()?,
+                KeyCode::Char('r') => self.reopen_view()?,
+                KeyCode::Char('\\') => self.toggle_split(store)?,
+                _ => return Ok(false),
+            }
+            return Ok(false);
+        }
+        if let Some(layout) = self.diagram_layout() {
+            let delta = match key.code {
+                KeyCode::Left => Some((-1, 0)),
+                KeyCode::Right => Some((1, 0)),
+                KeyCode::Up => Some((0, -1)),
+                KeyCode::Down => Some((0, 1)),
+                _ => None,
+            };
+            if let Some((dx, dy)) = delta {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    if let Some(id) = self.focus
+                        && let Some(position) = layout.position(id)
+                    {
+                        self.save_view(store, |view| {
+                            view.positions.insert(
+                                id,
+                                Position {
+                                    x: position.x.saturating_add(dx * DIAGRAM_MOVE_STEP),
+                                    y: position.y.saturating_add(dy * DIAGRAM_MOVE_STEP),
+                                },
+                            );
+                        })?;
+                        self.move_focus(0);
+                    }
+                    return Ok(false);
+                }
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.diagram_state.pan(
+                        dx * DIAGRAM_PAN_STEP,
+                        dy * DIAGRAM_PAN_STEP,
+                        &layout,
+                        self.content_area,
+                    );
+                    return Ok(false);
+                }
+            }
+        }
         match key.code {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('?') => {
                 self.show_help = true;
                 self.detail_scroll = 0;
             }
-            KeyCode::Down | KeyCode::Char('j') => self.move_focus(1),
-            KeyCode::Up | KeyCode::Char('k') => self.move_focus(-1),
+            KeyCode::Down | KeyCode::Right | KeyCode::Char('j') => self.move_focus(1),
+            KeyCode::Up | KeyCode::Left | KeyCode::Char('k') => self.move_focus(-1),
             KeyCode::Home => self.move_focus(isize::MIN),
             KeyCode::End => self.move_focus(isize::MAX),
             KeyCode::Char(' ') => self.toggle_selection(store)?,
@@ -425,7 +740,7 @@ impl UiState {
                 let selection = Selection {
                     document_id: document.id,
                     revision: document.revision,
-                    ids: self.rows().iter().map(|row| row.id).collect(),
+                    ids: self.visible_ids(),
                 };
                 self.save_view(store, |view| {
                     view.selection = (!selection.ids.is_empty()).then_some(selection)
@@ -452,20 +767,21 @@ impl UiState {
                 self.editor_cursor = self.view.as_ref().map_or(0, |view| view.draft.len());
                 self.editor_generation = Some(connection.generation);
             }
-            KeyCode::Tab | KeyCode::BackTab => {
-                if let Some(document) = self.document() {
-                    let index = self
-                        .documents
-                        .iter()
-                        .position(|item| item.id == document.id)
-                        .unwrap_or(0);
-                    let next = if key.code == KeyCode::BackTab {
-                        (index + self.documents.len() - 1) % self.documents.len()
-                    } else {
-                        (index + 1) % self.documents.len()
-                    };
-                    self.load_document(store, self.documents[next].id)?;
+            KeyCode::Tab | KeyCode::BackTab => self.cycle_view(key.code == KeyCode::BackTab)?,
+            KeyCode::F(6) => {
+                if let Some(id) = self.layout.split {
+                    self.activate_view(id)?;
                 }
+            }
+            KeyCode::Char('v') => {
+                self.save_view(store, |view| {
+                    view.kind = if view.kind == ViewKind::List {
+                        ViewKind::Diagram
+                    } else {
+                        ViewKind::List
+                    }
+                })?;
+                self.move_focus(0);
             }
             KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(5),
             KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(5),
@@ -527,7 +843,7 @@ impl UiState {
         } else {
             view.draft.clone()
         };
-        let mut cursor = self.editor_cursor.min(text.len());
+        let mut cursor = text.floor_char_boundary(self.editor_cursor.min(text.len()));
         match key.code {
             KeyCode::Left => {
                 cursor = text[..cursor]
@@ -581,7 +897,7 @@ impl UiState {
     pub fn render(&mut self, frame: &mut Frame, connection: &ConnectionInfo) {
         let area = frame.area();
         let chunks = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(if self.layout.tabs.len() > 1 { 3 } else { 2 }),
             Constraint::Min(1),
             Constraint::Length(3),
         ])
@@ -606,13 +922,72 @@ impl UiState {
             connection.generation,
             terminal_safe(&connection.message).replace(['\n', '\t'], " ")
         );
-        let header =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[0]);
+        let header = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(chunks[0]);
         frame.render_widget(Paragraph::new(format!("Prism: {title}")), header[0]);
         frame.render_widget(Paragraph::new(status), header[1]);
+        self.tab_areas.clear();
+        self.split_area = Rect::default();
+        if self.layout.tabs.len() > 1 {
+            let active_index = self
+                .layout
+                .tabs
+                .iter()
+                .position(|id| Some(*id) == self.layout.active)
+                .unwrap_or(0);
+            let visible_count = usize::from(header[2].width / 18).max(1);
+            let start = active_index.saturating_sub(visible_count - 1);
+            let mut x = header[2].x;
+            for (index, id) in self
+                .layout
+                .tabs
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(visible_count)
+            {
+                let width = 18.min(header[2].right().saturating_sub(x));
+                let area = Rect::new(x, header[2].y, width, header[2].height);
+                let Some(view) = self.saved_views.get(id) else {
+                    continue;
+                };
+                let title = self
+                    .documents
+                    .iter()
+                    .find(|document| document.id == view.document_id)
+                    .map(|document| terminal_safe(&document.title).replace(['\n', '\t'], " "))
+                    .unwrap_or_default();
+                let style = if Some(*id) == self.layout.active {
+                    Style::default().bg(Color::DarkGray).fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "{}:{} {}",
+                        index + 1,
+                        if view.kind == ViewKind::List {
+                            "L"
+                        } else {
+                            "D"
+                        },
+                        title
+                    ))
+                    .style(style),
+                    area,
+                );
+                self.tab_areas.push((area, *id));
+                x += width;
+            }
+        }
         if self.show_help {
             self.list_area = Rect::default();
-            let controls = "j/k or arrows: move focus\nSpace or click: toggle selection\nA: select all visible content\nr: clear stale/current selection\na: accept shared content\nx: archive shared content\nu: undo last content action\nh: hide selected in this view\nH: show all hidden content\n/: edit private filter\nTab / Shift-Tab: switch document\nPgUp/PgDn: scroll details/delivery\n[ / ]: previous/next details page\ne: edit private question draft\nEnter in editor: newline\nCtrl-S or Ctrl-Enter: explicit send\nCtrl-N in editor: delivery mode\nEsc: keep private draft / finish filter\nLeft/Right/Home/End: edit cursor\nBackspace/Delete: edit text\nq / Ctrl-C: quit\n\nAcceptance is feedback, never tool permission.\nShare creates a snapshot for explicit retrieval in the bound CLI; it does not start a turn.\nUnknown delivery is never automatically retried. Sending it again can duplicate the request.";
+            self.content_area = Rect::default();
+            let controls = "j/k or arrows: move focus\nSpace or click: toggle selection\nA: select all visible content\nr: clear stale/current selection\na: accept shared content\nx: archive shared content\nu: undo last content action\nh: hide selected in this view\nH: show all hidden content\n/: edit private filter\nTab / Shift-Tab: switch view\nCtrl-T: new independent view of this document\nCtrl-W: close view, preserve content/draft\nCtrl-R: reopen last closed view\nCtrl-\\: toggle split\nF6 or click other split: focus it\nv: switch list/diagram\nShift-arrows: pan diagram\nAlt-arrows: move focused diagram card\nPgUp/PgDn: scroll details/delivery\n[ / ]: previous/next details page\ne: edit private question draft\nEnter in editor: newline\nCtrl-S or Ctrl-Enter: explicit send\nCtrl-N in editor: delivery mode\nEsc: keep private draft / finish filter\nLeft/Right/Home/End: edit cursor\nBackspace/Delete: edit text\nq / Ctrl-C: quit\n\nAcceptance is feedback, never tool permission.\nShare creates a snapshot for explicit retrieval in the bound CLI; it does not start a turn.\nUnknown delivery is never automatically retried. Sending it again can duplicate the request.";
             frame.render_widget(
                 Paragraph::new(controls)
                     .block(Block::bordered().title("Controls · j/k scroll · Esc close"))
@@ -630,7 +1005,20 @@ impl UiState {
             Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(chunks[1])
         };
-        self.render_list(frame, panes[0]);
+        if let Some(id) = self.layout.split {
+            let split = if panes[0].width >= 72 {
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(panes[0])
+            } else {
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(panes[0])
+            };
+            self.render_content(frame, split[0]);
+            self.split_area = split[1];
+            self.render_secondary(frame, split[1], id);
+        } else {
+            self.render_content(frame, panes[0]);
+        }
         self.render_details(frame, panes[1]);
         let warning = if self.selection_stale() {
             "STALE selection: r clears; reselect before acting"
@@ -648,6 +1036,111 @@ impl UiState {
             Paragraph::new(format!("{}\n{help}", terminal_safe(warning)))
                 .wrap(Wrap { trim: false }),
             chunks[2],
+        );
+    }
+
+    fn render_content(&mut self, frame: &mut Frame, area: Rect) {
+        self.content_area = area;
+        if let Some(layout) = self.diagram_layout() {
+            self.list_area = Rect::default();
+            let selected = self
+                .view
+                .as_ref()
+                .and_then(|view| view.selection.as_ref())
+                .map(|selection| selection.ids.iter().copied().collect())
+                .unwrap_or_default();
+            self.diagram_state
+                .render(frame, area, &layout, self.focus, &selected);
+        } else {
+            self.render_list(frame, area);
+        }
+    }
+
+    fn render_secondary(&self, frame: &mut Frame, area: Rect, id: Id) {
+        let Some(view) = self.saved_views.get(&id) else {
+            return;
+        };
+        let Some(document) = self
+            .documents
+            .iter()
+            .find(|document| document.id == view.document_id)
+        else {
+            return;
+        };
+        let presentation = self
+            .layout
+            .presentation
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        if view.kind == ViewKind::Diagram {
+            let mut state = diagram::DiagramState {
+                pan_x: presentation.pan_x,
+                pan_y: presentation.pan_y,
+            };
+            let selected = view
+                .selection
+                .as_ref()
+                .map(|selection| selection.ids.iter().copied().collect())
+                .unwrap_or_default();
+            state.render(
+                frame,
+                area,
+                &diagram::DiagramLayout::new(document, view),
+                presentation.focus,
+                &selected,
+            );
+            if view
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.revision != document.revision)
+            {
+                frame.render_widget(
+                    Paragraph::new("STALE selection · F6 focus")
+                        .style(Style::default().fg(Color::Yellow)),
+                    Rect::new(area.x, area.y, area.width, area.height.min(1)),
+                );
+            }
+            return;
+        }
+        let rows = list::rows(document, view);
+        let selected = view.selection.as_ref();
+        let mut state = ListState::default()
+            .with_offset(presentation.list_offset)
+            .with_selected(
+                rows.iter()
+                    .position(|row| Some(row.id) == presentation.focus),
+            );
+        let items = rows.iter().map(|row| {
+            ListItem::new(format!(
+                "{} {} {}",
+                if selected.is_some_and(|selection| selection.ids.contains(&row.id)) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                },
+                row.label,
+                if row.stale_acceptance {
+                    "accepted stale"
+                } else if row.accepted {
+                    "accepted"
+                } else {
+                    ""
+                }
+            ))
+        });
+        let stale = selected.is_some_and(|selection| selection.revision != document.revision);
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::bordered().title(format!(
+                    "{} · {} · F6 focus{}",
+                    terminal_safe(&document.title).replace(['\n', '\t'], " "),
+                    document.revision,
+                    if stale { " · STALE selection" } else { "" }
+                )))
+                .highlight_style(Style::default().bg(Color::DarkGray)),
+            area,
+            &mut state,
         );
     }
 
@@ -701,7 +1194,7 @@ impl UiState {
                     }
                 })
                 .unwrap_or("");
-            let cursor = self.editor_cursor.min(text.len());
+            let cursor = text.floor_char_boundary(self.editor_cursor.min(text.len()));
             let before = terminal_safe(&text[..cursor]).replace('\t', "    ");
             let after = terminal_safe(&text[cursor..]).replace('\t', "    ");
             // A styled cursor marker avoids splitting UTF-8 or guessing terminal cell widths.

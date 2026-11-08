@@ -7,8 +7,8 @@ The user authorized implementation, dependency installation, feature agents, ind
 - [ ] Batch 1: verify installed native contracts, caller identity, transport, lifecycle and approval ownership; record unsupported and untested modes explicitly.
 - [ ] Batch 2: common model, versioned store, actions, delivery records and bridge/adapter contracts; validate conflicts, replay, archive/undo and private state.
 - [ ] Batch 3: session/pane lifecycle, shared list/question UI, then separate native integrations; test each feature and obtain independent review.
-- [ ] Batch 4: diagrams and selection; test layout, hit detection, resizing and shared actions; independent review.
-- [ ] Batch 5: multiple views and persistence; test shared updates and independent view state; independent review.
+- [x] Batch 4: diagrams and selection; test layout, hit detection, resizing and shared actions; independent review.
+- [x] Batch 5: multiple views and persistence; test shared updates and independent view state; independent review.
 - [ ] Batch 6: release checks, installation instructions, real supported CLI loops and final independent review; commit only reviewed files.
 
 ## File ownership
@@ -45,3 +45,18 @@ No application feature or live delivery is claimed complete until its checks pas
 - Codex adapter/plugin: 8 library tests and 1 package test passed; independent implementation review pending. Earlier corrected native probe approved; latest probe extensions need regression rerun. Immediate conversation-switch detection remains unverified, so automatic Start/Steer/Queue remain disabled.
 - Final combined Rust test run passed all 59 tests. Latest global formatting/Clippy, bridge/MCP dedicated tests/review, launcher, multiple views, end-to-end installation and final integration review remain pending.
 - Claude probe artifacts were created before the user excluded Claude implementation; no Claude adapter or plugin was implemented. Those probe artifacts are excluded from implementation commits.
+
+## Resumed implementation (from bcdbfae)
+
+Active ownership is disjoint: UI feature agent owns `src/ui/`, `tests/ui.rs`,
+`tests/diagram.rs`; launcher feature agent owns `src/main.rs`, `src/session.rs`,
+`tests/launcher.rs`, `tests/session.rs`, `tests/launcher_lifecycle.py`; bridge/Codex
+feature agent owns `src/bridge.rs`, `src/mcp.rs`, `src/adapters/`, their tests,
+Codex probes/docs and `plugins/codex/`. The primary integrator owns `src/store.rs`,
+`tests/core.rs`, Cargo manifests, README and tracking. Reviewers are read-only.
+
+- UI/diagrams/multiple views and Store migration independently approved after
+  fixing UTF-8 cursor refresh and the diagram position limit; 23 UI, 7 diagram,
+  and 19 core tests pass. Schema 1→2 preserves content and adds private UI state.
+- Bridge/Codex and launcher reviews requested corrections; fixes and re-review
+  remain underway. Native Start/Steer/Queue remain disabled.

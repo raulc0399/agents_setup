@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT_SECONDS: u64 = 3;
 
 pub struct Store {
@@ -30,7 +30,7 @@ impl Store {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 =
             transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 0 && version != SCHEMA_VERSION {
+        if !(0..=SCHEMA_VERSION).contains(&version) {
             return Err(Error::SchemaVersion(version));
         }
         if version == 0 {
@@ -59,6 +59,13 @@ impl Store {
                     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
                     request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, content TEXT NOT NULL,
                     PRIMARY KEY(workspace_id, request_id));",
+            )?;
+        }
+        if version < 2 {
+            transaction.execute_batch(
+                "CREATE TABLE private_ui (
+                    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
+                    content TEXT NOT NULL);",
             )?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -259,7 +266,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let document = read_document(&transaction, workspace, view.document_id)?;
-        if view.positions.len() > MAX_ELEMENTS || view.hidden.len() > MAX_SELECTION {
+        if view.positions.len() > MAX_SELECTION || view.hidden.len() > MAX_SELECTION {
             return Err(Error::Invalid("view record limit exceeded".into()));
         }
         if let Some(selection) = &view.selection
@@ -299,12 +306,45 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// UI arrangement is private and is never returned by agent-facing inspection.
+    pub fn save_ui_state(&mut self, workspace: Id, state: &serde_json::Value) -> Result<()> {
+        let content = serialized(state)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_workspace(&transaction, workspace)?;
+        transaction.execute(
+            "INSERT INTO private_ui(workspace_id, content) VALUES(?1, ?2)
+             ON CONFLICT(workspace_id) DO UPDATE SET content=excluded.content",
+            params![workspace.to_string(), content],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn ui_state(&self, workspace: Id) -> Result<Option<serde_json::Value>> {
+        require_workspace(&self.connection, workspace)?;
+        let content: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT content FROM private_ui WHERE workspace_id=?1",
+                [workspace.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        content
+            .map(|value| Ok(serde_json::from_str(&value)?))
+            .transpose()
+    }
+
     pub fn prepare_question(
         &mut self,
         workspace: Id,
         request: &PrepareQuestion,
     ) -> Result<Question> {
-        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (question, _) = insert_question(&transaction, workspace, request)?;
         transaction.commit()?;
         Ok(question)
@@ -317,23 +357,34 @@ impl Store {
         request: &PrepareQuestion,
         view_id: Id,
     ) -> Result<Question> {
-        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (question, created) = insert_question(&transaction, workspace, request)?;
         if created {
-            let content: Option<String> = transaction.query_row(
-                "SELECT content FROM private_views WHERE workspace_id=?1 AND id=?2",
-                params![workspace.to_string(), view_id.to_string()], |row| row.get(0),
-            ).optional()?;
+            let content: Option<String> = transaction
+                .query_row(
+                    "SELECT content FROM private_views WHERE workspace_id=?1 AND id=?2",
+                    params![workspace.to_string(), view_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
             let mut view: ViewState = serde_json::from_str(
                 &content.ok_or_else(|| Error::NotFound("private view".into()))?,
             )?;
             if view.document_id != request.selection.document_id || view.draft != request.text {
-                return Err(Error::Invalid("private draft changed before send; refresh it".into()));
+                return Err(Error::Invalid(
+                    "private draft changed before send; refresh it".into(),
+                ));
             }
             view.draft.clear();
             transaction.execute(
                 "UPDATE private_views SET content=?3 WHERE workspace_id=?1 AND id=?2",
-                params![workspace.to_string(), view_id.to_string(), serialized(&view)?],
+                params![
+                    workspace.to_string(),
+                    view_id.to_string(),
+                    serialized(&view)?
+                ],
             )?;
         }
         transaction.commit()?;
@@ -552,38 +603,44 @@ fn validate_transition(previous: &DeliveryOutcome, next: &DeliveryOutcome) -> Re
     Ok(())
 }
 
-fn insert_question(connection: &Connection, workspace: Id, request: &PrepareQuestion) -> Result<(Question, bool)> {
-        bounded(&request.text, MAX_TEXT_BYTES, "question")?;
-        if request.text.trim().is_empty() || request.request_id.is_nil() || request.generation == 0
-        {
-            return Err(Error::Invalid(
-                "question requires text, request ID, and nonzero generation".into(),
-            ));
-        }
-        let payload_hash = hash(&serialized(request)?);
-        let existing: Option<(String, String)> = connection.query_row(
+fn insert_question(
+    connection: &Connection,
+    workspace: Id,
+    request: &PrepareQuestion,
+) -> Result<(Question, bool)> {
+    bounded(&request.text, MAX_TEXT_BYTES, "question")?;
+    if request.text.trim().is_empty() || request.request_id.is_nil() || request.generation == 0 {
+        return Err(Error::Invalid(
+            "question requires text, request ID, and nonzero generation".into(),
+        ));
+    }
+    let payload_hash = hash(&serialized(request)?);
+    let existing: Option<(String, String)> = connection
+        .query_row(
             "SELECT payload_hash, content FROM questions WHERE workspace_id=?1 AND request_id=?2",
-            params![workspace.to_string(), request.request_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?;
-        if let Some((previous_hash, content)) = existing {
-            if previous_hash != payload_hash {
-                return Err(Error::RequestConflict);
-            }
-            return Ok((serde_json::from_str(&content)?, false));
+            params![workspace.to_string(), request.request_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((previous_hash, content)) = existing {
+        if previous_hash != payload_hash {
+            return Err(Error::RequestConflict);
         }
-        let document = read_document(connection, workspace, request.selection.document_id)?;
-        let question = Question {
-            request_id: request.request_id,
-            workspace_id: workspace,
-            generation: request.generation,
-            snapshot: snapshot(&document, &request.selection)?,
-            text: request.text.clone(),
-            mode: request.mode.clone(),
-            outcome: DeliveryOutcome::Pending,
-        };
-        connection.execute(
+        return Ok((serde_json::from_str(&content)?, false));
+    }
+    let document = read_document(connection, workspace, request.selection.document_id)?;
+    let question = Question {
+        request_id: request.request_id,
+        workspace_id: workspace,
+        generation: request.generation,
+        snapshot: snapshot(&document, &request.selection)?,
+        text: request.text.clone(),
+        mode: request.mode.clone(),
+        outcome: DeliveryOutcome::Pending,
+    };
+    connection.execute(
             "INSERT INTO questions(workspace_id, request_id, payload_hash, content) VALUES(?1, ?2, ?3, ?4)",
             params![workspace.to_string(), request.request_id.to_string(), payload_hash, serialized(&question)?],
         )?;
-        Ok((question, true))
+    Ok((question, true))
 }

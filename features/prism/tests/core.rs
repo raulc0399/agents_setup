@@ -58,6 +58,92 @@ fn setup() -> (Store, Id, PublishRequest, PublishResult) {
     (store, workspace, request, result)
 }
 
+#[test]
+fn private_ui_state_is_bounded_workspace_scoped_and_persistent() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let other = store.workspace(&key("thread-2")).unwrap().id;
+    let state = serde_json::json!({"active": "private-tab", "split": true});
+    store.save_ui_state(workspace, &state).unwrap();
+    assert_eq!(store.ui_state(other).unwrap(), None);
+    assert!(store.documents(workspace).unwrap().is_empty());
+    assert!(store.save_ui_state(Id::new_v4(), &state).is_err());
+    assert!(store.ui_state(Id::new_v4()).is_err());
+    assert!(
+        store
+            .save_ui_state(
+                workspace,
+                &serde_json::json!("x".repeat(MAX_PAYLOAD_BYTES + 1))
+            )
+            .is_err()
+    );
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.ui_state(workspace).unwrap(), Some(state));
+}
+
+#[test]
+fn diagram_positions_support_relationships_beyond_element_limit() {
+    let (mut store, workspace, request, result) = setup();
+    let mut view = ViewState {
+        id: Id::new_v4(),
+        document_id: result.document_id,
+        kind: ViewKind::Diagram,
+        filter: String::new(),
+        hidden: BTreeSet::new(),
+        positions: (0..MAX_ELEMENTS)
+            .map(|_| (Id::new_v4(), Position { x: 0, y: 0 }))
+            .collect(),
+        selection: None,
+        draft: String::new(),
+    };
+    view.positions
+        .insert(request.relationships[0].id, Position { x: 1, y: 1 });
+    store.save_view(workspace, &view).unwrap();
+    assert_eq!(
+        store.views(workspace).unwrap()[0].positions.len(),
+        MAX_ELEMENTS + 1
+    );
+}
+
+#[test]
+fn schema_one_migration_preserves_existing_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let published = store.publish(workspace, &publication()).unwrap();
+    let before = store.document(workspace, published.document_id).unwrap();
+    drop(store);
+    // Removing the sole schema-2 table reconstructs the schema-1 database layout.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("DROP TABLE private_ui; PRAGMA user_version=1;")
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.document(workspace, published.document_id).unwrap(),
+        before
+    );
+    assert_eq!(store.ui_state(workspace).unwrap(), None);
+    store
+        .save_ui_state(workspace, &serde_json::json!({"tabs": []}))
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    connection.pragma_update(None, "user_version", 3).unwrap();
+    assert!(matches!(Store::open(&path), Err(Error::SchemaVersion(3))));
+}
+
 fn edit(request: &PublishRequest, result: &PublishResult, revision: u64) -> PublishRequest {
     let mut update = request.clone();
     update.request_id = Id::new_v4();
@@ -672,26 +758,54 @@ fn unknown_delivery_requires_new_request_for_retry() {
 fn atomic_send_replay_preserves_a_newer_private_draft() {
     let (mut store, workspace, publication, result) = setup();
     let request = PrepareQuestion {
-        request_id: Id::new_v4(), generation: 1,
-        selection: Selection { document_id: result.document_id, revision: 1, ids: vec![publication.elements[0].id] },
-        text: "Explain this".into(), mode: DeliveryMode::Share,
+        request_id: Id::new_v4(),
+        generation: 1,
+        selection: Selection {
+            document_id: result.document_id,
+            revision: 1,
+            ids: vec![publication.elements[0].id],
+        },
+        text: "Explain this".into(),
+        mode: DeliveryMode::Share,
     };
     let mut view = ViewState {
-        id: Id::new_v4(), document_id: result.document_id, kind: ViewKind::List,
-        selection: Some(request.selection.clone()), positions: BTreeMap::new(), hidden: BTreeSet::new(),
-        filter: String::new(), draft: request.text.clone(),
+        id: Id::new_v4(),
+        document_id: result.document_id,
+        kind: ViewKind::List,
+        selection: Some(request.selection.clone()),
+        positions: BTreeMap::new(),
+        hidden: BTreeSet::new(),
+        filter: String::new(),
+        draft: request.text.clone(),
     };
     store.save_view(workspace, &view).unwrap();
-    let sent = store.prepare_question_and_clear_draft(workspace, &request, view.id).unwrap();
+    let sent = store
+        .prepare_question_and_clear_draft(workspace, &request, view.id)
+        .unwrap();
     assert!(store.views(workspace).unwrap()[0].draft.is_empty());
     view.draft = "New private draft".into();
     store.save_view(workspace, &view).unwrap();
-    assert_eq!(store.prepare_question_and_clear_draft(workspace, &request, view.id).unwrap(), sent);
-    assert_eq!(store.views(workspace).unwrap()[0].draft, "New private draft");
+    assert_eq!(
+        store
+            .prepare_question_and_clear_draft(workspace, &request, view.id)
+            .unwrap(),
+        sent
+    );
+    assert_eq!(
+        store.views(workspace).unwrap()[0].draft,
+        "New private draft"
+    );
     assert_eq!(store.questions(workspace).unwrap().len(), 1);
     let mut stale = request.clone();
     stale.request_id = Id::new_v4();
-    assert!(store.prepare_question_and_clear_draft(workspace, &stale, view.id).is_err());
+    assert!(
+        store
+            .prepare_question_and_clear_draft(workspace, &stale, view.id)
+            .is_err()
+    );
     assert_eq!(store.questions(workspace).unwrap().len(), 1);
-    assert_eq!(store.views(workspace).unwrap()[0].draft, "New private draft");
+    assert_eq!(
+        store.views(workspace).unwrap()[0].draft,
+        "New private draft"
+    );
 }
