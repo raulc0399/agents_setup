@@ -1,6 +1,6 @@
 ---
 name: collaborative-research
-description: Research a question for the user's case with captured sources, independently verified claims, two independent concern teams, automatic peer exchange and polling, and a final challenge; export an evidence-backed recommendation without implementing it.
+description: Research a question for the user's case with captured sources, independently verified claims, two independent concern teams, iterative agreement on each disputed point, automatic polling, and a final challenge; export a recommendation without implementing it.
 ---
 
 # Collaborative research
@@ -8,6 +8,8 @@ description: Research a question for the user's case with captured sources, inde
 Use the installed `collaborative-review/SKILL.md` for the shared coordinator and worker adapter contract. Codex installs skills under `~/.agents/skills`; Claude installs them under `~/.claude/skills`. New runs use that skill's `scripts/review.py`, SQLite records, and generated exports.
 
 Read its [concern teams and automatic communication](../collaborative-review/references/teams.md) reference before starting or joining. Each lead must use its own concern subagents, consolidate their evidence, and automatically process peer messages and follow-up tasks. Keep the two teams independent until both initial reviews are submitted.
+
+Then follow [iterative point agreement](../collaborative-review/references/consensus.md): challenge each disputed claim, source interpretation or recommendation separately. Both leads may start fresh research/review teams for more evidence, and both must explicitly approve each point's current resolution and evidence digest. Agreement never substitutes for independent source verification.
 
 Research approval covers a recommendation for the user's question, context, and constraints. It does not authorize implementing the recommendation, deployment, destructive actions, installations, or experiments. Keep project inputs read-only. The adapter executes trusted local code in an isolated snapshot copy; authorization checks are not an operating-system sandbox.
 
@@ -48,11 +50,11 @@ python3 "$REVIEW" --run research-001 dispatch --timeout-seconds 300 -- /absolute
 python3 "$REVIEW" --run research-001 check
 ```
 
-Adapters consume helper-generated task/snapshot/language JSON on stdin and emit UTF-8 AASM on stdout; logs go to stderr. Follow the shared skill's `COV` and final `VOTE` requirements. Workers must review the immutable captured inputs and report genuine coverage, findings, questions, and `APPROVED` or `BLOCKED` verdicts; a successful process exit is insufficient. Collect and cross-check research evidence before scheduling the final challenge.
+Adapters consume helper-generated task/snapshot/language JSON on stdin and emit UTF-8 AASM on stdout; logs go to stderr. Follow the shared skill's `COV` and final `VOTE` requirements. Review/challenge workers must inspect the immutable captured inputs and report genuine coverage, findings, questions, and `APPROVED` or `BLOCKED` verdicts; discussion and point workers use their assigned response contracts; a successful process exit is insufficient. Collect and cross-check research evidence before scheduling the final challenge.
 
 Reviewers must understand the user's case, trace how supporting claims lead to the recommendation, and examine conflicting evidence, failure cases and assumptions. Name actual verification/check results in `COV.evidence`, mark partial/unreviewed coverage and untested uncertainty explicitly, and explain each finding's condition, observed behavior and impact with concrete support and fix.
 
-Use the shared skill's `dispatch` command with a team-capable adapter, or each active lead's automatic `poll` loop in separate chats. Both paths exchange the submitted reviews after the blind gate opens and require both teams to cross-check the other's evidence before the challenge. Route source-verification questions to the relevant concern subagents and preserve independent claim verification. Keep routine peer messages internal; further explicit unanswered `Q`/`GAP`/`DISPUTE` messages schedule follow-up work. In human discussion, restate the stable item ID, subject, consequence and decision question. Use the shared `discussion begin/end` and durable `notifications --after` queue for background updates; the lead/host adapter must explicitly manage the hold and delivery cursor. This does not detect typing, suppress host tool traces or pause the research workers.
+Use the shared skill's `dispatch` command with a team-capable adapter, or each active lead's automatic `poll` loop in separate chats. Both paths exchange the submitted reviews after the blind gate opens and require both teams to cross-check the other's evidence before the challenge. Route source-verification questions to the relevant concern subagents and preserve independent claim verification. Keep routine peer messages internal; ordinary `Q`/`GAP` messages schedule factual follow-ups, while each `POINT`/`DISPUTE` enters its own iterative challenge and approval loop. In human discussion, restate the stable item ID, subject, consequence and decision question. Use the shared `discussion begin/end` and durable `notifications --after` queue for background updates; the lead/host adapter must explicitly manage the hold and delivery cursor. This does not detect typing, suppress host tool traces or pause the research workers.
 
 The final challenger has a distinct identity and receives the structured research records, source captures, verification state, and reviews in its task brief. Approval binds both the captured input revision and this structured context fingerprint. Changing a claim, source, recommendation, or other challenge input invalidates the old challenge; schedule and complete a fresh challenge. Do not describe the generated report as a separately snapshotted, exact-text approved artifact.
 

@@ -10,7 +10,8 @@ import math
 
 CONTEXT_KINDS = ('finding', 'question', 'answer', 'option', 'assumption', 'source',
                  'claim', 'recommendation', 'review', 'authorization', 'authorization_revocation',
-                 'integration_surface', 'recovery', 'dialect', 'dialect_test', 'dialect_ack')
+                 'integration_surface', 'recovery', 'dialect', 'dialect_test', 'dialect_ack',
+                 'consensus_point', 'point_approval')
 
 
 def _plan(store):
@@ -85,17 +86,21 @@ def schedule_challenge(store, coordinator):
         raise ValueError('Coordinator must use the supplied store')
     with store.transaction():
         plan, reviews, identities = _plan(store)
+        from .consensus import consensus_gaps
+        if consensus_gaps(store):
+            raise ValueError('Every disputed point needs explicit approval from both leads before the challenge')
         if 'peer_review_budget_seconds' in plan['data']:
             discussions = [task for task in store.list_records('task')
-                           if task['data']['kind'] == 'discussion'
+                           if task['data']['kind'] in ('discussion', 'consensus')
                            and task['data']['payload']['revision'] == store.get_meta('revision')
-                           and not task['data'].get('discussion_superseded')]
+                           and not task['data'].get('discussion_superseded')
+                           and not task['data'].get('consensus_superseded')]
             completed = {task['data']['worker'] for task in discussions
                          if task['data']['status'] == 'completed'
                          and task['data']['payload'].get('peer_review_plan_id') == plan['id']}
             if not set(identities) <= completed or any(
                     task['data']['status'] != 'completed' for task in discussions):
-                raise ValueError('Both teams must complete their peer cross-checks before the challenge')
+                raise ValueError('Both teams must complete their peer cross-checks and point tasks before the challenge')
         reviewer = 'challenger'
         if reviewer in identities:
             raise ValueError('Challenger identity must differ from independent reviewers')

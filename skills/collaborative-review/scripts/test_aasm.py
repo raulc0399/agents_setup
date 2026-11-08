@@ -28,7 +28,11 @@ GAP id=g text="Missing coverage"
 REC id=r text=Recommendation claims=["f"] case="Decision basis"
 ASSUME id=x text="Input is valid" paths=["src/a.py"]
 VERIFY id=x evidence=["checked"]
-IMP proposal=p text="Future improvement"'''
+IMP proposal=p text="Future improvement"
+POINT id=point text="Disputed retry behavior" paths=["src/a.py"] evidence=["trace"]
+PROPOSE id=point digest=current text="Retry once" evidence=["trace"]
+AGREE id=point digest=current evidence=["independently checked"]
+CONTEST id=point digest=current text="Retry loses input" evidence=["failure trace"]'''
         ast = parse_document(examples)
         self.assertEqual(set(BUILTIN_OPERATIONS), {item['op'] for item in ast})
         self.assertEqual('high', ast[0]['args']['severity'])

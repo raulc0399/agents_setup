@@ -22,6 +22,10 @@ Required operands appear without brackets; brackets mean optional. `strings` is 
 | `FIX` | `id:id`, `evidence:strings+` | Resolve finding with evidence. |
 | `REOPEN` | `id:id`, `reason:text`, `evidence:strings+` | Reopen finding. |
 | `DISPUTE` | `id:id`, `finding:id`, `reason:text`, `evidence:strings+` | Create blocking question linked to finding. |
+| `POINT` | `id:id`, `text:text`, `paths:paths+`, `evidence:strings+`, `[refs:ids=[]]` | Open one disputed point for both leads. |
+| `PROPOSE` | `id:id`, `digest:text`, `text:text`, `evidence:strings+`, `[refs:ids=[]]` | Propose a point resolution; does not approve it. |
+| `AGREE` | `id:id`, `digest:text`, `evidence:strings+` | Explicitly approve one exact point resolution and evidence bundle. |
+| `CONTEST` | `id:id`, `digest:text`, `text:text`, `evidence:strings+`, `[refs:ids=[]]` | Challenge one point and require a revised resolution. |
 | `Q` | `id:id`, `text:text`, `[findings:ids=[]]`, `[blocking:boolean=true]` | Create question. |
 | `A` | `id:id`, `question:id`, `text:text`, `evidence:strings+`, `[option:id]` | Answer question. |
 | `OPT` | `id:id`, `title:text`, `description:text`, `[findings:ids=[]]` | Create option. |
@@ -38,6 +42,8 @@ Required operands appear without brackets; brackets mean optional. `strings` is 
 | `IMP` | `proposal:id`, `text:text` | Propose future improvement without authorization. |
 
 `FIX` resolves a finding; `REOPEN` reopens it. `DISPUTE` creates a blocking linked question and does not dismiss its finding. `F` creates an unverified claim; `CONFIRM` is independent verification, not automatic source validation. `ASSUME` defaults to blocking; `VERIFY` records evidence of verification. `IMP` only proposes future improvements. `NOTE` has no approval effect.
+
+Current plans also create `point-<dispute-id>` for each `DISPUTE`. The two leads iterate through automatically scheduled `consensus` tasks, one point per task, and both must submit `AGREE` for the same current digest. Changed resolutions or linked evidence invalidate only dependent point approvals. Consensus responses use exactly one `PROPOSE`, `CONTEST` or `AGREE` for the assigned point, or a blocking `GAP` when work needs external input; they do not use `VOTE`. Results automatically reach the other lead. See [iterative point agreement](consensus.md) for research teams, evidence linkage, and stopping conditions.
 
 After dialect expansion, every builtin except `NOTE` and `IMP` requires a current `review` grant covering the task scope, or all run paths for taskless calls; unmapped domain extensions remain informational.
 

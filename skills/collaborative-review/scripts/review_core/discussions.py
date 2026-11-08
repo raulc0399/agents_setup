@@ -36,6 +36,8 @@ def schedule_discussions(store, coordinator, timeout_seconds=300):
                             or str(PurePosixPath(path)) != path or path == '.' for path in paths):
             raise ValueError('Snapshot must contain canonical file paths')
         exchanges = {message['id'] for message in exchange_reviews(store)}
+        disputed = {point['data'].get('question_id') for point in store.list_records('consensus_point')
+                    if point['data']['revision'] == revision}
         recipients = {record['data']['recipient'] for record in store.list_records('message')
                       if record['data'].get('revision') == revision
                       and record['data']['recipient'] != 'coordinator'}
@@ -51,6 +53,7 @@ def schedule_discussions(store, coordinator, timeout_seconds=300):
                                     and sender_task['data']['kind'] == 'discussion')
                 questions = [operation for operation in data['operations']
                              if operation['op'] in QUESTION_OPERATIONS
+                             and operation['args']['id'] not in disputed
                              and not (discussion_reply and operation['op'] == 'GAP')]
                 if not questions:
                     continue
@@ -105,6 +108,8 @@ def schedule_discussions(store, coordinator, timeout_seconds=300):
                 brief = ('Route the assigned questions to the relevant subagents in your own concern team; '
                          'reuse their evidence or start replacement subagents with the same concern brief. '
                          'The team lead checks and consolidates their replies. '
+                         'For each disagreement create its own POINT or DISPUTE, then use the automatic '
+                         'point tasks to challenge, research, propose and explicitly agree individually. '
                          'Answer only these assigned unanswered questions, or report an explicit blocking GAP. '
                          'Check the intended behavior, relevant callers and failure paths; cite actual evidence '
                          'and disclose untested uncertainty. Return only AASM, using A question=<assigned-id>; '

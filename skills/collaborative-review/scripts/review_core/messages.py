@@ -13,11 +13,14 @@ from .dialects import get_dialect
 
 CREATED_KINDS = dict(B='finding', D='finding', O='finding', DISPUTE='question', Q='question',
                     A='answer', OPT='option', COV='coverage', SRC='source', F='claim',
-                    GAP='question', REC='recommendation', ASSUME='assumption', IMP='protocol_proposal')
+                    GAP='question', REC='recommendation', ASSUME='assumption', IMP='protocol_proposal',
+                    POINT='consensus_point')
 REFERENCE_FIELDS = {'FIX': {'id': 'finding'}, 'REOPEN': {'id': 'finding'},
                     'DISPUTE': {'finding': 'finding'}, 'A': {'question': 'question', 'option': 'option'},
                     'CONFIRM': {'id': 'claim'}, 'VERIFY': {'id': 'assumption'},
-                    'VOTE': {'evidence': 'coverage'}}
+                    'VOTE': {'evidence': 'coverage'},
+                    'PROPOSE': {'id': 'consensus_point'}, 'AGREE': {'id': 'consensus_point'},
+                    'CONTEST': {'id': 'consensus_point'}}
 SHARED_REFERENCE_FIELDS = {'findings': 'finding', 'sources': 'source', 'contradictions': 'claim',
                            'claims': 'claim', 'refs': None}
 
@@ -243,7 +246,9 @@ def exchange_reviews(store):
                 question = ('Automatic cross-check: use your concern subagents to examine the other team\'s '
                             'submitted review against the pinned inputs and your own evidence. '
                             'Answer with evidence for agreements and disagreements; record every actionable '
-                            'dispute or missing evidence explicitly. Do not claim consensus without checking.')
+                            'dispute or missing evidence explicitly. Open a separate POINT for each '
+                            'disagreement, or use DISPUTE for a finding; both leads must subsequently '
+                            'approve each point individually. Do not claim consensus without checking.')
                 body = ('NOTE text="Submitted independent team review" refs=' + json.dumps([source['id']])
                         + '\nQ id=peer-review-' + identity
                         + ' text=' + json.dumps(question) + ' findings=' + json.dumps(findings))

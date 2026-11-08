@@ -9,7 +9,7 @@ from .authorization import authorize_task, canonical_paths
 from .findings import finding_gaps
 
 
-ACTIONS = {'discussion': 'review', 'review': 'review', 'challenge': 'review', 'specialist': 'review',
+ACTIONS = {'discussion': 'review', 'consensus': 'review', 'review': 'review', 'challenge': 'review', 'specialist': 'review',
            'inspect': 'inspect', 'execute': 'execute'}
 TERMINAL = {'completed', 'failed', 'cancelled'}
 BUDGET_ROUNDOFF_SECONDS = 1e-9
@@ -171,7 +171,7 @@ class Coordinator:
         budget -= math.fsum(t.get('reserved_seconds', 0) for t in active)
         available = budget - self._earmarked_seconds(task, tasks)
         timeout = self._attempt_seconds(data, tasks)
-        if data['kind'] == 'discussion':
+        if data['kind'] in ('discussion', 'consensus'):
             timeout = min(timeout, max(0, available))
         if timeout <= 0 or available <= 0 or timeout > available + BUDGET_ROUNDOFF_SECONDS:
             block('budget', 'Task has no sufficient unprotected budget', 'Make an explicit budget or task decision')
@@ -407,7 +407,7 @@ class Coordinator:
         if any((t['data']['status'] == 'running' and t['data']['kind'] == 'execute') or
                (t['data']['status'] in ('pending', 'running') and
                 t['data']['payload']['revision'] == revision and
-                t['data']['kind'] in ('execute', 'review', 'challenge', 'specialist', 'discussion'))
+                t['data']['kind'] in ('execute', 'review', 'challenge', 'specialist', 'discussion', 'consensus'))
                for t in self.store.list_records('task')):
             blockers.append('Current execution or review tasks remain active')
         if any(t['data']['status'] == 'uncertain' for t in self.store.list_records('task')):

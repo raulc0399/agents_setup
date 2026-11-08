@@ -3,7 +3,7 @@ import hashlib
 from pathlib import Path
 import re
 
-from . import assumptions, findings, research
+from . import assumptions, consensus, findings, research
 from .authorization import authorize_task
 from .aasm import BASE_DIALECT, BUILTIN_OPERATIONS, expand_operations, parse_document
 from .dialects import get_dialect
@@ -14,7 +14,7 @@ INFORMATIONAL_OPERATIONS = ('NOTE', 'IMP')
 REFERENCE_KINDS = ('finding', 'question', 'answer', 'option', 'coverage', 'source', 'claim',
                    'recommendation', 'assumption', 'message', 'aasm_note', 'aasm_domain',
                    'protocol_proposal', 'review', 'task', 'review_plan', 'authorization',
-                   'authorization_revocation')
+                   'authorization_revocation', 'consensus_point', 'point_approval')
 
 
 def _summary(operations):
@@ -107,6 +107,8 @@ def _scope(store, task_id, author, revision, operations, definitions):
         targets = [('finding', record_id, 'paths') for record_id in finding_ids]
         if op in ('FIX', 'REOPEN', 'DISPUTE'):
             targets.append(('finding', args.get('finding', args.get('id')), 'paths'))
+        elif op in consensus.POINT_ACTIONS:
+            targets.append(('consensus_point', args['id'], 'paths'))
         elif op == 'VERIFY':
             targets = [('assumption', args['id'], 'affected_paths')]
         elif op == 'VOTE':
@@ -161,6 +163,18 @@ def apply_operations(store, author, revision, operations, task_id=None, allow_vo
                                          blocking=args.get('blocking', True))
                 if op == 'DISPUTE':
                     _record(store, 'aasm_note', None, dict(revision=revision, text=args['reason'], refs=[args['id'], args['finding']], evidence=args['evidence']), author)
+                    if consensus.current_plan(store):
+                        target = store.get_record('finding', args['finding'])
+                        consensus.create_point(store, author, revision, 'point-' + args['id'], args['reason'],
+                            target['data']['paths'], args['evidence'], refs=[args['finding']], question_id=args['id'])
+            elif op == 'POINT':
+                consensus.create_point(store, author, revision, args['id'], args['text'],
+                                       args['paths'], args['evidence'], args['refs'])
+            elif op in ('PROPOSE', 'CONTEST'):
+                action = consensus.propose if op == 'PROPOSE' else consensus.contest
+                action(store, author, args['id'], args['digest'], args['text'], args['evidence'], args['refs'])
+            elif op == 'AGREE':
+                consensus.agree(store, author, args['id'], args['digest'], args['evidence'])
             elif op == 'A':
                 findings.answer_question(store, **context, answer_id=args['id'], question_id=args['question'],
                                          text=args['text'], evidence=args['evidence'], option_id=args.get('option'))

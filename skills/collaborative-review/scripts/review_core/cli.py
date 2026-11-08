@@ -308,6 +308,11 @@ def _coordinator(store):
             raise ValueError('Worker result differs from its parsed AASM body')
         if data['kind'] == 'discussion' and _supersede_discussion_result(store, task):
             return
+        if data['kind'] == 'consensus':
+            from .consensus import supersede_result, validate_result
+            if supersede_result(store, task):
+                return
+            validate_result(task, prepared['operations'])
         review_task = data['kind'] in ('review', 'challenge', 'specialist')
         if review_task and 'verdict' not in prepared:
             raise ValueError('Review tasks require a final VOTE')
@@ -315,6 +320,9 @@ def _coordinator(store):
                          allow_vote=review_task, dialect_id=prepared['dialect_id'])
         if data['kind'] == 'discussion':
             _discussion_reply(store, task, prepared)
+        if data['kind'] == 'consensus':
+            from .consensus import publish_result
+            publish_result(store, task, prepared)
         if data['kind'] == 'review':
             coordinator.record_review(author, revision, result.get('verdict'),
                                       result.get('evidence_ids', []), task_id=task['id'])
@@ -390,6 +398,7 @@ def _readiness(store, coordinator):
     from .assumptions import assumption_gaps
     from .challenge import challenge_gaps
     from .research import research_gaps
+    from .consensus import consensus_gaps
 
     coordinator = coordinator or _coordinator(store)
     result = coordinator.readiness()
@@ -410,6 +419,7 @@ def _readiness(store, coordinator):
             blockers.append({'kind': 'coverage', 'reviewer': reviewer, 'paths': sorted(files - covered),
                              'reason': 'approved reviewer has uncovered snapshot files'})
     blockers.extend(assumption_gaps(store))
+    blockers.extend(consensus_gaps(store))
     if store.get_meta('challenge_required', True):
         blockers.extend(challenge_gaps(store))
     if store.get_meta('approval_scope') == 'report-ready':

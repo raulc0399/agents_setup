@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 
 MIN_TIMEOUT_SECONDS = 1
 PEER_REVIEW_COUNT = 2
+CONSENSUS_BUDGET_SHARES = 2
 
 
 def _names(values, label):
@@ -80,7 +81,7 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
         spent = _number(store.get_meta('spent_seconds', 0), 'spent_seconds')
         reserved = sum(_number(task['data']['payload']['timeout_seconds'], 'task timeout')
                        for task in store.list_records('task') if task['data']['status'] in ('pending', 'running'))
-        timeout = (budget - spent - reserved) / (len(roles) + PEER_REVIEW_COUNT + 1)
+        timeout = (budget - spent - reserved) / (len(roles) + PEER_REVIEW_COUNT + CONSENSUS_BUDGET_SHARES + 1)
         if timeout < MIN_TIMEOUT_SECONDS:
             raise ValueError('Budget cannot fund reviews and a challenge')
         tasks = []
@@ -118,6 +119,7 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
         if cap != run_cap:
             store.set_meta('max_workers', cap)
         store.put_record('review_plan', plan_id, dict(request=request, task_ids=[task['id'] for task in tasks],
-                         challenge_budget_seconds=timeout, peer_review_budget_seconds=timeout),
+                         challenge_budget_seconds=timeout, peer_review_budget_seconds=timeout,
+                         point_consensus_required=True),
                          event='review.planned', expected_version=0)
         return tasks

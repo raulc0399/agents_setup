@@ -10,7 +10,8 @@ import tempfile
 RECORD_KINDS = ('option', 'coverage', 'question', 'answer', 'finding', 'review',
                 'assumption', 'source', 'claim', 'recommendation', 'task',
                 'authorization', 'authorization_revocation', 'message', 'dialect',
-                'dialect_test', 'dialect_ack', 'aasm_note', 'aasm_domain', 'protocol_proposal')
+                'dialect_test', 'dialect_ack', 'aasm_note', 'aasm_domain', 'protocol_proposal',
+                'consensus_point', 'point_approval')
 EXPORT_NAMES = ('OPTIONS.md', 'COVERAGE.md', 'DECISIONS.md', 'SUMMARY.md', 'TRANSCRIPT.html')
 
 
@@ -78,7 +79,7 @@ def _coverage(records, revision):
     return '\n'.join(lines)
 
 
-def _summary(records, revision, approval):
+def _summary(records, revision, approval, point_states):
     lines = ['# Review summary', '', 'Current captured revision: ' + _md(revision), '',
              'Snapshot approval: **' + _md(approval.get('result', 'UNKNOWN')) + '**', '', '## Approval gaps', '']
     lines.extend('- ' + _md(gap) for gap in approval.get('blockers', []))
@@ -96,6 +97,14 @@ def _summary(records, revision, approval):
                           _refs('claim', data.get('claim_ids', []), records) + '; revision: ' + _md(data.get('revision', ''))])
         if not rows('recommendation'):
             lines.append('None.')
+        lines.extend(['', '### Agreement on disputed points', '', _table(
+            ['Point', 'Disagreement', 'Resolution', 'Version', 'Status', 'Approved by', 'Evidence digest'], [
+                [_ref('consensus_point', row['id'], records), _md(row['data']['text']),
+                 _md((row['data'].get('proposal') or {}).get('text', 'Not proposed')),
+                 _md(row['data']['content_version']), _md(point_states.get(row['id'], {}).get('status', 'historical')),
+                 _md(point_states.get(row['id'], {}).get('approved_by', [])),
+                 _md(point_states.get(row['id'], {}).get('digest', ''))]
+                for row in rows('consensus_point')])])
         lines.extend(['', '### Claims', '', _table(['ID', 'Claim', 'Verification', 'Inference', 'Contradictions', 'Sources', 'Revision'], [
             [_ref('claim', row['id'], records), _md(row['data'].get('text', '')),
              _md(row['data'].get('verification', 'unverified')), _md(row['data'].get('inference', False)),
@@ -135,7 +144,8 @@ def _transcript(records, events, approval):
 
     fields = {'question_id': 'question', 'answer_id': 'answer',
               'finding_id': 'finding', 'finding_ids': 'finding', 'reply_to': 'message',
-              'dialect_id': 'dialect', 'task_id': 'task', 'source_ids': 'source', 'claim_ids': 'claim'}
+              'dialect_id': 'dialect', 'task_id': 'task', 'source_ids': 'source', 'claim_ids': 'claim',
+              'point_id': 'consensus_point'}
 
     def render(value, field=None):
         if isinstance(value, dict):
@@ -209,6 +219,14 @@ def export_run(store, approval=None):
             approval = readiness(store)
         revision = store.get_meta('revision')
         records = {kind: store.list_records(kind) for kind in RECORD_KINDS}
+        from .consensus import point_state
+        point_states = {}
+        for point in records['consensus_point']:
+            if point['data']['revision'] == revision:
+                try:
+                    point_states[point['id']] = point_state(store, point['id'])
+                except ValueError as error:
+                    point_states[point['id']] = dict(status='blocked: ' + str(error))
         events = store.events()
     decisions = [event for event in events if event['kind'].startswith('authorization.') or
                  event['kind'] in ('task.recovery_resolved', 'task.process_termination_confirmed', 'run.recovered')]
@@ -219,7 +237,7 @@ def export_run(store, approval=None):
             ['Sequence', 'Event', 'Actor', 'Record', 'Recorded details'],
             [[_md(event['seq']), _md(event['kind']), _md(event['actor']), _md(event['record_id']),
               _md(event['payload'])] for event in decisions]),
-        'SUMMARY.md': _summary(records, revision, approval),
+        'SUMMARY.md': _summary(records, revision, approval, point_states),
         'TRANSCRIPT.html': _transcript(records, events, approval),
     }
     root = _destination(store)

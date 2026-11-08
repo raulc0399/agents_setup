@@ -11,7 +11,7 @@ ln -s "$(pwd)/AGENTS.md" ~/.gemini/GEMINI.md
 
 ## Collaborative review
 
-`skills/collaborative-review/scripts/review.py` coordinates revision-bound local reviews with SQLite event history, two independent concern teams, automatic peer exchange and polling, and a final challenger. Each lead spawns its own subagent per relevant concern and consolidates a whole-scope review. Requires Python 3.10+, POSIX and writable reliable local storage supporting SQLite WAL and cross-process locking. No model account or provider adapter is bundled; active agent chats use their host's delegation tools.
+`skills/collaborative-review/scripts/review.py` coordinates revision-bound local reviews with SQLite event history, two independent concern teams, automatic peer exchange and polling, iterative agreement on each disputed point, and a final challenger. Each lead spawns its own subagent per relevant concern and consolidates a whole-scope review. Requires Python 3.10+, POSIX and writable reliable local storage supporting SQLite WAL and cross-process locking. No model account or provider adapter is bundled; active agent chats use their host's delegation tools.
 
 Install the skills for your agent (keep the clone available):
 
@@ -65,8 +65,10 @@ Read handoff --worker reviewer-2 for that run, verify its scope/revision, claim 
 and start your own subagent per relevant concern against the pinned inputs.
 Keep your team independent; do not edit source files or create another run.
 After submitting your team's review, automatically keep polling as reviewer-2,
-claim your assigned follow-ups, and route them to your concern subagents until
-completion, an explicit blocker, or the run deadline. Do not wait for user prompts.
+claim your assigned follow-ups, and route them to your concern subagents.
+Challenge each disputed point separately, start fresh research/review teams when
+needed, and require explicit agreement from both leads on each point's resolution.
+Continue until completion, an explicit blocker, or the run deadline without user prompts.
 ```
 
 Agent 2 uses the run directory's parent as `--root` and its name as `--run`. Both sessions need access to the same reliable local storage; the ID alone does not connect remote machines. Joining does not require new authorization for the unchanged scope. If reviewer-2 is already claimed or completed, report that state. Initial findings stay independent until both reviews finish. Existing runs keep their frozen helper version; start a fresh run to use a new authorization workflow rather than editing a frozen bundle.
@@ -83,7 +85,9 @@ Use `reviewer-2` in the other chat. `poll` returns `state` (`ready`, `waiting`, 
 
 ### Quiet continuous dispatch and discussion
 
-After authorization and `plan`, `dispatch` schedules the two team reviews, automatically exchanges them after the blind gate opens, runs both peer cross-checks and explicit follow-ups, and finally schedules the independent challenge. The plan allocates equal time shares to the initial tasks, two cross-checks and the challenge within the existing budget. `dispatch` returns concrete blockers when no work can progress; it never retries failures, recovers uncertain effects or authorizes actions. Completion means the queue drained; `check` determines approval.
+After authorization and `plan`, `dispatch` schedules the two team reviews, automatically exchanges them after the blind gate opens, runs both peer cross-checks and iterative point deliberations, and finally schedules the independent challenge. The plan budgets the initial tasks, two cross-checks and the challenge, leaving two additional time shares for point deliberation within the same run budget. `dispatch` returns concrete blockers when no work can progress; it never retries failures, recovers uncertain effects or authorizes actions. Completion means the queue drained; `check` determines approval.
+
+Each disagreement becomes a separate `POINT` (or `point-<id>` for a finding `DISPUTE`). The helper assigns one point per `consensus` task: the leads challenge, research, `PROPOSE` and `CONTEST` until both explicitly `AGREE` to that point's exact resolution/evidence digest. They may start fresh concern teams for additional work. Proposing is not approval, answering a question is not agreement, and a whole-review `VOTE` cannot approve all points. Changed resolutions or linked evidence reopen only dependent points. `SUMMARY.md` lists their individual states and approvals; [the point workflow](skills/collaborative-review/references/consensus.md) defines the commands and stopping conditions.
 
 ```bash
 python3 "$REVIEW" --run design-review dispatch --timeout-seconds 300 --recipient lead-chat -- "$ADAPTER" > /absolute/path/review-dispatch.log 2>&1 &
@@ -95,7 +99,7 @@ python3 "$REVIEW" --run design-review notifications --recipient lead-chat --afte
 
 Use the host's supported background facility or the shell launch above. The controller queues one concise completion/blocker summary without foreground wake prompts or routine peer output. A lead/host adapter must explicitly call discussion begin/end and deliver notifications; none is bundled. Holds affect only that recipient's presentation queue, never workers or explicit `status` requests. Save the last delivered sequence after delivery succeeds; held messages remain durable and replayable. Updates and holds belong to the current revision. Helpers cannot detect typing, hide host tool traces or automatically mute chat UI. Both one lead with subagents and separate chats use explicit recipient identities.
 
-Only applied unanswered `Q`, `GAP` and `DISPUTE` peer messages schedule one current discussion assignment per source message after blind reviews finish. `NOTE` prose and `A` replies do not wake workers. Discussion results answer assigned IDs using `A` or report an explicit blocking `GAP`, without `VOTE`; failed tasks require explicit recovery. Assignments track question content versions: answered or edited questions supersede pending work and invalidate stale responses; changed unanswered assignments run after prior running work finishes. A blocking `GAP` reply from a discussion worker does not schedule another automatic discussion; an explicit followup `Q` can. Unapplied questions return an explicit blocker. Peer communication remains internal during human discussion.
+Applied unanswered ordinary `Q` and `GAP` peer messages schedule one current discussion assignment per source message after blind reviews finish; current-plan `DISPUTE` messages instead enter the per-point consensus loop. `NOTE` prose and `A` replies do not wake workers. Discussion results answer assigned IDs using `A` or report an explicit blocking `GAP`, without `VOTE`; failed tasks require explicit recovery. Assignments track question content versions: answered or edited questions supersede pending work and invalidate stale responses; changed unanswered assignments run after prior running work finishes. A blocking `GAP` reply from a discussion worker does not schedule another automatic discussion; an explicit followup `Q` can. Unapplied questions return an explicit blocker. Peer communication remains internal during human discussion.
 
 Present a stable finding/question ID, short subject, concrete consequence and decision question; give short done/doing/blocked/next updates with actual evidence and location. Reviewers understand the user's case, trace callers/data flow, examine failure paths, conflicting assumptions and blast radius, and run relevant checks when feasible. `COV.evidence` names exact observed checks/results, partial/unreviewed coverage and untested limitations. Finding claims explain condition, behavior and impact with an exact target, actual evidence and proposed fix; no fixed finding cap applies.
 

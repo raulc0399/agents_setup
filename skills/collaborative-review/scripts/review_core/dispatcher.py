@@ -30,10 +30,12 @@ def _blocker(code, reason, action, task_id=None):
 def _schedule_followups(store, coordinator, timeout_seconds):
     from .challenge import schedule_challenge
     from .discussions import schedule_discussions
+    from .consensus import blind_pending, consensus_gaps, schedule_consensus
 
     blockers = []
     try:
         schedule_discussions(store, coordinator, timeout_seconds=timeout_seconds)
+        schedule_consensus(store, coordinator, timeout_seconds=timeout_seconds)
     except (ValueError, PermissionError) as error:
         return [_blocker('discussion', str(error), 'Resolve the discussion scheduling requirement')]
     revision = store.get_meta('revision')
@@ -41,13 +43,20 @@ def _schedule_followups(store, coordinator, timeout_seconds):
              if task['data']['payload']['revision'] == revision]
     plans = [plan for plan in store.list_records('review_plan')
              if plan['data']['request']['revision'] == revision]
+    gaps = [] if blind_pending(store) else consensus_gaps(store)
+    if gaps:
+        active = {task['data']['payload'].get('point_id') for task in tasks
+                  if task['data']['kind'] == 'consensus' and task['data']['status'] in ('pending', 'running')}
+        blockers.extend(_blocker('consensus', gap['reason'], 'Resolve this point with evidence or report the missing input', gap['id'])
+                        for gap in gaps if gap['id'] not in active)
     if plans and store.get_meta('challenge_required', True):
         required_ids = {task_id for plan in plans for task_id in plan['data']['task_ids']}
-        required_ids.update(task['id'] for task in tasks if task['data']['kind'] == 'discussion'
+        required_ids.update(task['id'] for task in tasks if task['data']['kind'] in ('discussion', 'consensus')
                             and not (task['data']['status'] == 'cancelled'
-                                     and task['data'].get('discussion_superseded') is True))
+                                     and (task['data'].get('discussion_superseded') is True
+                                          or task['data'].get('consensus_superseded') is True)))
         by_id = {task['id']: task for task in tasks}
-        if all(task_id in by_id and by_id[task_id]['data']['status'] == 'completed' for task_id in required_ids):
+        if not gaps and all(task_id in by_id and by_id[task_id]['data']['status'] == 'completed' for task_id in required_ids):
             try:
                 schedule_challenge(store, coordinator)
             except ValueError as error:
@@ -95,7 +104,7 @@ def poll_worker(store, worker, after=0, wait_seconds=MAX_POLL_WAIT_SECONDS,
                 data = task['data']
                 if data['status'] not in ('failed', 'cancelled', 'uncertain'):
                     continue
-                if data.get('discussion_superseded') or (data['kind'] == 'challenge'
+                if data.get('discussion_superseded') or data.get('consensus_superseded') or (data['kind'] == 'challenge'
                                                          and not coordinator._challenge_is_current(data)):
                     continue
                 blockers.append(_blocker(data['status'], 'Task is ' + data['status'],
@@ -206,6 +215,8 @@ def dispatch_run(run_dir, command, timeout_seconds=300, dialect_id='aasm-1', rec
                         if task['data']['status'] in ('failed', 'cancelled'):
                             if (task['data']['status'] == 'cancelled' and task['data']['kind'] == 'discussion'
                                     and task['data'].get('discussion_superseded') is True):
+                                continue
+                            if task['data']['status'] == 'cancelled' and task['data'].get('consensus_superseded'):
                                 continue
                             if (task['data']['status'] == 'failed' and task['data']['kind'] == 'challenge'
                                     and not coordinator._challenge_is_current(task['data'])

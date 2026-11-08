@@ -114,12 +114,13 @@ class ChallengeTests(unittest.TestCase):
 
     def test_challenge_uses_protected_budget(self):
         self.reviews()
-        self.store.set_meta('spent_seconds', 72)
+        reserve = self.store.list_records('review_plan')[0]['data']['challenge_budget_seconds']
+        self.store.set_meta('spent_seconds', 90 - reserve)
         self.coordinator.enqueue_task('inspect', dict(revision='rev', brief='Other work',
             scope_paths=['a.py'], timeout_seconds=1), task_id='aaa-other')
         task = schedule_challenge(self.store, self.coordinator)
         self.assertIsNone(self.coordinator.claim_task('unassigned'))
-        self.assertEqual(task['data']['payload']['timeout_seconds'], 18)
+        self.assertEqual(task['data']['payload']['timeout_seconds'], reserve)
         self.assertEqual(task['data']['payload']['budget_plan_id'], self.store.list_records('review_plan')[0]['id'])
         self.complete(task)
         self.assertEqual(challenge_gaps(self.store), [])
@@ -183,11 +184,11 @@ class ChallengeTests(unittest.TestCase):
         self.coordinator.fail_task(old['id'], 'challenger', claimed['data']['lease_id'], 'Stopped after five seconds')
         self.store.put_record('claim', 'new-context', dict(revision='rev', statement='Changed support'))
         replacement = schedule_challenge(self.store, self.coordinator)
-        self.assertEqual(replacement['data']['payload']['timeout_seconds'], 13)
+        self.assertEqual(replacement['data']['payload']['timeout_seconds'], old['data']['payload']['timeout_seconds'] - 5)
         self.assertEqual(schedule_challenge(self.store, self.coordinator)['id'], replacement['id'])
         claimed = self.coordinator.claim_task('challenger')
         self.assertEqual(claimed['id'], replacement['id'])
-        self.assertEqual(claimed['data']['reserved_seconds'], 13)
+        self.assertEqual(claimed['data']['reserved_seconds'], old['data']['payload']['timeout_seconds'] - 5)
 
     def test_running_challenge_allows_only_same_context_schedule(self):
         self.reviews()
