@@ -36,12 +36,22 @@ Run the probe regressions from `features/prism/`:
 python3 -m unittest discover -s tests -p probe_codex_test.py
 ```
 
-Ten tests cover unrelated thread/turn/server/tool results, mismatched native turn
-metadata, missing approval/request resolution/assistant evidence, prompt echoes,
-expected versus unexpected resume failures, and cleanup after tmux timeout or
-client-close failure. Nine assertions failed before the fixes; all ten tests now
-pass. Cleanup attempts every client and always terminates/reaps the app-server,
-even when an earlier cleanup operation fails.
+Sixteen tests cover unrelated thread/turn/server/tool results, native metadata
+consistency, missing approval/request resolution/assistant evidence, prompt
+echoes, expected versus unexpected resume failures, cleanup failures, and Linux
+process ownership including direct exec, wrapper descendants and reused PIDs.
+Regression checks rejected the previous session/environment-based caller match
+and positive-PID-only server check before their fixes. Cleanup attempts every
+client and always terminates/reaps the launched app-server process.
+
+The corrected no-model probe was rerun on 2026-11-08 and exited 0. Its reported
+server PID and process birth matched the launched child; both thread MCP
+processes and the installed plugin MCP process had that exact live server as
+parent. Exact caller checks now require native top-level `threadId`; nested
+`x-codex-turn-metadata.thread_id`, when supplied, must agree. Session IDs,
+environment variables and arbitrary nested metadata cannot satisfy that check.
+Earlier real-model/TUI observations below remain historical evidence; this
+no-model rerun does not re-verify those capabilities.
 
 ## Observed contracts
 
@@ -49,7 +59,7 @@ even when an earlier cleanup operation fails.
 | --- | --- | --- |
 | Native transport | PASS | `codex app-server --listen unix://PATH`, WebSocket-framed JSON messages; socket mode 0600 inside a 0700 temporary directory. The CLI labels app-server experimental. |
 | Actual server version | PASS | `initialize.result.userAgent` included `prism_probe_cli/0.167.0`; no dedicated version field exists. `thread.cliVersion` is creator provenance, not current server identity. |
-| Server process | PASS | `server/diagnostics.result.process.id` matched the parent PID of the native MCP children. Record OS process start time separately for production restart protection. |
+| Server process | PASS, corrected rerun | `server/diagnostics.result.process.id` matched the owned launcher process and its Linux birth identity; the probe also accepts verified live descendants for npm launchers that spawn rather than exec. A positive PID alone cannot pass. |
 | Exact model caller | PASS | A real model-called `tools/call` supplied native `_meta.threadId`, `_meta.sessionId`, `callId`, `itemId`, `windowId`, `progressToken`, and `x-codex-turn-metadata`. The latter object included `thread_id`, `session_id`, `turn_id`. Exact thread and acknowledged turn matched. |
 | Explicit client tool call | PASS | `mcpServer/tool/call` with `threadId`, `server`, `tool`, `arguments`, and **no** client `_meta` injected `threadId` and `progressToken`. This alone is not model-call evidence; the separate real-model check above supplies that evidence. |
 | MCP process ownership | PASS | Separate tested threads had distinct MCP child PIDs with the same app-server parent. `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, `TMUX`, and `TMUX_PANE` were absent when removed from the app-server's inherited environment. |
@@ -93,12 +103,12 @@ model arguments or the process command line:
 [mcp_servers.prism]
 command = "/absolute/path/to/prism"
 args = ["mcp"]
-env_vars = ["PRISM_BRIDGE_SOCKET", "PRISM_BINDING_TOKEN"]
+env_vars = ["PRISM_BINDING_FILE"]
 ```
 
-The exact `env_vars` mechanism was tested with `PRISM_PROBE_BOOTSTRAP`; the
-production variable names above define the integration boundary, not existing
-implemented adapter fields. Put values in the owned app-server environment.
+The `env_vars` mechanism was tested with `PRISM_PROBE_BOOTSTRAP`; the shipped
+plugin forwards `PRISM_BINDING_FILE`. The launcher puts this private binding-file
+path in the owned app-server environment; secrets remain inside the 0600 file.
 Restrict registration to this server's authenticated MCP process and the recorded
 pane; filesystem/ancestry checks alone cannot bind an arbitrary existing CLI.
 An existing unregistered CLI must receive an explicit launcher/resume instruction.
@@ -139,11 +149,25 @@ The shipped `plugins/codex/` package installed successfully using the actual
 Codex CLI in a disposable home. Its `.mcp.json` `env_vars` shape was also verified
 with a native-installed probe MCP process. No user configuration was modified.
 
-At the requested handover, six adapter unit tests and the plugin package test
-had passed. Two additional unit tests for other-thread retirement and stale
-generation/changed-payload replay were saved afterward and have not yet been
-run or formatted. The ten Python regressions passed before the latest command,
-switch and plugin-MCP probe extensions; rerun them after resuming work.
+Thirteen adapter unit tests now pass, including fragmented handshake, fragmented
+RPC response, slow event frames, a full Unix listener backlog, and slow readers. The previous 60ms RPC could take
+853ms when bytes arrived continuously; reads and writes now enforce the same
+absolute operation deadline beneath WebSocket framing. Unix connections fail
+promptly when the listener queue is full. Shared nonblocking writes and deadline
+polling prevent a slow recipient from extending bridge or native writes. Native Start, Steer and
+Queue remain disabled, with no public bypass.
+
+The bridge lists document and shared-question summaries in pages of at most 100.
+Follow `next_cursor` using the optional `cursor` tool argument until it is null;
+`total` counts the current collection. Question summaries cap text at 512 Unicode
+characters and expose `text_truncated`; retrieve the full text and snapshot by
+`request_id`. Pages also account for encoded summary bytes, including outcome reasons, so
+JSON escaping cannot make later IDs inaccessible.
+Cursor order is stable UUID order, not
+creation order. Listings are live: restart from the beginning to include new
+records inserted before an earlier cursor. Individual retrieval uses only
+`document_id` or `request_id`, without a cursor. Private views and drafts remain
+excluded from both listing and individual retrieval.
 
 Use the prepared toolchain environment for the remaining checks:
 
@@ -157,6 +181,6 @@ cargo test --manifest-path features/prism/Cargo.toml --test codex
 python3 -m unittest discover -s features/prism/tests -p probe_codex_test.py
 ```
 
-An independent review of the final adapter/plugin implementation is still
-required. The earlier review covered the original probe corrections, not these
-new adapter files or probe extensions. No commit was created by this agent.
+Independent review identified the pagination, fragmented-frame deadline and
+probe-attribution defects addressed above; final integration review and release
+evidence are recorded in `../IMPLEMENTATION.md`.

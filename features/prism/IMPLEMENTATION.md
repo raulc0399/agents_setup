@@ -61,5 +61,9 @@ Codex probes/docs and `plugins/codex/`. The primary integrator owns `src/store.r
 - Launcher/session independently approved after duplicate-resume, cancellation,
   socket-bound and guarded-attachment fixes; 9 lifecycle, 3 routing and 14 session
   tests pass, including actual tmux PTY terminal restoration.
-- Bridge/Codex timeout re-review and final integration checks remain underway.
-  Native Start/Steer/Queue remain disabled.
+- Bridge/MCP/Codex and shared transport helper independently approved after
+  pagination, attribution and absolute-deadline fixes; 33 scoped Rust tests and
+  16 Python regressions pass. Fresh isolated native probe passes.
+- Final combined check: 100 Rust tests, formatting, Clippy and release build pass.
+  Installed executable and native plugin 0.1.0; final installed-binary resume
+  and integration review remain. Native Start/Steer/Queue remain disabled.

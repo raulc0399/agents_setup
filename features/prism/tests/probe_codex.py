@@ -23,19 +23,69 @@ import uuid
 RPC_TIMEOUT = 20
 TURN_TIMEOUT = 120
 IDENTITY_ENV = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "TMUX_PANE", "TMUX")
-IDENTITY_KEYS = {"threadId", "thread_id", "sessionId", "session_id", "turnId", "turn_id", "windowId"}
+IDENTITY_KEYS = ("threadId", "sessionId", "turnId", "windowId")
+TURN_IDENTITY_KEYS = ("thread_id", "session_id", "turn_id")
+MAX_PROCESS_ANCESTORS = 32
 
 
 def identity_fields(value):
-    """Record only identity fields, never arbitrary metadata or credentials."""
-    found = {}
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in IDENTITY_KEYS and isinstance(child, str):
-                found[key] = child
-            elif isinstance(child, dict):
-                found.update(identity_fields(child))
+    """Read only the documented top-level and native turn identity locations."""
+    if not isinstance(value, dict):
+        return {}
+    found = {key: value[key] for key in IDENTITY_KEYS
+             if isinstance(value.get(key), str)}
+    nested = value.get("x-codex-turn-metadata")
+    if isinstance(nested, dict):
+        found.update({key: nested[key] for key in TURN_IDENTITY_KEYS
+                      if isinstance(nested.get(key), str)})
     return found
+
+
+def exact_caller(observed, thread_id):
+    identity = observed.get("identity", {})
+    keys = observed.get("meta_keys", [])
+    return ("threadId" in keys and identity.get("threadId") == thread_id
+            and ("x-codex-turn-metadata" not in keys or identity.get("thread_id") == thread_id))
+
+
+def process_identity(pid):
+    """Linux process birth/parent identity; missing or dead processes cannot prove ownership."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if fields[0] in {"Z", "X"}:
+            return None
+        return {"parent_pid": int(fields[1]), "start_time": fields[19]}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def owned_server_process(launcher_pid, launcher_birth, native_pid):
+    """Accept direct exec or a live descendant of this exact npm launcher process."""
+    launcher = process_identity(launcher_pid)
+    if launcher_birth is None or launcher is None or launcher["start_time"] != launcher_birth:
+        return False
+    current = native_pid
+    for _ in range(MAX_PROCESS_ANCESTORS):
+        identity = process_identity(current)
+        if identity is None:
+            return False
+        if current == launcher_pid:
+            return True
+        current = identity["parent_pid"]
+    return False
+
+
+def mcp_process_owned(observed, native_pid, native_birth):
+    if not isinstance(observed, dict) or native_birth is None:
+        return False
+    child = process_identity(observed.get("pid"))
+    parent = process_identity(native_pid)
+    return (child is not None and parent is not None
+            and observed.get("parent_pid") == native_pid == child["parent_pid"]
+            and observed.get("start_time") == child["start_time"]
+            and observed.get("parent_start_time") == native_birth == parent["start_time"])
 
 
 def serve_mcp():
@@ -57,7 +107,9 @@ def serve_mcp():
                            "identity": identity_fields(meta),
                            "environment": {key: os.environ[key] for key in IDENTITY_ENV if key in os.environ},
                            "bootstrap_present": bool(os.environ.get("PRISM_PROBE_BOOTSTRAP")),
-                           "pid": os.getpid(), "parent_pid": os.getppid()}
+                           "pid": os.getpid(), "parent_pid": os.getppid(),
+                           "start_time": (process_identity(os.getpid()) or {}).get("start_time"),
+                           "parent_start_time": (process_identity(os.getppid()) or {}).get("start_time")}
             result = {"content": [{"type": "text", "text": json.dumps(observation)}]}
         else:
             result = {}
@@ -123,8 +175,7 @@ async def connect(path, name):
 async def inspect_mcp(rpc, thread_id, report, name, server="prism_probe"):
     result = await rpc.call("mcpServer/tool/call", {"threadId": thread_id, "server": server, "tool": "inspect_caller", "arguments": {}})
     observed = json.loads(result["content"][0]["text"])
-    native_ids = list(observed["identity"].values()) + list(observed["environment"].values())
-    check(report, name, thread_id in native_ids, observed)
+    check(report, name, exact_caller(observed, thread_id), observed)
     check(report, "mcp_server_bootstrap_environment", observed["bootstrap_present"], "Explicit env_vars forwards server bootstrap environment; secret value never emitted.")
     return observed
 
@@ -188,7 +239,7 @@ async def model_probe(first, second, thread_id, report, args, directory, env, tm
                 try:
                     observation = json.loads(content["text"])
                     identity = observation.get("identity", {})
-                    if "meta_keys" in observation and identity.get("threadId") == thread_id and identity.get("thread_id") == thread_id and identity.get("turn_id") == turn_id:
+                    if exact_caller(observation, thread_id) and identity.get("thread_id") == thread_id and identity.get("turn_id") == turn_id:
                         observations.append(observation)
                 except (ValueError, TypeError):
                     continue
@@ -322,6 +373,7 @@ async def run_native(args, directory, report):
         server = subprocess.Popen([args.codex, "app-server", "--listen", "unix://" + str(socket_path)],
                                   env=env, cwd=directory, stdout=log, stderr=log)
         try:
+            launcher_birth = (process_identity(server.pid) or {}).get("start_time")
             deadline = time.monotonic() + RPC_TIMEOUT
             while not socket_path.exists():
                 if server.poll() is not None or time.monotonic() >= deadline:
@@ -333,15 +385,25 @@ async def run_native(args, directory, report):
             clients.append(second)
             check(report, "unix_websocket_initialize", initialized["codexHome"] == str(home), {"user_agent": initialized["userAgent"], "socket_mode": oct(socket_path.stat().st_mode & 0o777)})
             diagnostics = await first.call("server/diagnostics", {})
-            check(report, "running_server_identity", diagnostics["process"]["id"] > 0, {"server_pid": diagnostics["process"]["id"]})
+            native_pid = diagnostics["process"]["id"]
+            native_birth = (process_identity(native_pid) or {}).get("start_time")
+            server_owned = owned_server_process(server.pid, launcher_birth, native_pid)
+            check(report, "running_server_identity", server_owned,
+                  {"launcher_pid": server.pid if isinstance(server.pid, int) else None,
+                   "launcher_start_time": launcher_birth, "server_pid": native_pid,
+                   "server_start_time": native_birth, "owned_process": server_owned})
             created = await first.call("thread/start", {"cwd": str(directory), "sandbox": "read-only", "approvalPolicy": "on-request", "model": args.model})
             thread = created["thread"]
             report["checks"]["native_plugin_hooks"] = {"status": "pass" if marker.exists() else "untestable", "evidence": "Hook ran" if marker.exists() else "Installed hook did not run without trust; no trust bypass used."}
-            await inspect_mcp(first, thread["id"], report, "mcp_exact_caller_first")
+            first_mcp = await inspect_mcp(first, thread["id"], report, "mcp_exact_caller_first")
+            check(report, "mcp_process_ownership_first", server_owned and mcp_process_owned(first_mcp, native_pid, native_birth),
+                  "Native MCP PID and birth identity must have the verified app-server as parent.")
             servers = await first.call("mcpServerStatus/list", {})
             report["plugin_mcp_names"] = [server["name"] for server in servers["data"] if "plugin_probe" in server["name"]]
             if "plugin_probe" in report["plugin_mcp_names"]:
-                await inspect_mcp(first, thread["id"], report, "native_plugin_mcp_caller", "plugin_probe")
+                plugin_mcp = await inspect_mcp(first, thread["id"], report, "native_plugin_mcp_caller", "plugin_probe")
+                check(report, "native_plugin_mcp_process_ownership", server_owned and mcp_process_owned(plugin_mcp, native_pid, native_birth),
+                      "Plugin MCP must belong to the verified app-server process.")
             try:
                 resumed = await second.call("thread/resume", {"threadId": thread["id"]})
                 check(report, "two_client_exact_resume", resumed["thread"]["id"] == thread["id"], {"thread_id": thread["id"], "session_id": thread["sessionId"]})
@@ -349,7 +411,9 @@ async def run_native(args, directory, report):
                 expected_error = "thread/resume: -32600: no rollout found for thread id " + thread["id"]
                 check(report, "empty_thread_resume", str(error) == expected_error, {"supported": False, "error": str(error)})
             other = await second.call("thread/start", {"cwd": str(directory), "sandbox": "read-only", "approvalPolicy": "on-request", "model": args.model})
-            await inspect_mcp(second, other["thread"]["id"], report, "mcp_exact_caller_second_thread")
+            second_mcp = await inspect_mcp(second, other["thread"]["id"], report, "mcp_exact_caller_second_thread")
+            check(report, "mcp_process_ownership_second", server_owned and mcp_process_owned(second_mcp, native_pid, native_birth),
+                  "Second-thread MCP PID and birth identity must belong to the same verified server.")
             try:
                 await second.call("turn/steer", {"threadId": thread["id"], "expectedTurnId": "prism-invalid-turn", "input": [{"type": "text", "text": "Native protocol precondition probe."}]})
                 check(report, "idle_steer_rejected", False, "Unexpected success")

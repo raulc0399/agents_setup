@@ -76,6 +76,55 @@ class EvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(checks["model_generated_mcp_caller"]["status"], "fail")
 
 
+class CallerIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_caller_rejects_session_environment_and_conflicting_nested_identity(self):
+        for identity, environment, keys in [
+            ({"sessionId": "thread"}, {}, ["sessionId"]),
+            ({"threadId": "other"}, {"CODEX_THREAD_ID": "thread"}, ["threadId"]),
+            ({"threadId": "thread", "thread_id": "other"}, {}, ["threadId", "x-codex-turn-metadata"]),
+            ({"threadId": "thread"}, {}, ["threadId", "x-codex-turn-metadata"]),
+        ]:
+            observation = {"identity": identity, "environment": environment, "meta_keys": keys, "bootstrap_present": True}
+            rpc = SimpleNamespace(call=AsyncMock(return_value={"content": [{"text": json.dumps(observation)}]}))
+            report = {"checks": {}}
+            await probe.inspect_mcp(rpc, "thread", report, "caller")
+            self.assertEqual(report["checks"]["caller"]["status"], "fail")
+
+    async def test_exact_caller_accepts_native_thread_with_optional_consistent_turn_metadata(self):
+        for nested in [False, True]:
+            observation = {"identity": {"threadId": "thread"}, "environment": {}, "meta_keys": ["threadId"], "bootstrap_present": True}
+            if nested:
+                observation["identity"]["thread_id"] = "thread"
+                observation["meta_keys"].append("x-codex-turn-metadata")
+            rpc = SimpleNamespace(call=AsyncMock(return_value={"content": [{"text": json.dumps(observation)}]}))
+            report = {"checks": {}}
+            await probe.inspect_mcp(rpc, "thread", report, "caller")
+            self.assertEqual(report["checks"]["caller"]["status"], "pass")
+
+
+class ProcessIdentityTests(unittest.TestCase):
+    def test_direct_exec_and_wrapper_descendant_are_owned(self):
+        identities = {10: {"parent_pid": 1, "start_time": "100"}, 11: {"parent_pid": 10, "start_time": "101"}, 12: {"parent_pid": 11, "start_time": "102"}, 99: {"parent_pid": 1, "start_time": "90"}}
+        with patch.object(probe, "process_identity", side_effect=identities.get):
+            self.assertTrue(probe.owned_server_process(10, "100", 10))
+            self.assertTrue(probe.owned_server_process(10, "100", 12))
+            self.assertFalse(probe.owned_server_process(10, "100", 99))
+            self.assertFalse(probe.owned_server_process(10, "old-birth", 12))
+            self.assertFalse(probe.owned_server_process(10, "100", 404))
+
+    def test_mcp_parent_and_both_birth_identities_are_required(self):
+        identities = {10: {"parent_pid": 1, "start_time": "100"}, 11: {"parent_pid": 10, "start_time": "101"}}
+        observation = {"pid": 11, "parent_pid": 10, "start_time": "101", "parent_start_time": "100"}
+        with patch.object(probe, "process_identity", side_effect=identities.get):
+            self.assertTrue(probe.mcp_process_owned(observation, 10, "100"))
+            for key, value in [("pid", 99), ("parent_pid", 99), ("start_time", "old"), ("parent_start_time", "old")]:
+                self.assertFalse(probe.mcp_process_owned({**observation, key: value}, 10, "100"))
+
+    def test_arbitrary_nested_metadata_cannot_replace_native_thread_identity(self):
+        identity = probe.identity_fields({"threadId": "wrong", "arbitrary": {"threadId": "target", "thread_id": "target"}})
+        self.assertEqual(identity, {"threadId": "wrong"})
+
+
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def run_native(self, *, tui=False, close_error=False, resume_error=None, tmux_timeout=False):
         first = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("close failed") if close_error else None),
@@ -94,6 +143,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 except (RuntimeError, subprocess.TimeoutExpired):
                     pass
         return report, server, second
+
+    async def test_positive_unowned_server_pid_fails_identity(self):
+        report, _, _ = await self.run_native()
+        self.assertEqual(report["checks"]["running_server_identity"]["status"], "fail")
 
     async def test_client_close_failure_does_not_skip_server_cleanup(self):
         _, server, second = await self.run_native(close_error=True)

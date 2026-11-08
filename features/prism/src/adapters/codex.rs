@@ -5,7 +5,9 @@ use crate::model::{DeliveryMode, DeliveryOutcome, MAX_PAYLOAD_BYTES, MAX_TEXT_BY
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -25,8 +27,87 @@ enum RpcError {
     Connection(String),
 }
 
+fn connect_unix(path: &Path) -> io::Result<UnixStream> {
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: zero is valid for the plain C Unix socket address structure.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "invalid native Unix socket path",
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (target, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *target = *byte as libc::c_char;
+    }
+    // SOCK_NONBLOCK makes a full Unix listener queue fail promptly instead of blocking.
+    // SAFETY: socket takes constants and returns a fresh descriptor or -1.
+    let descriptor = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the fresh descriptor is owned exactly once, including all error paths.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    // SAFETY: the address pointer and length refer to the initialized pathname structure.
+    if unsafe {
+        libc::connect(
+            descriptor.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            length as libc::socklen_t,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let stream = UnixStream::from(descriptor);
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+/// A WebSocket frame can require many socket reads; all share one operation deadline.
+#[derive(Debug)]
+struct DeadlineStream {
+    stream: UnixStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| io::Error::new(ErrorKind::TimedOut, "Codex operation deadline exceeded"))
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(bytes)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        crate::io::write_with_deadline(&self.stream, bytes, self.deadline)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.flush()
+    }
+}
+
 pub struct CodexAdapter {
-    socket: WebSocket<UnixStream>,
+    socket: WebSocket<DeadlineStream>,
     thread_id: String,
     generation: u64,
     timeout: Duration,
@@ -50,9 +131,11 @@ impl CodexAdapter {
         if thread_id.is_empty() || thread_id.len() > 512 || generation == 0 || timeout.is_zero() {
             bail!("invalid Codex binding or RPC timeout");
         }
-        let stream = UnixStream::connect(path).context("connect to the bound Codex app-server")?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
+        let stream = connect_unix(path).context("connect to the bound Codex app-server")?;
+        let stream = DeadlineStream {
+            stream,
+            deadline: Instant::now() + timeout,
+        };
         let (socket, _) = tungstenite::client("ws://localhost/", stream)
             .map_err(|error| anyhow::anyhow!("Codex WebSocket handshake: {error}"))?;
         let mut adapter = Self {
@@ -79,6 +162,7 @@ impl CodexAdapter {
             .as_str()
             .context("Codex initialize omitted userAgent")?
             .to_owned();
+        adapter.socket.get_mut().deadline = Instant::now() + timeout;
         adapter.socket.send(Message::Text(
             json!({"method": "initialized", "params": {}})
                 .to_string()
@@ -162,10 +246,8 @@ impl CodexAdapter {
         }
         self.next_request_id += 1;
         let request_id = self.next_request_id;
-        self.socket
-            .get_mut()
-            .set_write_timeout(Some(self.timeout))
-            .map_err(|error| RpcError::Connection(error.to_string()))?;
+        let deadline = Instant::now() + self.timeout;
+        self.socket.get_mut().deadline = deadline;
         self.socket
             .send(Message::Text(
                 json!({"id": request_id, "method": method, "params": params})
@@ -176,17 +258,12 @@ impl CodexAdapter {
                 self.retire("Codex connection failed while writing a request");
                 RpcError::Connection(error.to_string())
             })?;
-        let deadline = Instant::now() + self.timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 self.retire("Codex RPC timed out; the request must not be resent automatically");
                 return Err(RpcError::Connection("Codex RPC timed out".to_owned()));
             }
-            self.socket
-                .get_mut()
-                .set_read_timeout(Some(remaining))
-                .map_err(|error| RpcError::Connection(error.to_string()))?;
             let frame = self.socket.read().map_err(|error| {
                 self.retire("Codex connection closed or timed out; revalidate before reconnecting");
                 RpcError::Connection(error.to_string())
@@ -395,10 +472,8 @@ impl AgentAdapter for CodexAdapter {
         if self.retired.is_some() {
             return Ok(std::mem::take(&mut self.events));
         }
-        self.socket
-            .get_mut()
-            .set_read_timeout(Some(EVENT_POLL_TIMEOUT))?;
         let deadline = Instant::now() + EVENT_POLL_TIMEOUT;
+        self.socket.get_mut().deadline = deadline;
         while Instant::now() < deadline {
             match self.socket.read() {
                 Ok(Message::Text(text)) => {
@@ -681,9 +756,17 @@ mod contract {
     fn different_thread_start_retires_the_binding() {
         let fixture = Fixture::new("normal");
         let mut adapter = fixture.connect();
-        adapter.observe(&json!({"method": "thread/started", "params": {"thread": {"id": "replacement"}}}));
-        assert!(matches!(adapter.poll_events().unwrap().as_slice(), [NativeEvent::Retired { .. }]));
-        assert!(matches!(adapter.submit(&question(DeliveryMode::Start)), DeliveryOutcome::Refused { .. }));
+        adapter.observe(
+            &json!({"method": "thread/started", "params": {"thread": {"id": "replacement"}}}),
+        );
+        assert!(matches!(
+            adapter.poll_events().unwrap().as_slice(),
+            [NativeEvent::Retired { .. }]
+        ));
+        assert!(matches!(
+            adapter.submit(&question(DeliveryMode::Start)),
+            DeliveryOutcome::Refused { .. }
+        ));
         assert_eq!(fixture.count("turn/start"), 0);
     }
 
@@ -694,12 +777,219 @@ mod contract {
         adapter.capabilities.start = true;
         let mut question = question(DeliveryMode::Start);
         question.generation = 6;
-        assert!(matches!(adapter.submit(&question), DeliveryOutcome::Refused { .. }));
+        assert!(matches!(
+            adapter.submit(&question),
+            DeliveryOutcome::Refused { .. }
+        ));
         assert_eq!(fixture.count("turn/start"), 0);
         question.generation = 7;
         assert_eq!(adapter.submit(&question), DeliveryOutcome::Submitted);
         question.text = "Different payload".into();
-        assert!(matches!(adapter.submit(&question), DeliveryOutcome::Refused { .. }));
+        assert!(matches!(
+            adapter.submit(&question),
+            DeliveryOutcome::Refused { .. }
+        ));
         assert_eq!(fixture.count("turn/start"), 1);
+    }
+
+    #[test]
+    fn fragmented_response_obeys_absolute_rpc_deadline() {
+        use std::io::Write;
+        use std::time::Instant;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("drip.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let task = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.read().unwrap();
+            let response = b"{\"id\":1,\"result\":{\"userAgent\":\"probe\"}}";
+            socket
+                .get_mut()
+                .write_all(&[0x81, response.len() as u8])
+                .unwrap();
+            for byte in response {
+                if socket.get_mut().write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        let result = CodexAdapter::connect(&path, "thread", 1, Duration::from_millis(60));
+        let elapsed = started.elapsed();
+        task.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "RPC exceeded its absolute deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn fragmented_handshake_obeys_absolute_deadline() {
+        use std::io::{self, Read, Write};
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+        struct DripWriter(UnixStream);
+        impl Read for DripWriter {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.0.read(bytes)
+            }
+        }
+        impl Write for DripWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                for byte in bytes {
+                    self.0.write_all(&[*byte])?;
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.0.flush()
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("handshake.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let task = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let _ = tungstenite::accept(DripWriter(stream));
+        });
+        let started = Instant::now();
+        let result = CodexAdapter::connect(&path, "thread", 1, Duration::from_millis(60));
+        let elapsed = started.elapsed();
+        task.join().unwrap();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "handshake exceeded its absolute deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn fragmented_event_does_not_block_lifecycle_polling() {
+        use std::io::Write;
+        use std::time::Instant;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let task = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            while let Ok(Message::Text(text)) = socket.read() {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => json!({"userAgent":"test"}),
+                    "initialized" => continue,
+                    "server/diagnostics" => json!({"process":{"id":42}}),
+                    "thread/resume" => json!({"thread":{"id":"thread"}}),
+                    _ => unreachable!(),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .unwrap();
+                if request["method"] == "thread/resume" {
+                    break;
+                }
+            }
+            let event = b"{\"method\":\"turn/started\",\"params\":{\"threadId\":\"thread\",\"turn\":{\"id\":\"turn\"}}}";
+            if socket
+                .get_mut()
+                .write_all(&[0x81, event.len() as u8])
+                .is_err()
+            {
+                return;
+            }
+            for byte in event {
+                if socket.get_mut().write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut adapter =
+            CodexAdapter::connect(&path, "thread", 1, Duration::from_millis(60)).unwrap();
+        let started = Instant::now();
+        assert!(adapter.poll_events().unwrap().is_empty());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(adapter);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn full_unix_listener_backlog_fails_promptly() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("full.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // SAFETY: the valid listener descriptor is reconfigured to the smallest queue.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let queued = UnixStream::connect(&path).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let task = thread::spawn(move || {
+            let result = CodexAdapter::connect(&path, "thread", 1, Duration::from_millis(60));
+            let _ = sender.send(result.is_err());
+        });
+        let bounded = receiver.recv_timeout(Duration::from_millis(250));
+        // Release a previously blocking connect before asserting, so failure never leaks a thread.
+        drop(listener.accept().unwrap());
+        drop(queued);
+        drop(listener);
+        task.join().unwrap();
+        assert_eq!(
+            bounded.ok(),
+            Some(true),
+            "full backlog blocked connect beyond its deadline"
+        );
+    }
+
+    #[test]
+    fn slow_native_reader_cannot_extend_write_deadline() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+        let (server, mut peer) = UnixStream::pair().unwrap();
+        let buffer_size: libc::c_int = 4096;
+        // SAFETY: a live descriptor and correctly sized socket-option pointer are supplied.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    server.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&buffer_size as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&buffer_size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let reader = thread::spawn(move || {
+            let mut bytes = [0; 2048];
+            while matches!(peer.read(&mut bytes), Ok(count) if count > 0) {
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        let mut stream = super::DeadlineStream {
+            stream: server,
+            deadline: started + Duration::from_millis(60),
+        };
+        let result = stream.write_all(&vec![b'x'; 256 * 1024]);
+        let elapsed = started.elapsed();
+        drop(stream);
+        reader.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "native write escaped deadline: {elapsed:?}"
+        );
+        assert!(result.is_err());
     }
 }

@@ -8,6 +8,8 @@ automatically extract conversation content or open another agent conversation.
 
 - Call `prism_inspect` before revising existing content; preserve stable IDs and
   use its current document revision when calling `prism_publish` or `prism_action`.
+- When listing documents or shared questions, repeat with returned `next_cursor`
+  as `cursor` until null; retrieve individual records by their stable IDs.
 - Publish semantic content and relationships; the Prism UI owns local layout,
   selection and unsent drafts. Never request private drafts or private selections.
 - Treat acceptance as content feedback, never permission to implement changes.

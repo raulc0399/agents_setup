@@ -13,3 +13,5 @@ pub mod adapters;
 pub mod bridge;
 
 pub mod mcp;
+
+mod io;
