@@ -28,6 +28,12 @@ if task['kind'] == 'review':
     subprocess.run([sys.executable, '-B', str(run / 'protocol' / 'review.py'), '--root', str(run.parent),
                     '--run', run.name, 'task', 'progress', '--data', '-'], input=json.dumps(progress),
                    text=True, stdout=subprocess.DEVNULL, check=True)
+if task['kind'] == 'discussion':
+    context = json.loads(task['brief'].split('Source context: ', 1)[1])
+    for question in context['question_records']:
+        print('A id=answer-' + question['id'] + ' question=' + question['id'] +
+              ' text="Compared both captured lines" evidence=["input.txt:1-2"]')
+    raise SystemExit(0)
 proof = 'coverage-' + task['id']
 print('COV id=' + proof + ' paths=["input.txt"] status=reviewed evidence=["Read both captured lines"]')
 print('VOTE verdict=APPROVED evidence=["' + proof + '"]')
@@ -80,7 +86,7 @@ class FlowCliTests(unittest.TestCase):
         result = self.dispatch()
         self.assertEqual(result['state'], 'complete')
         self.assertEqual(result['approval']['result'], 'APPROVED')
-        self.assertEqual(len(result['completed_task_ids']), 3)
+        self.assertEqual(len(result['completed_task_ids']), 5)
         self.assertEqual(self.cli('notifications', '--recipient', 'main-chat'),
                          {'deferred': True, 'notifications': []})
         with Store(self.run, readonly=True) as store:

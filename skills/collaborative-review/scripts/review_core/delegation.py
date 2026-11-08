@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 
 
 MIN_TIMEOUT_SECONDS = 1
+PEER_REVIEW_COUNT = 2
 
 
 def _names(values, label):
@@ -30,8 +31,8 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
     """Return task envelopes; identical revision/request retries reuse the plan.
 
     Each task gets the same full snapshot scope. Named risks and specialists add
-    focused tasks without replacing either independent reviewer. One equal time
-    share is reserved for the later challenge; all shares use the run budget.
+    focused tasks without replacing either independent reviewer. Equal time
+    shares fund two peer cross-checks and the challenge within the run budget.
     """
     if coordinator.store is not store:
         raise ValueError('Coordinator must use the supplied store')
@@ -79,7 +80,7 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
         spent = _number(store.get_meta('spent_seconds', 0), 'spent_seconds')
         reserved = sum(_number(task['data']['payload']['timeout_seconds'], 'task timeout')
                        for task in store.list_records('task') if task['data']['status'] in ('pending', 'running'))
-        timeout = (budget - spent - reserved) / (len(roles) + 1)
+        timeout = (budget - spent - reserved) / (len(roles) + PEER_REVIEW_COUNT + 1)
         if timeout < MIN_TIMEOUT_SECONDS:
             raise ValueError('Budget cannot fund reviews and a challenge')
         tasks = []
@@ -96,6 +97,17 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
                      'verified observations. Each finding claim must explain the triggering condition, observed '
                      'behavior and impact, with a concrete target, proposed fix and supporting evidence. '
                      'Do not impose a finding count limit.')
+            if kind == 'review':
+                brief += (' Act as a team lead: identify every relevant concern and spawn a separate '
+                          'subagent for each concern using the host delegation tools. Both leads must use '
+                          'their own independent teams; never share subagents or peer findings during blind '
+                          'review. Give each child the pinned inputs, requirements, concern and read-only '
+                          'scope; collect its identity, coverage, checks, findings and uncertainties. '
+                          'Queue children within host capacity and this task deadline; do not recursively '
+                          'delegate. Check and consolidate all child evidence, cover integration gaps, and '
+                          'submit one whole-scope COV/VOTE result with concern-to-subagent provenance in '
+                          'COV evidence. If delegation is unavailable, report a blocking GAP; never invent '
+                          'subagents or silently perform a solo review.')
             if focus:
                 brief += ' Pay particular attention to ' + focus + '.'
             payload = dict(revision=revision, brief=brief, scope_paths=paths,
@@ -106,5 +118,6 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
         if cap != run_cap:
             store.set_meta('max_workers', cap)
         store.put_record('review_plan', plan_id, dict(request=request, task_ids=[task['id'] for task in tasks],
-                         challenge_budget_seconds=timeout), event='review.planned', expected_version=0)
+                         challenge_budget_seconds=timeout, peer_review_budget_seconds=timeout),
+                         event='review.planned', expected_version=0)
         return tasks

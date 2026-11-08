@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import PurePosixPath
 
-from .messages import read_messages
+from .messages import exchange_reviews, read_messages
 
 
 QUESTION_OPERATIONS = ('Q', 'GAP', 'DISPUTE')
@@ -35,6 +35,7 @@ def schedule_discussions(store, coordinator, timeout_seconds=300):
                             or PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts
                             or str(PurePosixPath(path)) != path or path == '.' for path in paths):
             raise ValueError('Snapshot must contain canonical file paths')
+        exchanges = {message['id'] for message in exchange_reviews(store)}
         recipients = {record['data']['recipient'] for record in store.list_records('message')
                       if record['data'].get('revision') == revision
                       and record['data']['recipient'] != 'coordinator'}
@@ -96,18 +97,30 @@ def schedule_discussions(store, coordinator, timeout_seconds=300):
                     finding = store.get_record('finding', finding_id)
                     if finding and finding['data'].get('revision') == revision:
                         findings.append(finding)
-                brief = ('Answer only these assigned unanswered questions, or report an explicit blocking GAP. '
+                context = dict(message_id=message['id'], sender=data['sender'],
+                               dialect_id=data['dialect_id'], body=data['body'], questions=questions,
+                               question_records=question_records, findings=findings)
+                if message['id'] in exchanges:
+                    context['review'] = dict(task_id=sender_task['id'], **sender_task['data']['result'])
+                brief = ('Route the assigned questions to the relevant subagents in your own concern team; '
+                         'reuse their evidence or start replacement subagents with the same concern brief. '
+                         'The team lead checks and consolidates their replies. '
+                         'Answer only these assigned unanswered questions, or report an explicit blocking GAP. '
                          'Check the intended behavior, relevant callers and failure paths; cite actual evidence '
                          'and disclose untested uncertainty. Return only AASM, using A question=<assigned-id>; '
                          'no VOTE is required. Do not create routine NOTE response loops. Source context: '
-                         + json.dumps(dict(message_id=message['id'], sender=data['sender'],
-                                           dialect_id=data['dialect_id'], body=data['body'], questions=questions,
-                                           question_records=question_records, findings=findings),
-                                      sort_keys=True))
+                         + json.dumps(context, sort_keys=True))
+                timeout = timeout_seconds
+                if message['id'] in exchanges:
+                    plan = next(plan for plan in store.list_records('review_plan')
+                                if data['task_id'] in plan['data']['task_ids'])
+                    timeout = min(timeout, plan['data']['peer_review_budget_seconds'])
                 payload = dict(worker=recipient, revision=revision, message_id=message['id'],
                                reply_to=message['id'], reply_recipient=data['sender'],
                                question_ids=question_ids, question_versions=question_versions,
-                               scope_paths=sorted(set(paths)), brief=brief, timeout_seconds=timeout_seconds,
+                               scope_paths=sorted(set(paths)), brief=brief, timeout_seconds=timeout,
                                required_action='review')
+                if message['id'] in exchanges:
+                    payload['peer_review_plan_id'] = plan['id']
                 tasks.append(coordinator.enqueue_task('discussion', payload, task_id=task_id))
         return tasks

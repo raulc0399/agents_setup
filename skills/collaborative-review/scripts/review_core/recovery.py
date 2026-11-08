@@ -62,7 +62,26 @@ def _checkpoint_transaction(store):
             store.connection.rollback()
 
 
-def handoff(store, now=None):
+def _worker_tasks(tasks, worker, revision):
+    current = [task for task in tasks if task['data']['payload']['revision'] == revision]
+    identities = {name for task in current for name in (task['data'].get('worker'),
+                  task['data']['payload'].get('worker'), task['data']['payload'].get('reviewer')) if name}
+    if not isinstance(worker, str) or not worker or worker not in identities:
+        raise ValueError('Unknown handoff worker')
+    visible = []
+    for task in current:
+        data = task['data']
+        assigned = data.get('worker') or data['payload'].get('worker') or data['payload'].get('reviewer')
+        if assigned == worker:
+            visible.append(task)
+            continue
+        # Results, attempts, progress and errors can all contain private peer findings.
+        visible.append(dict(id=task['id'], data=dict(kind=data['kind'], status=data['status'],
+            worker=assigned, payload=dict(revision=revision))))
+    return visible
+
+
+def handoff(store, now=None, worker=None):
     """Read a consistent checkpoint without changing the run."""
     now = _now(now)
     with _checkpoint_transaction(store):
@@ -74,7 +93,8 @@ def handoff(store, now=None):
                 'project_root': store.get_meta('project_root'), 'paths': store.get_meta('paths'),
                 'approval_scope': store.get_meta('approval_scope'),
                 'status': store.get_meta('status'), 'revision': store.get_meta('revision'),
-                'tasks': tasks, 'unfinished_task_ids': [t['id'] for t in tasks
+                'tasks': tasks if worker is None else _worker_tasks(tasks, worker, store.get_meta('revision')),
+                'unfinished_task_ids': [t['id'] for t in tasks
                     if t['data']['status'] not in ('completed', 'failed', 'cancelled')],
                 'operator_decisions': [t['id'] for t in tasks if t['data']['status'] == 'uncertain' or
                     (t['data']['status'] == 'running' and t['data']['lease_expires'] <= now

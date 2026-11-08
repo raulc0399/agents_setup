@@ -1,4 +1,6 @@
 """Revision-bound AASM transport for trusted local review participants."""
+import hashlib
+import json
 import re
 import time
 import uuid
@@ -201,4 +203,53 @@ def read_messages(store, recipient, after=0):
                 # A later visible sequence must never skip a deferred delivery.
                 break
             messages.append({**record, 'sequence': event['seq']})
+        return messages
+
+
+def exchange_reviews(store):
+    """Publish each team's submitted review once, after every blind task finishes."""
+    from .aasm_records import apply_operations
+
+    with store.transaction():
+        revision, tasks, _, _ = _context(store)
+        if _blind_pending(tasks):
+            return []
+        plans = [plan for plan in store.list_records('review_plan')
+                 if plan['data']['request']['revision'] == revision
+                 and 'peer_review_budget_seconds' in plan['data']]
+        messages = []
+        for plan in plans:
+            reviews = [task for task in tasks if task['id'] in plan['data']['task_ids']
+                       and task['data']['kind'] == 'review']
+            if len(reviews) != 2 or any(task['data']['status'] != 'completed' for task in reviews):
+                continue
+            if len({task['data']['worker'] for task in reviews}) != 2:
+                raise ValueError('Review exchange requires two independent team leads')
+            for source, target in (reviews, reviews[::-1]):
+                data = source['data']
+                sender, recipient = data['worker'], target['data']['worker']
+                identity = hashlib.sha256((plan['id'] + source['id'] + data['lease_id']
+                                           + target['data']['lease_id']).encode()).hexdigest()
+                message_id = 'review-exchange-' + identity
+                existing = store.get_record('message', message_id)
+                if existing is not None:
+                    messages.append(_sequence(store, existing))
+                    continue
+                result = data.get('result') or {}
+                if not result.get('aasm'):
+                    raise ValueError('Review exchange requires the submitted AASM result')
+                findings = [operation['args']['id'] for operation in result['operations']
+                            if operation['op'] in ('B', 'D', 'O')]
+                question = ('Automatic cross-check: use your concern subagents to examine the other team\'s '
+                            'submitted review against the pinned inputs and your own evidence. '
+                            'Answer with evidence for agreements and disagreements; record every actionable '
+                            'dispute or missing evidence explicitly. Do not claim consensus without checking.')
+                body = ('NOTE text="Submitted independent team review" refs=' + json.dumps([source['id']])
+                        + '\nQ id=peer-review-' + identity
+                        + ' text=' + json.dumps(question) + ' findings=' + json.dumps(findings))
+                def apply(operations, envelope):
+                    apply_operations(store, envelope['sender'], revision, operations,
+                                     task_id=envelope['task_id'])
+                messages.append(send_message(store, sender, recipient, body, message_id=message_id,
+                    task_id=source['id'], lease_id=data['lease_id'], apply=apply))
         return messages

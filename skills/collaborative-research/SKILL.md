@@ -1,11 +1,13 @@
 ---
 name: collaborative-research
-description: Research a question for the user's case with captured sources, independently verified claims, two independent reviews, and a final challenge; export an evidence-backed recommendation without implementing it.
+description: Research a question for the user's case with captured sources, independently verified claims, two independent concern teams, automatic peer exchange and polling, and a final challenge; export an evidence-backed recommendation without implementing it.
 ---
 
 # Collaborative research
 
 Use the installed `collaborative-review/SKILL.md` for the shared coordinator and worker adapter contract. Codex installs skills under `~/.agents/skills`; Claude installs them under `~/.claude/skills`. New runs use that skill's `scripts/review.py`, SQLite records, and generated exports.
+
+Read its [concern teams and automatic communication](../collaborative-review/references/teams.md) reference before starting or joining. Each lead must use its own concern subagents, consolidate their evidence, and automatically process peer messages and follow-up tasks. Keep the two teams independent until both initial reviews are submitted.
 
 Research approval covers a recommendation for the user's question, context, and constraints. It does not authorize implementing the recommendation, deployment, destructive actions, installations, or experiments. Keep project inputs read-only. The adapter executes trusted local code in an isolated snapshot copy; authorization checks are not an operating-system sandbox.
 
@@ -20,7 +22,7 @@ REVIEW="$HOME/.agents/skills/collaborative-review/scripts/review.py"
 python3 "$REVIEW" --run research-001 create --project "$PWD" --paths research/BRIEF.md src --approval-scope report-ready --budget-seconds 1800 --max-workers 2
 ```
 
-Present the captured scope in chat and record the user's explicit approval with `authorize --chat-approval FILE`, following the shared review skill's approval JSON contract. Reuse approval already given for that scope and revision; do not require a terminal confirmation or invent consent. Obtain the captured `revision` from `status --json`; record creation requires that exact value, not a branch name or working-tree hash. After authorization and `plan`, provide the review ID, shared run directory, revision, assigned role, and a copyable joining prompt for the second agent as described in the shared skill.
+Present the captured scope in chat and record the user's explicit approval with `authorize --chat-approval FILE`, following the shared review skill's approval JSON contract. Reuse approval already given for that scope and revision; do not require a terminal confirmation or invent consent. Obtain the captured `revision` from creation or `handoff --worker <own-role>` after planning; record creation requires that exact value, not a branch name or working-tree hash. After authorization and `plan`, provide the review ID, shared run directory, revision, assigned role, and a copyable joining prompt for the second agent as described in the shared skill.
 
 ## Sources and claims
 
@@ -38,14 +40,11 @@ Use `REC id=<id> text="<recommendation>" claims=["<claim-id>"] case="<user const
 
 ## Independent review and challenge
 
-Two distinct reviewers independently cover the whole captured scope before reading each other's reviews. Request specialist tasks only for relevant risks; there is no fixed four-way split or random reporter. Keep the user informed concisely about findings, disagreements, and decisions needed.
+Two distinct team leads each delegate every relevant concern to their own subagents and consolidate whole-scope reviews before reading the other team's findings. Choose concerns from the user's case, sources, claims, alternatives and risks; there is no fixed four-way split or random reporter. Additional coordinator specialist tasks do not replace either team's subagents. Keep the user informed concisely about findings, disagreements, and decisions needed.
 
 ```bash
 python3 "$REVIEW" --run research-001 plan
-python3 "$REVIEW" --run research-001 work --worker reviewer-1 --timeout-seconds 300 -- /absolute/reviewer-adapter
-python3 "$REVIEW" --run research-001 work --worker reviewer-2 --timeout-seconds 300 -- /absolute/reviewer-adapter
-python3 "$REVIEW" --run research-001 challenge
-python3 "$REVIEW" --run research-001 work --worker challenger --timeout-seconds 300 -- /absolute/challenger-adapter
+python3 "$REVIEW" --run research-001 dispatch --timeout-seconds 300 -- /absolute/team-capable-adapter
 python3 "$REVIEW" --run research-001 check
 ```
 
@@ -53,7 +52,7 @@ Adapters consume helper-generated task/snapshot/language JSON on stdin and emit 
 
 Reviewers must understand the user's case, trace how supporting claims lead to the recommendation, and examine conflicting evidence, failure cases and assumptions. Name actual verification/check results in `COV.evidence`, mark partial/unreviewed coverage and untested uncertainty explicitly, and explain each finding's condition, observed behavior and impact with concrete support and fix.
 
-Use the shared skill's `dispatch` command for bounded automatic scheduling after `plan`. Keep routine peer messages internal; only explicit unanswered `Q`/`GAP`/`DISPUTE` messages schedule followup work. In human discussion, restate the stable item ID, subject, consequence and decision question. Use the shared `discussion begin/end` and durable `notifications --after` queue for background updates; the lead/host adapter must explicitly manage the hold and delivery cursor. This does not detect typing, suppress host tool traces or pause the research workers.
+Use the shared skill's `dispatch` command with a team-capable adapter, or each active lead's automatic `poll` loop in separate chats. Both paths exchange the submitted reviews after the blind gate opens and require both teams to cross-check the other's evidence before the challenge. Route source-verification questions to the relevant concern subagents and preserve independent claim verification. Keep routine peer messages internal; further explicit unanswered `Q`/`GAP`/`DISPUTE` messages schedule follow-up work. In human discussion, restate the stable item ID, subject, consequence and decision question. Use the shared `discussion begin/end` and durable `notifications --after` queue for background updates; the lead/host adapter must explicitly manage the hold and delivery cursor. This does not detect typing, suppress host tool traces or pause the research workers.
 
 The final challenger has a distinct identity and receives the structured research records, source captures, verification state, and reviews in its task brief. Approval binds both the captured input revision and this structured context fingerprint. Changing a claim, source, recommendation, or other challenge input invalidates the old challenge; schedule and complete a fresh challenge. Do not describe the generated report as a separately snapshotted, exact-text approved artifact.
 
@@ -61,4 +60,4 @@ The final challenger has a distinct identity and receives the structured researc
 
 After `check` returns `APPROVED`, run `finish` and `export`. Deliver `.reviews/research-001/exports/SUMMARY.md` as the derived report, with its source/claim/recommendation records and approval context; `OPTIONS.md`, `COVERAGE.md`, `DECISIONS.md`, and `TRANSCRIPT.html` provide supporting views. Exports are regenerated from Store records and events; never hand-edit them. Report the current check result as `APPROVED` or `BLOCKED`, not an invented `REPORT_APPROVED` status.
 
-Use `status --json` for active work and blockers, `handoff` for a replacement session, and `resume` to recover expired work. Uncertain execution effects require an operator recovery decision. A user request to dig deeper requires new evidence and renewed applicable checks; prior approval covers only its previous captured inputs and structured context. Copy an export elsewhere only when the user authorized that destination, and obtain permission before overwriting an existing file.
+During blind review use `handoff --worker <own-role>` so peer results stay private; afterward use `status --json` for work/blockers and `handoff` for a replacement session. Use `resume` to recover expired work. Uncertain execution effects require an operator recovery decision. A user request to dig deeper requires new evidence and renewed applicable checks; prior approval covers only its previous captured inputs and structured context. Copy an export elsewhere only when the user authorized that destination, and obtain permission before overwriting an existing file.

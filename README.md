@@ -11,7 +11,7 @@ ln -s "$(pwd)/AGENTS.md" ~/.gemini/GEMINI.md
 
 ## Collaborative review
 
-`skills/collaborative-review/scripts/review.py` coordinates revision-bound local reviews with SQLite event history, two independent reviewers and a final challenger. Requires Python 3.10+, POSIX and writable reliable local storage supporting SQLite WAL and cross-process locking. No model account or provider adapter is bundled.
+`skills/collaborative-review/scripts/review.py` coordinates revision-bound local reviews with SQLite event history, two independent concern teams, automatic peer exchange and polling, and a final challenger. Each lead spawns its own subagent per relevant concern and consolidates a whole-scope review. Requires Python 3.10+, POSIX and writable reliable local storage supporting SQLite WAL and cross-process locking. No model account or provider adapter is bundled; active agent chats use their host's delegation tools.
 
 Install the skills for your agent (keep the clone available):
 
@@ -34,10 +34,7 @@ python3 "$REVIEW" doctor --project "$PWD" -- "$ADAPTER"
 python3 "$REVIEW" --run design-review create --project "$PWD" --paths design.md --approval-scope technical-plan --budget-seconds 3600 --max-workers 2
 python3 "$REVIEW" --run design-review authorize --chat-approval /absolute/path/to/chat-approval.json
 python3 "$REVIEW" --run design-review plan
-python3 "$REVIEW" --run design-review work --worker reviewer-1 --timeout-seconds 300 -- "$ADAPTER"
-python3 "$REVIEW" --run design-review work --worker reviewer-2 --timeout-seconds 300 -- "$ADAPTER"
-python3 "$REVIEW" --run design-review challenge
-python3 "$REVIEW" --run design-review work --worker challenger --timeout-seconds 300 -- "$ADAPTER"
+python3 "$REVIEW" --run design-review dispatch --timeout-seconds 300 -- "$ADAPTER"
 python3 "$REVIEW" --run design-review check
 python3 "$REVIEW" --run design-review export
 ```
@@ -58,23 +55,35 @@ The lead presents the captured scope in chat, accepts the user's explicit approv
 
 The helper checks run identity, current revision, approval scope and captured paths, then stores the approval message/reference with the grant. It trusts the calling agent to relay real user consent; it cannot authenticate chat history or interpret approval language. Do not combine `--chat-approval` with terminal authorization options. Calling `authorize` without that option retains the interactive terminal flow. Review permission does not authorize implementing recommendations, deployment or destructive actions. Commands enforce scoped authorization within a trusted local process model; this is not an OS sandbox. `doctor` performs local temporary-file and subprocess lock probes without launching your adapter, installing packages or contacting accounts; successful probes cannot certify storage durability.
 
-After approval, run `plan` and `handoff`, then give the user the review ID and a joining prompt such as:
+After approval, run `plan` and `handoff --worker reviewer-1`, then give the user the review ID and a joining prompt such as:
 
 ```text
 Use $collaborative-review. Join review <review-id> as reviewer-2.
 Project: <absolute-project>; shared run directory: <absolute-run-directory>.
 Revision: <captured-revision>. Task: <user's requirements and feature brief>.
-Read handoff for that existing run, verify its scope/revision, claim only reviewer-2,
-and review the pinned inputs independently; do not edit source files or create another run.
+Read handoff --worker reviewer-2 for that run, verify its scope/revision, claim only reviewer-2,
+and start your own subagent per relevant concern against the pinned inputs.
+Keep your team independent; do not edit source files or create another run.
+After submitting your team's review, automatically keep polling as reviewer-2,
+claim your assigned follow-ups, and route them to your concern subagents until
+completion, an explicit blocker, or the run deadline. Do not wait for user prompts.
 ```
 
 Agent 2 uses the run directory's parent as `--root` and its name as `--run`. Both sessions need access to the same reliable local storage; the ID alone does not connect remote machines. Joining does not require new authorization for the unchanged scope. If reviewer-2 is already claimed or completed, report that state. Initial findings stay independent until both reviews finish. Existing runs keep their frozen helper version; start a fresh run to use a new authorization workflow rather than editing a frozen bundle.
 
-Both reviewers must supply real evidence and reviewed coverage for every captured file; missing or blocked results keep `check` blocked. `plan --risk NAME --specialist NAME` adds requested specialist work, which needs additional `work` invocations. Workers may run concurrently within `--max-workers`; each `work` invocation runs one task. `check` exits 0 for approved, 1 for blocked, 2 for invalid requests; `finish` marks the run complete only after checks approve.
+Both leads must supply real evidence, concern/subagent provenance and reviewed coverage for every captured file; missing or blocked results keep `check` blocked. `plan --risk NAME --specialist NAME` adds coordinator specialist work without replacing either lead's concern team. Workers may run concurrently within `--max-workers`; host subagent capacity is separate and children must fit their parent's deadline. Each `work` invocation runs one task. `check` exits 0 for approved, 1 for blocked, 2 for invalid requests; `finish` marks the run complete only after checks approve.
+
+For separate active chats, follow [the concern-team loop](skills/collaborative-review/references/teams.md). Each lead calls this automatically after submitting its initial review, processes returned messages, claims its own ready tasks and polls again:
+
+```bash
+python3 "$REVIEW" --run design-review poll --worker reviewer-1 --after 0 --wait-seconds 30
+```
+
+Use `reviewer-2` in the other chat. `poll` returns `state` (`ready`, `waiting`, `blocked`, or `complete`), `messages`, own ready `tasks`, `next_after`, `challenge_tasks` for reviewer-1, and any blockers/terminal approval. Save `next_after` only after processing; replay is safe. Polling checks every 0.1 seconds and waits at most 30 seconds per call; `--timeout-seconds` separately sets the follow-up execution limit (default 300, bounded by plan/run budgets). It automatically publishes both reviews after all blind tasks finish and schedules cross-checks/follow-ups; it never claims tasks or starts models. Both active leads keep the loop running without user prompts, within the run deadline. A closed chat requires a host integration to resume it. For unattended work, supply a real team-capable adapter to `dispatch` instead of competing with the chats for their roles.
 
 ### Quiet continuous dispatch and discussion
 
-After authorization and `plan`, `dispatch` promptly schedules claimable reviews, visible explicit peer questions and the final challenge within worker capacity and existing budget. It returns concrete blockers when no work can progress; it never retries failures, recovers uncertain effects or authorizes actions. Completion means the queue drained; `check` determines approval.
+After authorization and `plan`, `dispatch` schedules the two team reviews, automatically exchanges them after the blind gate opens, runs both peer cross-checks and explicit follow-ups, and finally schedules the independent challenge. The plan allocates equal time shares to the initial tasks, two cross-checks and the challenge within the existing budget. `dispatch` returns concrete blockers when no work can progress; it never retries failures, recovers uncertain effects or authorizes actions. Completion means the queue drained; `check` determines approval.
 
 ```bash
 python3 "$REVIEW" --run design-review dispatch --timeout-seconds 300 --recipient lead-chat -- "$ADAPTER" > /absolute/path/review-dispatch.log 2>&1 &
@@ -125,7 +134,7 @@ Use `dialect propose --worker <author> --manifest FILE`, then each named partici
 
 `technical-plan`, `implementation-ready`, and `report-ready` describe the approval target; approval always belongs to the captured revision. Source project files remain untouched. Apply authorized changes outside the snapshot, then run `revise` with no running tasks, authorize the new revision and plan again. Old approvals cannot approve changed inputs; affected assumptions are invalidated. Active runs execute their pinned protocol bundle; `protocol-proposal --text TEXT --evidence TEXT` records future changes, which require a new run to take effect.
 
-`status --json` shows work, budgets, decision requests and uncovered paths; `handoff` emits a replacement worker checkpoint. `export` regenerates `.reviews/design-review/exports/OPTIONS.md`, `COVERAGE.md`, `DECISIONS.md`, `SUMMARY.md`, and `TRANSCRIPT.html` from stored records/events, with current approval checks. Do not hand-edit generated reports.
+`status --json` shows work, budgets, decision requests and uncovered paths; `handoff` emits a replacement worker checkpoint. During blind review use `handoff --worker <own-role>`; it exposes only your task details and peer status, while unfiltered `status` and `handoff` can expose peer evidence. `export` regenerates `.reviews/design-review/exports/OPTIONS.md`, `COVERAGE.md`, `DECISIONS.md`, `SUMMARY.md`, and `TRANSCRIPT.html` from stored records/events, with current approval checks. Do not hand-edit generated reports.
 
 `pause --reason TEXT` stops new claims; `resume` reconstructs expired work without automatically repeating uncertain writes. `recover --data FILE` requires terminal `APPROVE`; JSON contains `task_id`, `outcome` (`completed`, `failed`, `cancelled`, `retry`) and factual `evidence`. When process termination cannot be observed, establish that the worker stopped: either pass `process_termination_evidence` with the recovery decision, or first use `recover --confirm-termination --data FILE` with only `task_id` and factual `evidence`. Then resolve or retry the task explicitly. Never retry uncertain execution solely because its lease expired.
 

@@ -61,6 +61,12 @@ def _parser():
     dispatch.add_argument('--timeout-seconds', type=_positive, default=DEFAULT_TASK_SECONDS)
     dispatch.add_argument('--recipient', default='coordinator', help='recipient of the final queued update')
     dispatch.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- executable [arguments]')
+    poll = commands.add_parser('poll', help='wait for peer messages and assigned work in an active agent chat')
+    poll.add_argument('--worker', required=True)
+    poll.add_argument('--after', type=int, default=0)
+    poll.add_argument('--wait-seconds', type=_positive, default=30)
+    poll.add_argument('--timeout-seconds', type=_positive, default=DEFAULT_TASK_SECONDS,
+                      help='follow-up execution budget, independent of the polling wait')
     task = commands.add_parser('task', help='manual task lifecycle operations')
     task.add_argument('action', choices=('enqueue', 'claim', 'submit', 'fail', 'cancel', 'renew', 'retry', 'progress'))
     task.add_argument('--data', help='administrative JSON request file, or - for stdin')
@@ -126,7 +132,8 @@ def _parser():
     recover.add_argument('--data', required=True, help='JSON task_id, outcome and evidence')
     recover.add_argument('--confirm-termination', action='store_true',
                          help='confirm an unobservable worker stopped before retrying it')
-    commands.add_parser('handoff', help='print a checkpoint for a replacement worker')
+    handoff = commands.add_parser('handoff', help='print a checkpoint for a replacement worker')
+    handoff.add_argument('--worker', help='show this worker\'s details and only peer task status')
     commands.add_parser('revise', help='capture changed inputs and invalidate prior approvals')
     proposal = commands.add_parser('protocol-proposal', help='record a change for a future protocol')
     proposal.add_argument('--text', required=True)
@@ -462,6 +469,10 @@ def _dispatch(store, args):
             command = command[1:]
         return dispatch_run(store.run_dir, command, timeout_seconds=args.timeout_seconds,
                             dialect_id=args.dialect, recipient=args.recipient)
+    if args.command == 'poll':
+        from .dispatcher import poll_worker
+        return poll_worker(store, args.worker, after=args.after, wait_seconds=args.wait_seconds,
+                           timeout_seconds=args.timeout_seconds)
     if args.command == 'discussion':
         from .notifications import set_discussion_active
         return set_discussion_active(store, args.recipient, args.action == 'begin')
@@ -562,7 +573,7 @@ def _dispatch(store, args):
         return resolve_uncertain_task(store, **data)
     if args.command == 'handoff':
         from .recovery import handoff
-        return handoff(store)
+        return handoff(store, worker=args.worker)
     if args.command == 'revise':
         return _revise(store, coordinator)
     if args.command == 'protocol-proposal':

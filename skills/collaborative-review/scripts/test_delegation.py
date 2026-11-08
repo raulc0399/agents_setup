@@ -29,7 +29,7 @@ class DelegationTests(unittest.TestCase):
         for index, task in enumerate(tasks, 1):
             payload = task['data']['payload']
             self.assertEqual(payload['scope_paths'], ['a.py', 'b.py'])
-            self.assertEqual(payload['timeout_seconds'], 30)
+            self.assertEqual(payload['timeout_seconds'], 18)
             self.assertNotIn('Never reveal this', str(payload))
             claimed = self.coordinator.claim_task(f'reviewer-{index}')
             self.assertEqual(claimed['id'], task['id'])

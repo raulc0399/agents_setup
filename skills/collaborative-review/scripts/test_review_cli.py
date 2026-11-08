@@ -21,6 +21,12 @@ for entry in request['snapshot']['files']:
     paths.append(path)
     proofs.append(path + ':sha256:' + hashlib.sha256(content).hexdigest())
 identity = 'coverage-' + request['task']['id']
+if request['task']['kind'] == 'discussion':
+    context = json.loads(request['task']['brief'].split('Source context: ', 1)[1])
+    for question in context['question_records']:
+        print('A id=answer-' + question['id'] + ' question=' + question['id'] +
+              ' text="Compared captured evidence" evidence=' + json.dumps(proofs))
+    raise SystemExit(0)
 print('COV id=' + identity + ' paths=' + json.dumps(paths) +
       ' status=reviewed evidence=' + json.dumps(proofs))
 print('VOTE verdict=APPROVED evidence=' + json.dumps([identity]))
@@ -72,9 +78,16 @@ class ReviewCliTests(unittest.TestCase):
     def approved(self):
         self.reviews()
         self.cli('check', expected=1)
+        self.cross_check()
         self.cli('challenge')
         self.assertEqual(self.work('challenger')['data']['status'], 'completed')
         self.assertEqual(self.cli('check')['result'], 'APPROVED')
+
+    def cross_check(self):
+        for worker in ('reviewer-1', 'reviewer-2'):
+            result = self.cli('poll', '--worker', worker, '--wait-seconds', '0.01')
+            self.assertEqual(result['state'], 'ready')
+            self.assertEqual(self.work(worker)['data']['status'], 'completed')
 
     def test_full_review_challenge_finish_and_exports(self):
         self.approved()
@@ -107,6 +120,7 @@ class ReviewCliTests(unittest.TestCase):
         self.grant()
         self.assertEqual(self.work('reviewer-1')['data']['status'], 'completed')
         self.assertEqual(self.work('reviewer-2')['data']['status'], 'completed')
+        self.cross_check()
         challenge = self.cli('challenge')
         context = json.loads(challenge['data']['payload']['brief'].split('Context: ', 1)[1])
         self.assertEqual(context['changed_paths'], ['input.txt'])
@@ -174,7 +188,9 @@ class ReviewCliTests(unittest.TestCase):
     def test_handoff_identifies_shared_run_and_second_reviewer_can_claim(self):
         self.cli('authorize', '--chat-approval', '-', input=json.dumps(self.chat_approval()))
         self.cli('plan')
-        checkpoint = self.cli('handoff')
+        completed = self.work('reviewer-1')
+        checkpoint = self.cli('handoff', '--worker', 'reviewer-2')
+        self.assertNotIn(completed['data']['result']['evidence_ids'][0], json.dumps(checkpoint))
         self.assertEqual(checkpoint['run_id'], 'sequence')
         self.assertEqual(checkpoint['run_dir'], str(self.run))
         self.assertEqual(checkpoint['project_root'], str(self.project))
@@ -190,6 +206,20 @@ class ReviewCliTests(unittest.TestCase):
         task = json.loads(claimed.stdout)
         self.assertEqual(task['data']['worker'], 'reviewer-2')
         self.assertEqual(task['data']['payload']['revision'], checkpoint['revision'])
+
+    def test_two_chats_poll_through_challenge_and_completion(self):
+        self.reviews()
+        self.cross_check()
+        first = self.cli('poll', '--worker', 'reviewer-1', '--wait-seconds', '0.01')
+        second = self.cli('poll', '--worker', 'reviewer-2', '--wait-seconds', '0.01')
+        self.assertEqual(len(first['challenge_tasks']), 1)
+        self.assertEqual(second['challenge_tasks'], [])
+        self.assertEqual(self.work('challenger')['data']['status'], 'completed')
+        for worker, previous in (('reviewer-1', first), ('reviewer-2', second)):
+            terminal = self.cli('poll', '--worker', worker, '--after', str(previous['next_after']),
+                                '--wait-seconds', '0.01')
+            self.assertEqual(terminal['state'], 'complete')
+            self.assertEqual(terminal['approval']['result'], 'APPROVED')
 
     def test_failed_adapter_retry_preserves_identity_and_history(self):
         self.grant()
@@ -208,6 +238,7 @@ class ReviewCliTests(unittest.TestCase):
         self.assertEqual(completed['data']['attempts'][0]['status'], 'failed')
         self.assertNotEqual(completed['data']['lease_id'], failed['data']['lease_id'])
         self.assertEqual(self.work('reviewer-2')['data']['status'], 'completed')
+        self.cross_check()
         self.cli('challenge')
         self.assertEqual(self.work('challenger')['data']['status'], 'completed')
         self.assertEqual(self.cli('finish')['result'], 'APPROVED')

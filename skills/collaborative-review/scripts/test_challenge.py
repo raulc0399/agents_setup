@@ -25,12 +25,26 @@ class ChallengeTests(unittest.TestCase):
         self.temp.cleanup()
 
     def reviews(self):
+        from review_core.aasm_records import prepare_result
+        from review_core.cli import _coordinator
+        from review_core.discussions import schedule_discussions
+        coordinator = _coordinator(self.store)
+        coordinator.clock = self.coordinator.clock
         tasks = plan_review(self.store, self.coordinator)
         for index, task in enumerate(tasks, 1):
             worker = f'reviewer-{index}'
-            claimed = self.coordinator.claim_task(worker)
-            self.coordinator.complete_task(task['id'], worker, claimed['data']['lease_id'], {})
-            self.coordinator.record_review(worker, 'rev', 'APPROVED', ['read:a.py'], task['id'])
+            claimed = coordinator.claim_task(worker)
+            body = (f'COV id=coverage-{worker} paths=["a.py"] status=reviewed evidence=["read:a.py"]\n'
+                    f'VOTE verdict=APPROVED evidence=["coverage-{worker}"]')
+            coordinator.complete_task(task['id'], worker, claimed['data']['lease_id'],
+                                      prepare_result(self.store, worker, body))
+        for task in schedule_discussions(self.store, coordinator):
+            worker = task['data']['payload']['worker']
+            claimed = coordinator.claim_task(worker, task_id=task['id'])
+            question = task['data']['payload']['question_ids'][0]
+            body = f'A id=answer-{worker} question={question} text="Checked peer evidence" evidence=["read:a.py"]'
+            coordinator.complete_task(task['id'], worker, claimed['data']['lease_id'],
+                                      prepare_result(self.store, worker, body))
         return tasks
 
     def complete(self, task, coverage=True, verdict='APPROVED'):
@@ -100,12 +114,12 @@ class ChallengeTests(unittest.TestCase):
 
     def test_challenge_uses_protected_budget(self):
         self.reviews()
-        self.store.set_meta('spent_seconds', 60)
+        self.store.set_meta('spent_seconds', 72)
         self.coordinator.enqueue_task('inspect', dict(revision='rev', brief='Other work',
             scope_paths=['a.py'], timeout_seconds=1), task_id='aaa-other')
         task = schedule_challenge(self.store, self.coordinator)
         self.assertIsNone(self.coordinator.claim_task('unassigned'))
-        self.assertEqual(task['data']['payload']['timeout_seconds'], 30)
+        self.assertEqual(task['data']['payload']['timeout_seconds'], 18)
         self.assertEqual(task['data']['payload']['budget_plan_id'], self.store.list_records('review_plan')[0]['id'])
         self.complete(task)
         self.assertEqual(challenge_gaps(self.store), [])
@@ -169,11 +183,11 @@ class ChallengeTests(unittest.TestCase):
         self.coordinator.fail_task(old['id'], 'challenger', claimed['data']['lease_id'], 'Stopped after five seconds')
         self.store.put_record('claim', 'new-context', dict(revision='rev', statement='Changed support'))
         replacement = schedule_challenge(self.store, self.coordinator)
-        self.assertEqual(replacement['data']['payload']['timeout_seconds'], 25)
+        self.assertEqual(replacement['data']['payload']['timeout_seconds'], 13)
         self.assertEqual(schedule_challenge(self.store, self.coordinator)['id'], replacement['id'])
         claimed = self.coordinator.claim_task('challenger')
         self.assertEqual(claimed['id'], replacement['id'])
-        self.assertEqual(claimed['data']['reserved_seconds'], 25)
+        self.assertEqual(claimed['data']['reserved_seconds'], 13)
 
     def test_running_challenge_allows_only_same_context_schedule(self):
         self.reviews()
