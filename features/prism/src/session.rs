@@ -6,7 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Child, Command};
 use uuid::Uuid;
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -713,12 +713,49 @@ impl TmuxClient {
         result
     }
 
-    pub fn attach(&self, pane: &PaneIdentity) -> io::Result<ExitStatus> {
+    /// The caller owns the client process and must reap it when attachment ends.
+    pub fn attach(&self, binding: &LiveBinding) -> io::Result<Child> {
+        self.verify_binding(binding)?;
+        let condition =
+            self.pane_condition(binding, &binding.cli.pane_id, binding.cli.pid, Some("cli"));
+        let attach = format!("attach-session -t {}", tmux_quote(&binding.cli.session_id));
         self.command()
-            .arg("attach-session")
+            .args(["if-shell", "-F"])
             .arg("-t")
-            .arg(&pane.session_id)
-            .status()
+            .arg(&binding.cli.pane_id)
+            .arg(condition)
+            .arg(attach)
+            .arg("display-message -p 'Prism binding changed; attachment refused' ; run-shell 'exit 1'")
+            .spawn()
+    }
+
+    pub fn select(&self, binding: &LiveBinding) -> io::Result<()> {
+        self.verify_binding(binding)?;
+        let condition =
+            self.pane_condition(binding, &binding.cli.pane_id, binding.cli.pid, Some("cli"));
+        let commands = format!(
+            "select-window -t {} ; select-pane -t {}",
+            tmux_quote(&binding.cli.window_id),
+            tmux_quote(&binding.cli.pane_id)
+        );
+        self.guarded_output(&binding.cli.pane_id, &condition, &commands)?;
+        Ok(())
+    }
+
+    /// Cleanup remains possible after the native server exits, but never adopts another pane.
+    pub fn cleanup_cli(&self, binding: &LiveBinding) -> io::Result<()> {
+        if self.identity()? != binding.tmux {
+            return Err(invalid("tmux server identity changed"));
+        }
+        self.verify_pane(&binding.cli, binding, "cli")?;
+        let condition =
+            self.pane_condition(binding, &binding.cli.pane_id, binding.cli.pid, Some("cli"));
+        self.guarded_output(
+            &binding.cli.pane_id,
+            &condition,
+            &format!("kill-pane -t {}", tmux_quote(&binding.cli.pane_id)),
+        )?;
+        Ok(())
     }
 }
 

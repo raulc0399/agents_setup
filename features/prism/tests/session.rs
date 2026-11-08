@@ -478,3 +478,48 @@ fn stale_bridge_writes_preserve_conversation_and_ui_and_cannot_revive_retirement
     assert!(runtime.write_binding(&stale).is_err());
     assert!(read_binding(&runtime.binding_path()).unwrap().retired);
 }
+
+#[test]
+fn select_and_cleanup_only_mutate_the_tagged_cli_pane() {
+    let project = TempDir::new().unwrap();
+    let server = Server::new();
+    let binding = server.binding(project.path());
+    server.client.select(&binding).unwrap();
+    assert_eq!(
+        server.command(&["display-message", "-p", "#{pane_id}"]),
+        binding.cli.pane_id
+    );
+    server.command(&[
+        "set-option",
+        "-p",
+        "-t",
+        &binding.cli.pane_id,
+        "@prism_role",
+        "unrelated",
+    ]);
+    assert!(server.client.select(&binding).is_err());
+    assert!(server.client.cleanup_cli(&binding).is_err());
+    assert_eq!(
+        server.command(&["list-panes", "-a", "-F", "#{pane_id}"]),
+        binding.cli.pane_id
+    );
+    server.command(&[
+        "set-option",
+        "-p",
+        "-t",
+        &binding.cli.pane_id,
+        "@prism_role",
+        "cli",
+    ]);
+    server.client.cleanup_cli(&binding).unwrap();
+}
+
+#[test]
+fn cleanup_does_not_require_the_native_server_to_remain_alive() {
+    let project = TempDir::new().unwrap();
+    let server = Server::new();
+    let mut binding = server.binding(project.path());
+    binding.server_pid = u32::MAX;
+    assert!(server.client.select(&binding).is_err());
+    server.client.cleanup_cli(&binding).unwrap();
+}

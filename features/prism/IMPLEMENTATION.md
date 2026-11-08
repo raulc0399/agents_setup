@@ -34,9 +34,9 @@ Further feature ownership is recorded before those agents start. Native integrat
 
 No application feature or live delivery is claimed complete until its checks pass. Credentials and authentication remain with each coding CLI. No secrets are committed. Local review coordinator artifacts under the repository's `.reviews/` are outside implementation commits.
 
-## Current implementation evidence
+## Checkpoint evidence (bcdbfae; superseded by resumed work)
 
-- Work stopped at the user's request; `HANDOVER.md` is the authoritative checkpoint and resume guide. The user explicitly requested committing unfinished work for handover; this checkpoint is not a release or final review approval.
+- At checkpoint bcdbfae, work stopped at the user's request; the committed `HANDOVER.md` recorded the resume guide. The user explicitly requested committing unfinished work for handover; this checkpoint is not a release or final review approval.
 - Development setup passed independent review and was committed as `59e801d`. Rust 1.99.1, rustfmt/clippy, Zig 0.17.1 and cargo-zigbuild 0.24.1 are installed user-locally.
 - Shared core: 16 tests passed; latest atomic question/draft change independently re-reviewed and approved.
 - Session feature: 12 tests passed; binding/pane race fixes independently re-reviewed and approved.
@@ -58,5 +58,8 @@ Codex probes/docs and `plugins/codex/`. The primary integrator owns `src/store.r
 - UI/diagrams/multiple views and Store migration independently approved after
   fixing UTF-8 cursor refresh and the diagram position limit; 23 UI, 7 diagram,
   and 19 core tests pass. Schema 1→2 preserves content and adds private UI state.
-- Bridge/Codex and launcher reviews requested corrections; fixes and re-review
-  remain underway. Native Start/Steer/Queue remain disabled.
+- Launcher/session independently approved after duplicate-resume, cancellation,
+  socket-bound and guarded-attachment fixes; 9 lifecycle, 3 routing and 14 session
+  tests pass, including actual tmux PTY terminal restoration.
+- Bridge/Codex timeout re-review and final integration checks remain underway.
+  Native Start/Steer/Queue remain disabled.
