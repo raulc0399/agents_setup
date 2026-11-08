@@ -41,8 +41,9 @@ def _parser():
     create.add_argument('--budget-seconds', type=_positive, default=DEFAULT_BUDGET_SECONDS)
     create.add_argument('--max-workers', type=int, choices=range(1, 33), default=2)
     create.add_argument('--participants', nargs='+', help='explicit participants for task-independent messaging')
-    authorize = commands.add_parser('authorize', help='operator confirms scoped actions interactively')
-    authorize.add_argument('--actions', nargs='+', default=['review', 'inspect'])
+    authorize = commands.add_parser('authorize', help='record chat approval or confirm scoped actions interactively')
+    authorize.add_argument('--chat-approval', help='user approval JSON file, or - for stdin')
+    authorize.add_argument('--actions', nargs='+')
     authorize.add_argument('--paths', nargs='+')
     authorize.add_argument('--expires-at', type=_positive)
     authorize.add_argument('--revoke')
@@ -234,21 +235,27 @@ def _create(args):
                 store.set_meta('status', 'ready')
                 store.append_event('run.created', run.name, {'revision': snapshot['revision'], 'policies': policies})
             return {'run': str(run), 'revision': snapshot['revision'], 'status': 'ready',
-                    'next': 'operator authorization is required before work can be claimed'}
+                    'next': 'user approval in chat or an operator terminal is required before work can be claimed'}
         except (ValueError, OSError, StoreError):
             store.set_meta('status', 'setup_failed')
             raise
 
 
 def _authorize(store, args):
-    from .authorization import record_authorization, revoke_authorization
+    from .authorization import record_authorization, record_chat_authorization, revoke_authorization
 
-    details = {'revision': store.get_meta('revision'), 'actions': args.actions,
+    if args.chat_approval is not None:
+        if (args.actions is not None or args.paths is not None or args.expires_at is not None
+                or args.revoke is not None or args.reason != 'operator revoked authorization'):
+            raise ValueError('--chat-approval cannot be combined with terminal authorization options')
+        return record_chat_authorization(store, _object(args.chat_approval))
+
+    details = {'revision': store.get_meta('revision'), 'actions': args.actions or ['review', 'inspect'],
                'paths': args.paths or store.get_meta('paths'), 'expires_at': args.expires_at}
     if args.revoke:
         details = {'revoke': args.revoke, 'reason': args.reason}
     if not sys.stdin.isatty():
-        raise PermissionError('authorization requires an operator terminal; unattended approval is unavailable')
+        raise PermissionError('use --chat-approval to record user consent, or authorize in an operator terminal')
     print(json.dumps(details, indent=2), file=sys.stderr)
     print('Type APPROVE to record this operator decision: ', end='', file=sys.stderr, flush=True)
     if input().strip() != 'APPROVE':

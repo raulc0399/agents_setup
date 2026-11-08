@@ -32,7 +32,7 @@ REVIEW=/absolute/path/to/agents_setup/skills/collaborative-review/scripts/review
 ADAPTER=/absolute/path/to/your-approved-worker-adapter
 python3 "$REVIEW" doctor --project "$PWD" -- "$ADAPTER"
 python3 "$REVIEW" --run design-review create --project "$PWD" --paths design.md --approval-scope technical-plan --budget-seconds 3600 --max-workers 2
-python3 "$REVIEW" --run design-review authorize --actions review inspect --paths design.md
+python3 "$REVIEW" --run design-review authorize --chat-approval /absolute/path/to/chat-approval.json
 python3 "$REVIEW" --run design-review plan
 python3 "$REVIEW" --run design-review work --worker reviewer-1 --timeout-seconds 300 -- "$ADAPTER"
 python3 "$REVIEW" --run design-review work --worker reviewer-2 --timeout-seconds 300 -- "$ADAPTER"
@@ -42,7 +42,33 @@ python3 "$REVIEW" --run design-review check
 python3 "$REVIEW" --run design-review export
 ```
 
-`authorize` displays the exact revision, actions and paths and requires the operator to type `APPROVE` in a terminal; there is no unattended approval flag. Review permission does not authorize implementing recommendations, deployment or destructive actions. Commands enforce scoped authorization within a trusted local process model; this is not an OS sandbox. `doctor` performs local temporary-file and subprocess lock probes without launching your adapter, installing packages or contacting accounts; successful probes cannot certify storage durability.
+The lead presents the captured scope in chat, accepts the user's explicit approval, and records it with `authorize --chat-approval FILE` (`-` reads stdin). The JSON contains exactly these fields, filled from the real run and approving exchange:
+
+```json
+{
+  "run_id": "design-review",
+  "revision": "<exact revision from create or handoff>",
+  "approval_scope": "technical-plan",
+  "actions": ["review", "inspect"],
+  "paths": ["design.md"],
+  "message": "<actual user approval message>",
+  "reference": "<conversation/message reference or accurate exchange description>"
+}
+```
+
+The helper checks run identity, current revision, approval scope and captured paths, then stores the approval message/reference with the grant. It trusts the calling agent to relay real user consent; it cannot authenticate chat history or interpret approval language. Do not combine `--chat-approval` with terminal authorization options. Calling `authorize` without that option retains the interactive terminal flow. Review permission does not authorize implementing recommendations, deployment or destructive actions. Commands enforce scoped authorization within a trusted local process model; this is not an OS sandbox. `doctor` performs local temporary-file and subprocess lock probes without launching your adapter, installing packages or contacting accounts; successful probes cannot certify storage durability.
+
+After approval, run `plan` and `handoff`, then give the user the review ID and a joining prompt such as:
+
+```text
+Use $collaborative-review. Join review <review-id> as reviewer-2.
+Project: <absolute-project>; shared run directory: <absolute-run-directory>.
+Revision: <captured-revision>. Task: <user's requirements and feature brief>.
+Read handoff for that existing run, verify its scope/revision, claim only reviewer-2,
+and review the pinned inputs independently; do not edit source files or create another run.
+```
+
+Agent 2 uses the run directory's parent as `--root` and its name as `--run`. Both sessions need access to the same reliable local storage; the ID alone does not connect remote machines. Joining does not require new authorization for the unchanged scope. If reviewer-2 is already claimed or completed, report that state. Initial findings stay independent until both reviews finish. Existing runs keep their frozen helper version; start a fresh run to use a new authorization workflow rather than editing a frozen bundle.
 
 Both reviewers must supply real evidence and reviewed coverage for every captured file; missing or blocked results keep `check` blocked. `plan --risk NAME --specialist NAME` adds requested specialist work, which needs additional `work` invocations. Workers may run concurrently within `--max-workers`; each `work` invocation runs one task. `check` exits 0 for approved, 1 for blocked, 2 for invalid requests; `finish` marks the run complete only after checks approve.
 

@@ -123,6 +123,74 @@ class ReviewCliTests(unittest.TestCase):
             self.assertEqual(store.events(), before)
             self.assertEqual(store.list_records('authorization'), [])
 
+    def chat_approval(self, **changes):
+        approval = {'run_id': 'sequence', 'revision': self.cli('status', '--json')['revision'],
+                    'approval_scope': 'technical-plan', 'actions': ['review', 'inspect'],
+                    'paths': ['input.txt'], 'message': 'Go ahead with this review.',
+                    'reference': 'lead chat: user reply to the displayed review scope'}
+        approval.update(changes)
+        return approval
+
+    def test_chat_approval_records_evidence_and_allows_scoped_work(self):
+        approval = self.chat_approval()
+        grant = self.cli('authorize', '--chat-approval', '-', input=json.dumps(approval))
+        self.assertEqual(grant['data']['actor'], 'user')
+        self.assertEqual(grant['data']['approval'], {
+            'source': 'chat', 'message': approval['message'], 'reference': approval['reference']})
+        self.assertEqual(grant['data']['revision'], approval['revision'])
+        self.assertEqual(grant['data']['actions'], ['inspect', 'review'])
+        self.assertEqual(grant['data']['paths'], ['input.txt'])
+        self.cli('inspect', '--paths', 'input.txt')
+        self.cli('plan')
+        self.assertEqual(self.work('reviewer-1')['data']['status'], 'completed')
+
+    def test_invalid_chat_approval_does_not_mutate(self):
+        valid = self.chat_approval()
+        invalid = [dict(valid, **change) for change in (
+            {'run_id': 'other'}, {'revision': 'stale'}, {'approval_scope': 'implementation-ready'},
+            {'paths': ['.']}, {'paths': []}, {'actions': []}, {'message': ' '},
+            {'reference': ''}, {'unexpected': 'value'})]
+        invalid.append({key: value for key, value in valid.items() if key != 'reference'})
+        with Store(self.run, readonly=True) as store:
+            before = store.events()
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                self.cli('authorize', '--chat-approval', '-', expected=2, input=json.dumps(payload))
+        for flags in (('--actions', 'execute'), ('--paths', '.'), ('--revoke', 'missing'),
+                      ('--expires-at', '9999999999'), ('--reason', 'changed')):
+            self.cli('authorize', '--chat-approval', '-', *flags, expected=2, input=json.dumps(valid))
+        with Store(self.run, readonly=True) as store:
+            self.assertEqual(store.events(), before)
+            self.assertEqual(store.list_records('authorization'), [])
+
+    def test_chat_approval_does_not_transfer_to_changed_revision(self):
+        approval = self.chat_approval()
+        self.cli('authorize', '--chat-approval', '-', input=json.dumps(approval))
+        (self.project / 'input.txt').write_text('changed review input\n')
+        self.cli('revise')
+        self.cli('inspect', '--paths', 'input.txt', expected=2)
+        self.cli('authorize', '--chat-approval', '-', expected=2, input=json.dumps(approval))
+
+    def test_handoff_identifies_shared_run_and_second_reviewer_can_claim(self):
+        self.cli('authorize', '--chat-approval', '-', input=json.dumps(self.chat_approval()))
+        self.cli('plan')
+        checkpoint = self.cli('handoff')
+        self.assertEqual(checkpoint['run_id'], 'sequence')
+        self.assertEqual(checkpoint['run_dir'], str(self.run))
+        self.assertEqual(checkpoint['project_root'], str(self.project))
+        self.assertEqual(checkpoint['paths'], ['input.txt'])
+        self.assertEqual(checkpoint['approval_scope'], 'technical-plan')
+        request = json.dumps({'worker': 'reviewer-2'})
+        claimed = subprocess.run([
+            sys.executable, '-B', str(Path(checkpoint['run_dir']) / 'protocol' / 'review.py'),
+            '--root', str(Path(checkpoint['run_dir']).parent), '--run', checkpoint['run_id'],
+            'task', 'claim', '--data', '-'], cwd=self.base, input=request,
+            text=True, capture_output=True, timeout=30)
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        task = json.loads(claimed.stdout)
+        self.assertEqual(task['data']['worker'], 'reviewer-2')
+        self.assertEqual(task['data']['payload']['revision'], checkpoint['revision'])
+
     def test_failed_adapter_retry_preserves_identity_and_history(self):
         self.grant()
         self.cli('plan')

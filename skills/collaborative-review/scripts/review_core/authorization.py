@@ -51,7 +51,7 @@ def _actions(actions):
     return sorted(set(actions))
 
 
-def record_authorization(store, revision, actions, paths, expires_at=None, actor='operator', decision='approved'):
+def record_authorization(store, revision, actions, paths, expires_at=None, actor='operator', decision='approved', approval=None):
     """Record a new immutable decision; later revocation never changes it."""
     _text(revision, 'Revision')
     _text(actor, 'Actor')
@@ -63,8 +63,37 @@ def record_authorization(store, revision, actions, paths, expires_at=None, actor
         _timestamp(expires_at, 'Expiry')
     data = {'revision': revision, 'actions': actions, 'paths': paths,
             'expires_at': expires_at, 'actor': actor, 'decision': decision}
+    if approval is not None:
+        if not isinstance(approval, dict) or set(approval) != {'source', 'message', 'reference'}:
+            raise ValueError('Approval evidence requires source, message and reference')
+        if approval['source'] != 'chat':
+            raise ValueError('Unsupported approval evidence source')
+        _text(approval['message'], 'Approval message')
+        _text(approval['reference'], 'Approval reference')
+        data['approval'] = dict(approval)
     return store.put_record('authorization', 'authorization-' + uuid.uuid4().hex, data,
                             actor=actor, event='authorization.recorded', expected_version=0)
+
+
+def record_chat_authorization(store, request):
+    """Record user approval relayed by a trusted chat agent for this exact run."""
+    fields = {'run_id', 'revision', 'approval_scope', 'actions', 'paths', 'message', 'reference'}
+    if not isinstance(request, dict) or set(request) != fields:
+        raise ValueError('Chat approval requires exactly: ' + ', '.join(sorted(fields)))
+
+    with store.transaction():
+        if request['run_id'] != store.run_dir.name:
+            raise ValueError('Chat approval run does not match this run')
+        if request['revision'] != store.get_meta('revision'):
+            raise ValueError('Chat approval revision is stale or does not match this run')
+        if request['approval_scope'] != store.get_meta('approval_scope'):
+            raise ValueError('Chat approval scope does not match this run')
+        if canonical_paths(request['paths']) != canonical_paths(store.get_meta('paths')):
+            raise ValueError('Chat approval paths must match the displayed captured scope')
+
+        evidence = {'source': 'chat', 'message': request['message'], 'reference': request['reference']}
+        return record_authorization(store, request['revision'], request['actions'], request['paths'],
+                                    actor='user', approval=evidence)
 
 
 def revoke_authorization(store, authorization_id, actor='operator', reason=''):

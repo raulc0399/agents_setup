@@ -13,12 +13,22 @@ Agree on explicit existing input paths and approval scope: `technical-plan`, `im
 
 `create` captures immutable inputs and pins the executable protocol and policies in `.reviews/<run-id>/`. Never hand-edit its database, snapshots, workspaces, or generated exports. Use a new run ID for a different scope. The local SQLite coordinator requires a reliable local filesystem; it is not an OS sandbox for trusted worker commands.
 
-Before claiming work, an operator must run `authorize` in a terminal, inspect the exact revision/actions/paths, and type `APPROVE`. Request only required actions (`review`, `inspect`, or separately authorized `execute`); agents must not grant themselves authority or invent unattended approval flags. A new captured revision needs new authorization.
+Before claiming work, present the review ID, captured revision, input paths, approval scope, and required actions in chat. Accept the user's explicit chat approval, including an unambiguous "go" replying to that scope; reuse approval already given for the same scope and revision. Record that consent through `authorize --chat-approval FILE` rather than asking the user to run a terminal command. Request only required actions (`review`, `inspect`, or separately authorized `execute`); never invent user consent. A new captured revision needs new authorization.
+
+## Chat approval and a second agent
+
+The approval JSON requires exactly `run_id`, `revision`, `approval_scope`, `actions`, `paths`, `message`, and `reference`. Copy the actual approval message into `message`; use a real conversation/message reference, or an accurate description of the approving exchange if no message ID is available. Take the run, revision and scope from `handoff` or the creation result, not memory. `paths` must match the captured paths. The helper records consent relayed by a trusted agent; it cannot authenticate chat history or determine whether text means approval.
+
+Run `python3 /absolute/path/to/scripts/review.py --root <run-collection> --run <review-id> authorize --chat-approval <approval.json>`; `-` reads the JSON from stdin. The existing terminal `authorize` flow remains optional. This records review permission, not a review verdict or permission to implement recommendations.
+
+After recording approval, run `plan` and `handoff`. Give the user a copyable joining prompt containing the review ID, absolute project and run directories, pinned revision, assigned role (`reviewer-2`), and a short task/feature brief. The joining agent needs access to that same local run directory; a review ID is not a remote invitation. When the user intends to bring a second agent, provide this handoff instead of silently substituting a spawned agent.
+
+The joining prompt should tell agent 2 to use this skill, read `handoff` for the existing run, confirm its scope/revision, claim only its assigned role with `task claim --data -`, and inspect the pinned inputs. Do not create another run, repeat authorization, or claim the other reviewer's task. If the assigned task is already owned or completed, report its state rather than assuming ownership. Share the user's requirements, but keep initial findings independent until both reviews finish; then discuss and adapt only the separately authorized source files. Use `task submit` with the actual task/lease IDs and the normal AASM coverage/verdict requirements.
 
 ## Review workflow
 
 - Run `doctor`, then `create --project <absolute-project> --paths <files-or-directories> --approval-scope <scope> --budget-seconds <seconds> --max-workers <count>`. Put global `--run <id>` and optional `--root <directory>` before the command.
-- After operator authorization, run `plan`. It creates blind whole-scope tasks for `reviewer-1` and `reviewer-2`, plus only requested `--risk` or `--specialist` work, and reserves challenge budget. Keep the initial reviews independent; do not share peer findings before both complete. One worker slot permits sequential independent reviews.
+- After recording user authorization, run `plan`. It creates blind whole-scope tasks for `reviewer-1` and `reviewer-2`, plus only requested `--risk` or `--specialist` work, and reserves challenge budget. Keep the initial reviews independent; do not share peer findings before both complete. One worker slot permits sequential independent reviews.
 - Prefer `dispatch --timeout-seconds <seconds> --recipient <chat-identity> -- <absolute-adapter> [arguments]` after `plan` for continuous bounded scheduling of reviews, explicit peer questions and the final challenge. It wakes on completed local work and returns concrete blockers when no progress is possible; it never grants authority or retries failures.
 - Run `work --worker reviewer-1 --timeout-seconds <seconds> -- <absolute-adapter> [arguments]` and the equivalent for `reviewer-2`. Each command runs one claimable task. Use the assigned identity; never complete another worker's lease. The adapter reviews its isolated snapshot copy, not moving project files.
 - When independent reviews and required specialist work finish, run `challenge`, then `work --worker challenger ...`. The challenger checks integration, changes, assumptions, and recovery using current findings; it must be independent of the initial reviewers.
@@ -47,7 +57,7 @@ The fixed `aasm-1` grammar permits declarative vocabulary extensions, never exec
 
 ## Changes, retries, and recovery
 
-Apply separately authorized input changes outside the snapshot, then run `revise`. Review the new revision and renew operator authorization; old approvals do not transfer. Do not implement the reviewed plan as a consequence of approval.
+Apply separately authorized input changes outside the snapshot, then run `revise`. Review the new revision and renew user authorization in chat; old approvals do not transfer. Do not implement the reviewed plan as a consequence of approval.
 
 Use `status --json` and `handoff` for current work, decisions, and checkpoints. `pause --reason <text>` prevents new claims; `resume` recovers expired readonly work. Cancellation of running work retains its lease/capacity until termination is acknowledged. Explicit `task retry --data <JSON-file>` takes `task_id` and `reason`, preserving history for failed/cancelled current tasks; do not loop retries without diagnosing the failure. Possibly live processes must terminate first. Uncertain execution effects require operator-confirmed `recover` with evidence; never blindly repeat mutations.
 

@@ -70,7 +70,10 @@ def handoff(store, now=None):
         spent = store.get_meta('spent_seconds', 0)
         reserved = sum(t['data'].get('reserved_seconds', 0) for t in tasks)
         budget = store.get_meta('budget_seconds', 0)
-        return {'status': store.get_meta('status'), 'revision': store.get_meta('revision'),
+        return {'run_id': store.run_dir.name, 'run_dir': str(store.run_dir),
+                'project_root': store.get_meta('project_root'), 'paths': store.get_meta('paths'),
+                'approval_scope': store.get_meta('approval_scope'),
+                'status': store.get_meta('status'), 'revision': store.get_meta('revision'),
                 'tasks': tasks, 'unfinished_task_ids': [t['id'] for t in tasks
                     if t['data']['status'] not in ('completed', 'failed', 'cancelled')],
                 'operator_decisions': [t['id'] for t in tasks if t['data']['status'] == 'uncertain' or

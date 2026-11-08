@@ -18,10 +18,9 @@ Use an absolute helper path appropriate to the installation. The examples run fr
 ```bash
 REVIEW="$HOME/.agents/skills/collaborative-review/scripts/review.py"
 python3 "$REVIEW" --run research-001 create --project "$PWD" --paths research/BRIEF.md src --approval-scope report-ready --budget-seconds 1800 --max-workers 2
-python3 "$REVIEW" --run research-001 authorize --actions review inspect --paths research/BRIEF.md src
 ```
 
-The operator confirms the displayed exact authorization by typing `APPROVE` in a terminal. Agents cannot grant their own authority. Obtain the captured `revision` from `status --json`; record creation requires that exact value, not a branch name or working-tree hash.
+Present the captured scope in chat and record the user's explicit approval with `authorize --chat-approval FILE`, following the shared review skill's approval JSON contract. Reuse approval already given for that scope and revision; do not require a terminal confirmation or invent consent. Obtain the captured `revision` from `status --json`; record creation requires that exact value, not a branch name or working-tree hash. After authorization and `plan`, provide the review ID, shared run directory, revision, assigned role, and a copyable joining prompt for the second agent as described in the shared skill.
 
 ## Sources and claims
 
