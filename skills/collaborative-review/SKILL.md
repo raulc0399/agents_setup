@@ -5,6 +5,8 @@ description: Review plans or code with two independent concern teams, automatic 
 
 # Collaborative review
 
+At the start of each new, joining or resumed session, give the user the [session overview](references/teams.md#session-overview): goal, expected result, current phase, who does what, and how Agent 2 joins. Present it before creating or claiming tasks or launching concern subagents; provide the actual joining prompt once setup supplies the real run details.
+
 Use `scripts/review.py` from this skill's installed directory, running from the project directory. Codex installs normally use `~/.agents/skills/collaborative-review/`; Claude installs use `~/.claude/skills/collaborative-review/`. Use an absolute script path; do not assume it exists in the reviewed project. Detailed CLI recipes and schemas are in the repository `README.md`; command `--help` is authoritative for installed flags.
 
 Read [concern teams and automatic communication](references/teams.md) before starting or joining. Both `reviewer-1` and `reviewer-2` are team leads: each must spawn its own subagent for every relevant concern, consolidate the evidence, and keep processing peer work automatically. The helper schedules tasks; host delegation tools or a capable adapter run the subagents.

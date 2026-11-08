@@ -5,6 +5,8 @@ description: Research a question for the user's case with captured sources, inde
 
 # Collaborative research
 
+At the start of each new, joining or resumed session, give the user the [session overview](../collaborative-review/references/teams.md#session-overview): research question, expected recommendation/report, current phase, who does what, and how Agent 2 joins. Present it before research collection, task creation/claims or concern delegation; explain that the actual joining prompt follows initial evidence collection and planning.
+
 Use the installed `collaborative-review/SKILL.md` for the shared coordinator and worker adapter contract. Codex installs skills under `~/.agents/skills`; Claude installs them under `~/.claude/skills`. New runs use that skill's `scripts/review.py`, SQLite records, and generated exports.
 
 Read its [concern teams and automatic communication](../collaborative-review/references/teams.md) reference before starting or joining. Each lead must use its own concern subagents, consolidate their evidence, and automatically process peer messages and follow-up tasks. Keep the two teams independent until both initial reviews are submitted.

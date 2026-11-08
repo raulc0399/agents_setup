@@ -30,6 +30,17 @@ reviewer-1                              reviewer-2
                   check and export
 ```
 
+## Session overview
+
+The agent speaking with the user opens each new, joining or resumed session with a concise overview before starting substantive work:
+
+- Goal and result: name the user's question or reviewed files and the expected recommendation, review verdict or report.
+- Current phase: say whether this is setup, research collection, independent review, cross-checking, point agreement or final challenge; identify this chat's role.
+- Who does what: Agent 1 coordinates setup and its own concern team; Agent 2 independently covers the same scope with a separate team; a fresh challenger checks the integrated result later. Name known concern assignments and actual agent identities, clearly marking work that is only planned.
+- Joining: for a separate Agent 2 chat, explain that the user pastes the forthcoming joining prompt into a session with access to the same project and run directory. Say when it will appear: after authorization, `plan` and `handoff`; research first collects its initial evidence and recommendation. If Agent 2 is already present or explicitly delegated, report that actual arrangement.
+
+For joining or resumed sessions, first verify the existing run using `handoff --worker <own-role>`; summarize the current role and next action without exposing private peer findings. Do not invent run IDs, revisions, running workers or completed work to fill the overview. This overview adds no approval gate: continue authorized work, and Agent 1 does not wait for Agent 2 to join after publishing the prompt.
+
 ## Start independent teams
 
 Each lead claims its own whole-scope task and identifies relevant concerns from the user's requirements and captured inputs. Use the concerns in the joining brief and add any others the scope requires. Concerns are concrete review questions, such as retry correctness or source freshness, not an obligatory fixed list.
@@ -59,9 +70,11 @@ The first `poll` or dispatcher cycle after every blind task completes publishes 
 
 ## Joining prompt
 
-Include the skill's absolute path, run ID, project/run directories, pinned revision, assigned role, requirements and concern brief. Tell the joining agent to use `handoff --worker reviewer-2`, then add:
+After setup, display the joining prompt in a copyable code block using the verified skill path, run ID, absolute project/run directories, pinned revision, assigned role, requirements and concern brief. Explain that both sessions need access to that same run directory. Tell the joining agent to use `handoff --worker reviewer-2`, then add:
 
 ```text
+Give the user a brief session overview: goal, expected result, current phase,
+your reviewer-2 role, each team's responsibilities and the next action.
 Claim only reviewer-2 and immediately start your own read-only concern subagents.
 Keep your team independent until both blind reviews are submitted.
 After submission, automatically poll as reviewer-2, process peer messages, claim
