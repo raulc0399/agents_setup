@@ -114,7 +114,7 @@ def _parser():
     record.add_argument('kind', choices=('finding', 'finding-update', 'question', 'answer', 'option',
                                        'question-update', 'option-update', 'coverage', 'coverage-update',
                                        'assumption', 'assumption-verify', 'source',
-                                       'claim', 'claim-verify', 'recommendation', 'review'))
+                                       'claim', 'claim-verify', 'claim-retire', 'recommendation', 'recommendation-retire', 'review'))
     record.add_argument('--data', required=True, help='JSON object file, or - for stdin')
     inspect = commands.add_parser('inspect', help='read or search immutable input files')
     inspect.add_argument('--paths', nargs='+')
@@ -275,7 +275,7 @@ def _authorize(store, args):
 def _record(store, coordinator, kind, data):
     from . import findings
     from .assumptions import add_assumption, verify_assumption
-    from .research import add_source, add_claim, verify_claim, add_recommendation
+    from .research import add_source, add_claim, verify_claim, add_recommendation, retire_claim, retire_recommendation
 
     writers = {'finding': findings.create_finding, 'finding-update': findings.update_finding,
                'question': findings.create_question, 'answer': findings.answer_question,
@@ -284,7 +284,8 @@ def _record(store, coordinator, kind, data):
                'coverage-update': findings.update_coverage,
                'assumption': add_assumption, 'assumption-verify': verify_assumption,
                'source': add_source, 'claim': add_claim, 'claim-verify': verify_claim,
-               'recommendation': add_recommendation}
+               'claim-retire': retire_claim, 'recommendation': add_recommendation,
+               'recommendation-retire': retire_recommendation}
     if kind == 'review':
         return coordinator.record_review(**data)
     return writers[kind](store, **data)

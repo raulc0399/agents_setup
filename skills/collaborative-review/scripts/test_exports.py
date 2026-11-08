@@ -56,6 +56,21 @@ class ExportTests(unittest.TestCase):
                          'reviewer-1', 'partial', 'Traced caller; test lookup failed; network untested'):
             self.assertIn(expected, summary)
 
+    def test_summary_keeps_retired_research_with_resolution_and_replacement(self):
+        from review_core import research
+        research.add_claim(self.store, 'author', 'current', 'Refuted claim', claim_id='old-claim')
+        research.add_claim(self.store, 'author', 'current', 'Corrected claim', claim_id='new-claim')
+        research.add_recommendation(self.store, 'author', 'current', 'Abandoned choice', ['old-claim'],
+                                    'Original case', recommendation_id='old-rec')
+        research.add_recommendation(self.store, 'author', 'current', 'Corrected choice', ['new-claim'],
+                                    'Updated case', recommendation_id='new-rec')
+        research.retire_claim(self.store, 'old-claim', 'verifier', ['Evidence refutes claim'], replacement_id='new-claim')
+        research.retire_recommendation(self.store, 'old-rec', 'author', ['Recommendation replaced'], replacement_id='new-rec')
+        summary = Path(export_run(self.store, self.approval)['SUMMARY.md']).read_text()
+        for expected in ('retired', 'Abandoned choice', 'Corrected choice', 'Evidence refutes claim',
+                         'Recommendation replaced', 'verifier', 'new-claim', 'new-rec'):
+            self.assertIn(expected, summary)
+
     def test_transcript_escapes_content_and_only_links_existing_safe_anchors(self):
         evil = '\"><script>alert(1)</script><img src=x onerror=alert(2)>'
         self.row('question', evil, revision='current', text=evil, answer_id='javascript:alert(1)')

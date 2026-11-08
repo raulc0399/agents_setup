@@ -1,6 +1,7 @@
 """Captured research provenance and human-attested, revision-bound support."""
 from datetime import date
 import hashlib
+import json
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
@@ -9,6 +10,53 @@ import uuid
 
 VERIFICATIONS = ('unverified', 'verified', 'disputed')
 IMPACTS = ('decision-changing', 'not-decision-changing')
+RESEARCH_KINDS = ('source', 'claim', 'recommendation')
+CLAIM_ATTESTATION_FIELDS = ('verification', 'evidence', 'verified_by', 'creation_request')
+
+
+def research_context(store):
+    """Capture common research inputs; verification attestations are review outputs."""
+    with store.read_transaction():
+        revision = store.get_meta('revision')
+        records = {kind: [dict(id=row['id'], data=row['data']) for row in store.list_records(kind)
+                          if row['data'].get('revision') == revision] for kind in RESEARCH_KINDS}
+        material = {}
+        for kind, rows in records.items():
+            material[kind] = []
+            for row in rows:
+                data = {key: value for key, value in row['data'].items() if key != 'creation_request'}
+                if kind == 'claim':
+                    data = {key: value for key, value in data.items() if key not in CLAIM_ATTESTATION_FIELDS}
+                    data['disputed'] = row['data'].get('verification') == 'disputed'
+                material[kind].append(dict(id=row['id'], data=data))
+            material[kind].sort(key=lambda row: row['id'])
+        fingerprint = hashlib.sha256(json.dumps(dict(revision=revision, records=material),
+                                     sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        return dict(revision=revision, records=records, fingerprint=fingerprint)
+
+
+def visible_research_context(store):
+    """During blind work expose only the inputs frozen before either team began."""
+    from .consensus import blind_pending
+
+    if store.get_meta('approval_scope') != 'report-ready':
+        return None
+    if blind_pending(store):
+        plans = [row for row in store.list_records('review_plan')
+                 if row['data']['request']['revision'] == store.get_meta('revision')]
+        return plans[0]['data'].get('research_context') if len(plans) == 1 else None
+    return research_context(store)
+
+
+def research_review_gaps(store):
+    if store.get_meta('approval_scope') != 'report-ready':
+        return []
+    current = research_context(store)
+    return [dict(kind='research-review', id=row['id'], reviewer=row['data']['reviewer'],
+                 reason='Research evidence changed; independently reassess and record the current fingerprint')
+            for row in store.list_records('review')
+            if row['data']['revision'] == current['revision']
+            and row['data'].get('research_fingerprint') != current['fingerprint']]
 
 
 def _text(value, label):
@@ -44,8 +92,8 @@ def _create(store, kind, record_id, data):
         raise ValueError('Invalid record ID')
     old = store.get_record(kind, record_id)
     if old:
-        old_request = old['data'].get('creation_request', old['data']) if kind == 'claim' else old['data']
-        new_request = data.get('creation_request', data) if kind == 'claim' else data
+        old_request = old['data'].get('creation_request', old['data']) if kind in ('claim', 'recommendation') else old['data']
+        new_request = data.get('creation_request', data) if kind in ('claim', 'recommendation') else data
         if old_request != new_request:
             raise ValueError(f'{kind} is immutable; use a new ID')
         return old
@@ -121,7 +169,44 @@ def add_recommendation(store, author, revision, text, claim_ids, case_basis, rec
         if not claims:
             raise ValueError('Recommendations require supporting claims')
         data = dict(author=author, revision=revision, text=text, claim_ids=claims, case_basis=case_basis)
+        if recommendation_id is None or store.get_record('recommendation', recommendation_id) is None:
+            if any(store.get_record('claim', claim)['data'].get('status') == 'retired' for claim in claims):
+                raise ValueError('Recommendations cannot use retired claims')
         return _create(store, 'recommendation', recommendation_id, data)
+
+
+def _retire(store, kind, record_id, actor, evidence, replacement_id):
+    _text(actor, 'actor')
+    evidence = _strings(evidence, 'retirement evidence')
+    if not evidence:
+        raise ValueError('Retirement requires evidence')
+    with store.transaction():
+        row = store.get_record(kind, _text(record_id, 'record ID'))
+        if row is None:
+            raise ValueError('Unknown ' + kind)
+        data = dict(row['data'])
+        _context(store, actor, data['revision'])
+        retirement = dict(status='retired', retired_by=actor, retirement_evidence=evidence,
+                          replacement_id=replacement_id)
+        if data.get('status') == 'retired':
+            if any(data.get(key) != value for key, value in retirement.items()):
+                raise ValueError('Retirement is immutable')
+            return row
+        if replacement_id is not None:
+            _refs(store, kind, [replacement_id], data['revision'])
+            if replacement_id == record_id or store.get_record(kind, replacement_id)['data'].get('status') == 'retired':
+                raise ValueError('Replacement must be a different active ' + kind)
+        data.setdefault('creation_request', dict(data))
+        data.update(retirement)
+        return store.put_record(kind, record_id, data, actor=actor, event=kind + '.retired', expected_version=row['version'])
+
+
+def retire_claim(store, claim_id, actor, evidence, replacement_id=None):
+    return _retire(store, 'claim', claim_id, actor, evidence, replacement_id)
+
+
+def retire_recommendation(store, recommendation_id, actor, evidence, replacement_id=None):
+    return _retire(store, 'recommendation', recommendation_id, actor, evidence, replacement_id)
 
 
 def research_gaps(store):
@@ -129,19 +214,25 @@ def research_gaps(store):
     revision = store.get_meta('revision')
     claims = {row['id']: row['data'] for row in store.list_records('claim') if row['data'].get('revision') == revision}
     sources = {row['id']: row['data'] for row in store.list_records('source') if row['data'].get('revision') == revision}
-    recommendations = [row for row in store.list_records('recommendation') if row['data'].get('revision') == revision]
+    recommendations = [row for row in store.list_records('recommendation')
+                       if row['data'].get('revision') == revision and row['data'].get('status') != 'retired']
     gaps = []
     if not recommendations:
         gaps.append({'id': None, 'reason': 'No current recommendation'})
     recommended_claims = {claim_id for row in recommendations for claim_id in row['data'].get('claim_ids', [])}
     for claim_id, claim in claims.items():
+        if claim.get('status') == 'retired':
+            if claim_id in recommended_claims:
+                gaps.append({'id': claim_id, 'reason': 'Active recommendation uses a retired claim'})
+            continue
         if claim.get('impact') != 'decision-changing' and claim_id not in recommended_claims:
             continue
         if not claim.get('source_ids') or any(source_id not in sources for source_id in claim['source_ids']):
             gaps.append({'id': claim_id, 'reason': 'Missing current captured source support'})
         if claim.get('verification') != 'verified' or not claim.get('evidence') or not claim.get('verified_by') or claim.get('verified_by') == claim.get('author'):
             gaps.append({'id': claim_id, 'reason': 'Decision-changing claim lacks independent verified support'})
-        if claim.get('contradictions') or any(claim_id in other.get('contradictions', []) for other in claims.values()):
+        if claim.get('contradictions') or any(claim_id in other.get('contradictions', []) for other in claims.values()
+                                              if other.get('status') != 'retired'):
             gaps.append({'id': claim_id, 'reason': 'Decision-changing claim has unresolved contradictions'})
     for row in recommendations:
         if not row['data'].get('claim_ids') or any(claim_id not in claims for claim_id in row['data']['claim_ids']):
@@ -161,6 +252,8 @@ def verify_claim(store, claim_id, actor, evidence, verification='verified', cont
             raise ValueError('Unknown claim')
         data = dict(row['data'])
         _context(store, actor, data['revision'])
+        if data.get('status') == 'retired':
+            raise ValueError('Cannot verify a retired claim')
         if data['impact'] == 'decision-changing' and actor == data['author']:
             raise ValueError('Decision-changing verification must be independent of author')
         if source_ids is not None:

@@ -79,6 +79,14 @@ def _coverage(records, revision):
     return '\n'.join(lines)
 
 
+def _research_lifecycle(kind, data, records):
+    if data.get('status') != 'retired':
+        return 'active'
+    replacement = _refs(kind, [data['replacement_id']] if data.get('replacement_id') else [], records)
+    return ('retired by ' + _md(data.get('retired_by', '')) + '; evidence: ' +
+            _md(data.get('retirement_evidence', [])) + '; replacement: ' + replacement)
+
+
 def _summary(records, revision, approval, point_states):
     lines = ['# Review summary', '', 'Current captured revision: ' + _md(revision), '',
              'Snapshot approval: **' + _md(approval.get('result', 'UNKNOWN')) + '**', '', '## Approval gaps', '']
@@ -93,6 +101,7 @@ def _summary(records, revision, approval, point_states):
         for row in rows('recommendation'):
             data = row['data']
             lines.extend(['- ' + _ref('recommendation', row['id'], records) + ': ' + _md(data.get('text', '')),
+                          '  Status: ' + _research_lifecycle('recommendation', data, records),
                           '  Case basis: ' + _md(data.get('case_basis', '')) + '; claims: ' +
                           _refs('claim', data.get('claim_ids', []), records) + '; revision: ' + _md(data.get('revision', ''))])
         if not rows('recommendation'):
@@ -105,8 +114,9 @@ def _summary(records, revision, approval, point_states):
                  _md(point_states.get(row['id'], {}).get('approved_by', [])),
                  _md(point_states.get(row['id'], {}).get('digest', ''))]
                 for row in rows('consensus_point')])])
-        lines.extend(['', '### Claims', '', _table(['ID', 'Claim', 'Verification', 'Inference', 'Contradictions', 'Sources', 'Revision'], [
+        lines.extend(['', '### Claims', '', _table(['ID', 'Claim', 'Status', 'Verification', 'Inference', 'Contradictions', 'Sources', 'Revision'], [
             [_ref('claim', row['id'], records), _md(row['data'].get('text', '')),
+             _research_lifecycle('claim', row['data'], records),
              _md(row['data'].get('verification', 'unverified')), _md(row['data'].get('inference', False)),
              _refs('claim', row['data'].get('contradictions', []), records),
              _refs('source', row['data'].get('source_ids', []), records), _md(row['data'].get('revision', ''))]

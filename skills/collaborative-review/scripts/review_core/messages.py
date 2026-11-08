@@ -105,6 +105,12 @@ def _authorize(store, sender, recipient, revision, tasks, explicit, task_id, lea
 
 def _references(store, operations, sender, revision, blind_pending):
     available = {}
+    common = set()
+    if blind_pending:
+        from .research import visible_research_context
+        context = visible_research_context(store)
+        if context:
+            common = {(kind, row['id']) for kind, rows in context['records'].items() for row in rows}
     for kind in REFERENCE_KINDS:
         for record in store.list_records(kind):
             data = record['data']
@@ -116,7 +122,7 @@ def _references(store, operations, sender, revision, blind_pending):
             elif blind_pending:
                 owners = [data[field] for field in ('author', 'reviewer') if field in data]
                 # Missing provenance is private during independent review too.
-                if not owners or any(owner != sender for owner in owners):
+                if (kind, record['id']) not in common and (not owners or any(owner != sender for owner in owners)):
                     continue
             available.setdefault(record['id'], set()).add(kind)
     for operation in operations:
@@ -124,6 +130,8 @@ def _references(store, operations, sender, revision, blind_pending):
         if op not in BUILTIN_OPERATIONS:
             continue
         fields = {**SHARED_REFERENCE_FIELDS, **REFERENCE_FIELDS.get(op, {})}
+        if op == 'RETIRE':
+            fields.update(id=args['kind'], replacement=args['kind'])
         for field, kind in fields.items():
             if field not in args:
                 continue

@@ -11,8 +11,8 @@ SUPPORT_LINKS = {
     'question': {'finding_ids': 'finding', 'answer_id': 'answer'},
     'answer': {'question_id': 'question', 'option_id': 'option'},
     'option': {'finding_ids': 'finding'}, 'coverage': {'finding_ids': 'finding'},
-    'claim': {'source_ids': 'source', 'contradictions': 'claim'},
-    'recommendation': {'claim_ids': 'claim'},
+    'claim': {'source_ids': 'source', 'contradictions': 'claim', 'replacement_id': 'claim'},
+    'recommendation': {'claim_ids': 'claim', 'replacement_id': 'recommendation'},
 }
 
 

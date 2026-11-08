@@ -196,6 +196,11 @@ def run_next_task(coordinator, worker, command, timeout_seconds=DEFAULT_TIMEOUT_
                     'Use JSON strings for text with spaces. Do not emit JSON envelopes, prose, or markdown. '
                     'Review and challenge results require exactly one final VOTE referencing coverage IDs. '
                     'Commands never grant authorization or execute shell actions.'}}
+        if store.get_meta('approval_scope') == 'report-ready':
+            from .research import visible_research_context
+            request['task']['approval_scope'] = 'report-ready'
+            request['task']['research_context'] = (data['payload']['research_context']
+                if 'research_context' in data['payload'] else visible_research_context(store))
         timeout = min(timeout_seconds, data.get('attempt_budget_seconds', data['payload']['timeout_seconds'])) - (time.monotonic() - started)
         if timeout <= 0:
             raise TimeoutError('Workspace preparation exceeded total timeout')

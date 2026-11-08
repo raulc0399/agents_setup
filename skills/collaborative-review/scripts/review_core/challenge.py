@@ -15,6 +15,10 @@ CONTEXT_KINDS = ('finding', 'question', 'answer', 'option', 'assumption', 'sourc
 
 
 def _plan(store):
+    from .research import research_review_gaps
+
+    if research_review_gaps(store):
+        raise ValueError('Research reviews need reassessment against the current research fingerprint')
     revision = store.get_meta('revision')
     plans = [plan for plan in store.list_records('review_plan')
              if plan['data'].get('request', {}).get('revision') == revision]

@@ -200,6 +200,9 @@ def apply_operations(store, author, revision, operations, task_id=None, allow_vo
                 research.verify_claim(store, args['id'], author, args['evidence'], source_ids=args.get('sources'), contradictions=args.get('contradictions'))
             elif op == 'REC':
                 research.add_recommendation(store, author, revision, args['text'], args['claims'], args['case'], recommendation_id=args['id'])
+            elif op == 'RETIRE':
+                retire = research.retire_claim if args['kind'] == 'claim' else research.retire_recommendation
+                retire(store, args['id'], author, args['evidence'], replacement_id=args.get('replacement'))
             elif op == 'ASSUME':
                 assumptions.add_assumption(store, **context, assumption_id=args['id'], statement=args['text'], affected_paths=args['paths'], blocks_approval=args['blocking'])
             elif op == 'VERIFY':

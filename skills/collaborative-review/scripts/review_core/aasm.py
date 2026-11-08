@@ -48,6 +48,7 @@ BUILTIN_OPERATIONS.update({
     'CONFIRM': _schema('Independently verify claim.', id=_field('id'), evidence=_field('strings', nonempty=True), sources=_field('ids', False), contradictions=_field('ids', False)),
     'GAP': _schema('Blocking question about missing evidence.', id=_field('id'), text=_field('text')),
     'REC': _schema('Recommendation.', id=_field('id'), text=_field('text'), claims=_field('ids', nonempty=True), case=_field('text')),
+    'RETIRE': _schema('Retire a refuted claim or abandoned recommendation with audit evidence.', kind=_field('enum', enum=['claim', 'recommendation']), id=_field('id'), evidence=_field('strings', nonempty=True), replacement=_field('id', False)),
     'ASSUME': _schema('Record assumption.', id=_field('id'), text=_field('text'), paths=_field('paths', nonempty=True), blocking=_field('boolean', False, default=True)),
     'VERIFY': _schema('Verify assumption.', id=_field('id'), evidence=_field('strings', nonempty=True)),
     'IMP': _schema('Propose future improvement without authorization.', proposal=_field('id'), text=_field('text')),

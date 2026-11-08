@@ -372,7 +372,7 @@ class Coordinator:
                 'spent_seconds': self.store.get_meta('spent_seconds', 0),
                 'budget_seconds': self.store.get_meta('budget_seconds'), 'tasks': self.store.list_records('task')}
 
-    def record_review(self, reviewer, revision, verdict, evidence_ids=(), task_id=None):
+    def record_review(self, reviewer, revision, verdict, evidence_ids=(), task_id=None, research_fingerprint=None):
         _text(reviewer, 'reviewer')
         if verdict not in ('APPROVED', 'BLOCKED'):
             raise ValueError('Invalid verdict')
@@ -388,6 +388,30 @@ class Coordinator:
                     raise ValueError('Review must bind a completed review task and its worker')
             data = dict(reviewer=reviewer, revision=revision, verdict=verdict, evidence_ids=evidence_ids,
                         task_id=task_id, recorded_at=self.clock())
+            if self.store.get_meta('approval_scope') == 'report-ready':
+                from .consensus import blind_pending
+                from .research import research_context
+                if task_id is None or not task['data']['payload'].get('research_context'):
+                    raise ValueError('Research review requires its completed task with frozen research inputs')
+                fingerprint = task['data']['payload']['research_context']['fingerprint']
+                if research_fingerprint is not None:
+                    if blind_pending(self.store):
+                        raise ValueError('Research reassessment must wait for all blind reviews')
+                    authorize_task(self.store, 'review', revision, task['data']['payload']['scope_paths'])
+                    if research_fingerprint != research_context(self.store)['fingerprint']:
+                        raise ValueError('Research fingerprint is not current')
+                    covered = set()
+                    for evidence_id in evidence_ids:
+                        coverage = self.store.get_record('coverage', evidence_id)
+                        if (coverage is None or coverage['data']['revision'] != revision
+                                or coverage['data']['author'] != reviewer or not coverage['data'].get('evidence')
+                                or (verdict == 'APPROVED' and coverage['data']['status'] != 'reviewed')):
+                            raise ValueError('Research reassessment requires own current coverage with evidence')
+                        covered.update(coverage['data']['paths'])
+                    if verdict == 'APPROVED' and not set(task['data']['payload']['scope_paths']) <= covered:
+                        raise ValueError('Research reassessment coverage must span the task scope')
+                    fingerprint = research_fingerprint
+                data['research_fingerprint'] = fingerprint
             identity = json.dumps([reviewer, revision], ensure_ascii=False).encode('utf-8')
             review_id = 'review-' + hashlib.sha256(identity).hexdigest()
             return self.store.put_record('review', review_id, data,
@@ -397,7 +421,12 @@ class Coordinator:
         revision = self.store.get_meta('revision')
         blockers = []
         reviews = [r['data'] for r in self.store.list_records('review') if r['data']['revision'] == revision]
-        approved = {r['reviewer'] for r in reviews if r['verdict'] == 'APPROVED' and r.get('evidence_ids')}
+        from .research import research_review_gaps
+        research_gaps = research_review_gaps(self.store)
+        stale_reviewers = {gap['reviewer'] for gap in research_gaps}
+        approved = {r['reviewer'] for r in reviews if r['verdict'] == 'APPROVED' and r.get('evidence_ids')
+                    and r['reviewer'] not in stale_reviewers}
+        blockers.extend(research_gaps)
         if len(approved) < 2:
             blockers.append('Two independent current approved reviews are required')
         if any(r['verdict'] == 'BLOCKED' for r in reviews):

@@ -83,6 +83,24 @@ class ConsensusTests(unittest.TestCase):
         self.assertEqual(point_state(self.store, 'retry')['approved_by'], [])
         self.assertEqual(point_state(self.store, 'timeout')['status'], 'agreed')
 
+    def test_retirement_replacement_support_invalidates_only_dependent_points(self):
+        from review_core import research
+        self.start()
+        revision = self.store.get_meta('revision')
+        research.add_source(self.store, 'researcher', revision, 'https://example.org/spec',
+                            '2026-11-08', content='Current evidence', source_id='source')
+        for identity in ('old', 'new'):
+            research.add_claim(self.store, 'researcher', revision, identity, source_ids=['source'], claim_id=identity)
+        research.retire_claim(self.store, 'old', 'researcher', ['Replaced'], replacement_id='new')
+        for identity, refs in (('research', ['old']), ('unrelated', [])):
+            self.point(identity, refs)
+            self.action('PROPOSE', identity)
+            self.action('AGREE', identity)
+            self.action('AGREE', identity, worker='reviewer-2')
+        research.verify_claim(self.store, 'new', 'verifier', ['Independently checked new evidence'])
+        self.assertEqual([], point_state(self.store, 'research')['approved_by'])
+        self.assertEqual('agreed', point_state(self.store, 'unrelated')['status'])
+
     def test_dispute_requires_both_approvals_even_after_question_answer(self):
         self.start()
         self.apply('D id=f at=code.py:1 claim="Value mismatch" fix="Check value" evidence=["trace"]\n'

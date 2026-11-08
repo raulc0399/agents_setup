@@ -156,6 +156,22 @@ class AasmCliTests(unittest.TestCase):
                     self.assertIsNone(store.get_record('coverage', 'proof'))
                     self.assertEqual(store.list_records('message'), [])
 
+    def test_research_retirement_through_messages_and_administrative_cli(self):
+        self.send('SRC id=s locator=https://example.org/spec date=2026-11-08 content="Captured source"\n'
+                  'F id=old text="Old claim" sources=["s"]\n'
+                  'F id=current text="Corrected claim" sources=["s"]\n'
+                  'REC id=old-rec text="Old choice" claims=["old"] case="User case"\n'
+                  'REC id=current-rec text="Current choice" claims=["current"] case="User case"')
+        self.send('RETIRE kind=claim id=old replacement=current evidence=["Source refutes old claim"]')
+        row = self.cli('record', 'recommendation-retire', '--data', '-', input=json.dumps({
+            'recommendation_id': 'old-rec', 'actor': 'alice', 'evidence': ['Corrected choice'],
+            'replacement_id': 'current-rec'}))
+        self.assertEqual('retired', row['data']['status'])
+        self.send('RETIRE kind=recommendation id=current-rec evidence=["Case no longer applies"]')
+        with Store(self.run, readonly=True) as store:
+            self.assertEqual('current', store.get_record('claim', 'old')['data']['replacement_id'])
+            self.assertEqual('retired', store.get_record('recommendation', 'current-rec')['data']['status'])
+
     def manifest(self):
         return {'name': 'discussion', 'version': 1, 'participants': ['alice', 'bob'],
             'definitions': [{'op': 'SIGNAL', 'meaning': 'Explicit review observation',

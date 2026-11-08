@@ -37,6 +37,7 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
     """
     if coordinator.store is not store:
         raise ValueError('Coordinator must use the supplied store')
+    from .research import research_context
     risks = _names(risks, 'risks')
     specialists = _names(specialists, 'specialists')
     with store.transaction():
@@ -85,6 +86,7 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
         if timeout < MIN_TIMEOUT_SECONDS:
             raise ValueError('Budget cannot fund reviews and a challenge')
         tasks = []
+        research = research_context(store) if store.get_meta('approval_scope') == 'report-ready' else None
         for kind, reviewer, focus in roles:
             brief = ('Independently review every pinned scope file. Report all actionable findings with '
                      'file evidence, coverage, and a revision-bound verdict. Do not consult peer reviews. '
@@ -113,6 +115,11 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
                 brief += ' Pay particular attention to ' + focus + '.'
             payload = dict(revision=revision, brief=brief, scope_paths=paths,
                            timeout_seconds=timeout, reviewer=reviewer, required_action='review', blind=True)
+            if research is not None:
+                payload.update(approval_scope='report-ready', research_context=research)
+                payload['brief'] += (' Review the frozen common research sources, claims and recommendations '
+                                     'in research_context against the user case. Verify support independently; '
+                                     'later private team discoveries are not shared blind inputs.')
             if focus:
                 payload['focus'] = focus
             tasks.append(coordinator.enqueue_task(kind, payload, task_id='task-' + _identity(revision, reviewer)))
@@ -120,6 +127,6 @@ def plan_review(store, coordinator, risks=(), specialists=(), max_workers=None):
             store.set_meta('max_workers', cap)
         store.put_record('review_plan', plan_id, dict(request=request, task_ids=[task['id'] for task in tasks],
                          challenge_budget_seconds=timeout, peer_review_budget_seconds=timeout,
-                         point_consensus_required=True),
+                         point_consensus_required=True, research_context=research),
                          event='review.planned', expected_version=0)
         return tasks

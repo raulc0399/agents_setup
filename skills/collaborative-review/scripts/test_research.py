@@ -103,6 +103,53 @@ class ResearchTests(unittest.TestCase):
         with Store(self.store.run_dir, readonly=True) as readonly:
             self.assertEqual(r.research_gaps(self.store), r.research_gaps(readonly))
 
+    def test_retire_refuted_claim_and_replace_its_published_recommendation(self):
+        self.source(content='Option B works; option A does not', source_id='s')
+        self.claim(source_ids=['s'], claim_id='old')
+        old_recommendation = self.recommend(['old'])
+        r.verify_claim(self.store, 'old', 'b', ['Source refutes A'], verification='disputed')
+        self.claim(source_ids=['s'], claim_id='correct', verification='verified', evidence=['Checked B'], verified_by='b')
+        current = self.recommend(['correct'])
+        retired = r.retire_claim(self.store, 'old', 'b', ['Refuted by captured source'], replacement_id='correct')
+        self.assertTrue(any('retired' in gap['reason'] for gap in r.research_gaps(self.store)))
+        r.retire_recommendation(self.store, old_recommendation['id'], 'a', ['Use corrected recommendation'],
+                                replacement_id=current['id'])
+        self.assertEqual([], r.research_gaps(self.store))
+        self.assertEqual(retired, r.retire_claim(self.store, 'old', 'b', ['Refuted by captured source'], replacement_id='correct'))
+        self.assertEqual(retired, self.claim(source_ids=['s'], claim_id='old'))
+        with self.assertRaisesRegex(ValueError, 'retired'):
+            r.verify_claim(self.store, 'old', 'b', ['Try to revive'])
+        with self.assertRaisesRegex(ValueError, 'retired'):
+            self.recommend(['old'])
+
+    def test_retirement_validates_replacement_and_keeps_audit_history(self):
+        self.claim(claim_id='old')
+        self.claim(claim_id='replacement')
+        for replacement in ('old', 'missing'):
+            with self.subTest(replacement=replacement):
+                with self.assertRaises(ValueError):
+                    r.retire_claim(self.store, 'old', 'a', ['Checked'], replacement_id=replacement)
+        r.retire_claim(self.store, 'replacement', 'a', ['No longer applicable'])
+        with self.assertRaises(ValueError):
+            r.retire_claim(self.store, 'old', 'a', ['Checked'], replacement_id='replacement')
+        with self.assertRaises(ValueError):
+            r.retire_claim(self.store, 'old', 'a', [])
+        row = r.retire_claim(self.store, 'old', 'b', ['Refuted'])
+        self.assertEqual('a', row['data']['author'])
+        self.assertEqual('b', row['data']['retired_by'])
+        self.assertEqual('claim.retired', self.store.events()[-1]['kind'])
+        with self.assertRaises(ValueError):
+            r.retire_claim(self.store, 'old', 'b', ['Different reason'])
+
+    def test_retired_incoming_contradiction_no_longer_blocks_active_support(self):
+        self.source(content='Source', source_id='s')
+        self.claim(source_ids=['s'], claim_id='supported', verification='verified', evidence=['Checked'], verified_by='b')
+        self.claim(claim_id='refuted', contradictions=['supported'])
+        self.recommend(['supported'])
+        self.assertTrue(r.research_gaps(self.store))
+        r.retire_claim(self.store, 'refuted', 'b', ['Contradiction disproved'])
+        self.assertEqual([], r.research_gaps(self.store))
+
 
 if __name__ == '__main__':
     unittest.main()

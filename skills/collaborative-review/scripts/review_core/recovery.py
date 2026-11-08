@@ -84,6 +84,7 @@ def _worker_tasks(tasks, worker, revision):
 def handoff(store, now=None, worker=None):
     """Read a consistent checkpoint without changing the run."""
     now = _now(now)
+    from .research import visible_research_context
     with _checkpoint_transaction(store):
         tasks = store.list_records('task')
         spent = store.get_meta('spent_seconds', 0)
@@ -92,6 +93,7 @@ def handoff(store, now=None, worker=None):
         return {'run_id': store.run_dir.name, 'run_dir': str(store.run_dir),
                 'project_root': store.get_meta('project_root'), 'paths': store.get_meta('paths'),
                 'approval_scope': store.get_meta('approval_scope'),
+                'research_context': visible_research_context(store),
                 'status': store.get_meta('status'), 'revision': store.get_meta('revision'),
                 'tasks': tasks if worker is None else _worker_tasks(tasks, worker, store.get_meta('revision')),
                 'unfinished_task_ids': [t['id'] for t in tasks
