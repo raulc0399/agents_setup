@@ -1,15 +1,15 @@
 # Prism implementation
 
-The user authorized implementation, dependency installation, feature agents, independent feature reviews, and commits. The user subsequently excluded Claude implementation: another Claude agent will implement that adapter/plugin. This work covers shared Prism features and Codex only. Agent-triggered opening is the primary workflow; the launcher is optional. The reviewed design is `../prismapp_plan.codex.md`.
+The user authorized implementation, dependency installation, feature agents, independent feature reviews, and commits. The user subsequently excluded Claude implementation: another Claude agent will implement that adapter/plugin. This work covers shared Prism features and Codex only. Agent-triggered pane opening is the primary workflow; Codex currently requires a launcher-established binding. The reviewed design is `../prismapp_plan.codex.md`.
 
 ## Batches and validation
 
-- [ ] Batch 1: verify installed native contracts, caller identity, transport, lifecycle and approval ownership; record unsupported and untested modes explicitly.
-- [ ] Batch 2: common model, versioned store, actions, delivery records and bridge/adapter contracts; validate conflicts, replay, archive/undo and private state.
-- [ ] Batch 3: session/pane lifecycle, shared list/question UI, then separate native integrations; test each feature and obtain independent review.
+- [x] Batch 1: verify installed Codex native contracts (Claude excluded; unavailable sends remain gated), caller identity, transport, lifecycle and approval ownership; record unsupported and untested modes explicitly.
+- [x] Batch 2: common model, versioned store, actions, delivery records and bridge/adapter contracts; validate conflicts, replay, archive/undo and private state.
+- [x] Batch 3: session/pane lifecycle, shared list/question UI, then separate native integrations; test each feature and obtain independent review.
 - [x] Batch 4: diagrams and selection; test layout, hit detection, resizing and shared actions; independent review.
 - [x] Batch 5: multiple views and persistence; test shared updates and independent view state; independent review.
-- [ ] Batch 6: release checks, installation instructions, real supported CLI loops and final independent review; commit only reviewed files.
+- [x] Batch 6: release checks, installation instructions, real supported CLI loops and final independent review; commit only reviewed files.
 
 ## File ownership
 
@@ -65,5 +65,9 @@ Codex probes/docs and `plugins/codex/`. The primary integrator owns `src/store.r
   pagination, attribution and absolute-deadline fixes; 33 scoped Rust tests and
   16 Python regressions pass. Fresh isolated native probe passes.
 - Final combined check: 100 Rust tests, formatting, Clippy and release build pass.
-  Installed executable and native plugin 0.1.0; final installed-binary resume
-  and integration review remain. Native Start/Steer/Queue remain disabled.
+  Installed executable and native plugin 0.1.0; all 9 release lifecycle tests pass.
+- Final source integration review approved f476550. Actual installed-binary
+  exact resume, duplicate rejection, and Share preservation/retrieval after
+  exit/resume passed. Native Start/Steer/Queue remain disabled.
+- End-user instructions are in README.md; evidence is in docs/validation.md;
+  the Claude implementation prompt is in docs/claude-handover.md.
