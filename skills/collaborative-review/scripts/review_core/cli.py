@@ -46,6 +46,7 @@ def _parser():
     authorize.add_argument('--actions', nargs='+')
     authorize.add_argument('--paths', nargs='+')
     authorize.add_argument('--expires-at', type=_positive)
+    authorize.add_argument('--follow-revisions', action='store_true', help='keep review/inspect permission across revisions of this run')
     authorize.add_argument('--revoke')
     authorize.add_argument('--reason', default='operator revoked authorization')
     plan = commands.add_parser('plan', help='enqueue two independent reviews')
@@ -253,12 +254,13 @@ def _authorize(store, args):
 
     if args.chat_approval is not None:
         if (args.actions is not None or args.paths is not None or args.expires_at is not None
-                or args.revoke is not None or args.reason != 'operator revoked authorization'):
+                or args.revoke is not None or args.follow_revisions or args.reason != 'operator revoked authorization'):
             raise ValueError('--chat-approval cannot be combined with terminal authorization options')
         return record_chat_authorization(store, _object(args.chat_approval))
 
     details = {'revision': store.get_meta('revision'), 'actions': args.actions or ['review', 'inspect'],
-               'paths': args.paths or store.get_meta('paths'), 'expires_at': args.expires_at}
+               'paths': args.paths or store.get_meta('paths'), 'expires_at': args.expires_at,
+               'follow_revisions': args.follow_revisions}
     if args.revoke:
         details = {'revoke': args.revoke, 'reason': args.reason}
     if not sys.stdin.isatty():
@@ -270,6 +272,36 @@ def _authorize(store, args):
     if args.revoke:
         return revoke_authorization(store, args.revoke, reason=args.reason)
     return record_authorization(store, **details)
+
+
+def _recover(store, args):
+    from .authorization import authorize_task
+    from .coordinator import ACTIONS
+    from .recovery import confirm_process_terminated, resolve_uncertain_task
+
+    data = _object(args.data)
+    task_id = data.get('task_id')
+    task = store.get_record('task', task_id) if isinstance(task_id, str) and task_id else None
+    authorized = False
+    if task and task['data']['kind'] in ACTIONS and task['data']['kind'] != 'execute':
+        payload = task['data']['payload']
+        if payload['revision'] == store.get_meta('revision'):
+            try:
+                authorize_task(store, ACTIONS[task['data']['kind']], payload['revision'],
+                               payload['scope_paths'], require_run_grant=True)
+                authorized = True
+            except PermissionError:
+                pass
+    if not authorized:
+        if not sys.stdin.isatty():
+            raise PermissionError('uncertain execution recovery requires an operator terminal or an existing run grant for readonly work')
+        print(json.dumps(data, indent=2), file=sys.stderr)
+        print('Type APPROVE to record this recovery decision: ', end='', file=sys.stderr, flush=True)
+        if input().strip() != 'APPROVE':
+            raise PermissionError('operator did not confirm recovery')
+    if args.confirm_termination:
+        return confirm_process_terminated(store, **data)
+    return resolve_uncertain_task(store, **data)
 
 
 def _record(store, coordinator, kind, data):
@@ -571,17 +603,7 @@ def _dispatch(store, args):
         from .recovery import resume_run
         return resume_run(store, coordinator)
     if args.command == 'recover':
-        from .recovery import confirm_process_terminated, resolve_uncertain_task
-        data = _object(args.data)
-        if not sys.stdin.isatty():
-            raise PermissionError('uncertain execution recovery requires an operator terminal')
-        print(json.dumps(data, indent=2), file=sys.stderr)
-        print('Type APPROVE to record this recovery decision: ', end='', file=sys.stderr, flush=True)
-        if input().strip() != 'APPROVE':
-            raise PermissionError('operator did not confirm recovery')
-        if args.confirm_termination:
-            return confirm_process_terminated(store, **data)
-        return resolve_uncertain_task(store, **data)
+        return _recover(store, args)
     if args.command == 'handoff':
         from .recovery import handoff
         return handoff(store, worker=args.worker)

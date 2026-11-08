@@ -32,6 +32,8 @@ REVIEW=/absolute/path/to/agents_setup/skills/collaborative-review/scripts/review
 ADAPTER=/absolute/path/to/your-approved-worker-adapter
 python3 "$REVIEW" doctor --project "$PWD" -- "$ADAPTER"
 python3 "$REVIEW" --run design-review create --project "$PWD" --paths design.md --approval-scope technical-plan --budget-seconds 3600 --max-workers 2
+python3 "$REVIEW" --run design-review handoff --worker reviewer-1
+# Show the scope, responsibilities and Agent 2 joining prompt; wait for the user's go.
 python3 "$REVIEW" --run design-review authorize --chat-approval /absolute/path/to/chat-approval.json
 python3 "$REVIEW" --run design-review plan
 python3 "$REVIEW" --run design-review dispatch --timeout-seconds 300 -- "$ADAPTER"
@@ -39,7 +41,7 @@ python3 "$REVIEW" --run design-review check
 python3 "$REVIEW" --run design-review export
 ```
 
-The lead presents the captured scope in chat, accepts the user's explicit approval, and records it with `authorize --chat-approval FILE` (`-` reads stdin). The JSON contains exactly these fields, filled from the real run and approving exchange:
+The lead first displays the captured scope, responsibilities and complete Agent 2 joining prompt, then waits for the user's initial `go`. Record it with `authorize --chat-approval FILE` (`-` reads stdin). Set the optional `follow_revisions` field to `true` so this go covers the run's later revisions within scope; omitting it retains legacy revision-only grants. Fill these fields from the real run and approving exchange:
 
 ```json
 {
@@ -47,22 +49,27 @@ The lead presents the captured scope in chat, accepts the user's explicit approv
   "revision": "<exact revision from create or handoff>",
   "approval_scope": "technical-plan",
   "actions": ["review", "inspect"],
+  "follow_revisions": true,
   "paths": ["design.md"],
   "message": "<actual user approval message>",
   "reference": "<conversation/message reference or accurate exchange description>"
 }
 ```
 
-The helper checks run identity, current revision, approval scope and captured paths, then stores the approval message/reference with the grant. It trusts the calling agent to relay real user consent; it cannot authenticate chat history or interpret approval language. Do not combine `--chat-approval` with terminal authorization options. Calling `authorize` without that option retains the interactive terminal flow. Review permission does not authorize implementing recommendations, deployment or destructive actions. Commands enforce scoped authorization within a trusted local process model; this is not an OS sandbox. `doctor` performs local temporary-file and subprocess lock probes without launching your adapter, installing packages or contacting accounts; successful probes cannot certify storage durability.
+The helper checks run identity, current revision, approval scope and captured paths, then stores the approval message/reference with the grant. It trusts the calling agent to relay real user consent; it cannot authenticate chat history or interpret approval language. Do not combine `--chat-approval` with terminal authorization options. Calling `authorize` without that option retains the interactive terminal flow, with optional `--follow-revisions`. Run grants cover only `review`/`inspect`, remain revocable/expirable, and cannot expand the original run, project, approval scope or paths. Review permission does not authorize implementing recommendations, deployment or destructive actions. Commands enforce scoped authorization within a trusted local process model; this is not an OS sandbox. `doctor` performs local temporary-file and subprocess lock probes without launching your adapter, installing packages or contacting accounts; successful probes cannot certify storage durability.
 
-After approval, run `plan` and `handoff --worker reviewer-1`, then give the user the review ID and a joining prompt such as:
+Before waiting for go, use pre-plan `handoff --worker reviewer-1` to fill the review ID and joining prompt below. After go, record consent and run `plan` (research first collects common evidence), then start Agent 1's review without waiting for Agent 2:
 
 ```text
 Use $collaborative-review. Join review <review-id> as reviewer-2.
 Project: <absolute-project>; shared run directory: <absolute-run-directory>.
 Revision: <captured-revision>. Task: <user's requirements and feature brief>.
-Read handoff --worker reviewer-2 for that run, verify its scope/revision, claim only reviewer-2,
-and start your own subagent per relevant concern against the pinned inputs.
+Read handoff --worker reviewer-2 and give a brief goal/roles/phase overview.
+Wait until start_authorized=true and your initial task exists, rechecking handoff
+at intervals of at most 30 seconds within the run deadline; do not ask for another go.
+If start_approval_recorded=true but start_authorized=false, stop and report the blocker.
+Verify its current scope/revision, claim only reviewer-2, and start your own
+subagent per relevant concern against the pinned inputs.
 Keep your team independent; do not edit source files or create another run.
 After submitting your team's review, automatically keep polling as reviewer-2,
 claim your assigned follow-ups, and route them to your concern subagents.
@@ -71,7 +78,7 @@ needed, and require explicit agreement from both leads on each point's resolutio
 Continue until completion, an explicit blocker, or the run deadline without user prompts.
 ```
 
-Agent 2 uses the run directory's parent as `--root` and its name as `--run`. Both sessions need access to the same reliable local storage; the ID alone does not connect remote machines. Joining does not require new authorization for the unchanged scope. If reviewer-2 is already claimed or completed, report that state. Initial findings stay independent until both reviews finish. Existing runs keep their frozen helper version; start a fresh run to use a new authorization workflow rather than editing a frozen bundle.
+Agent 2 uses the run directory's parent as `--root` and its name as `--run`. Both sessions need access to the same reliable local storage; the ID alone does not connect remote machines. Joining, resuming, revised inputs and research reassessment within scope do not require new authorization. If reviewer-2 is already claimed or completed, report that state. Initial findings stay independent until both reviews finish. Existing runs keep their frozen helper version; start a fresh run to use a new authorization workflow rather than editing a frozen bundle.
 
 Both leads must supply real evidence, concern/subagent provenance and reviewed coverage for every captured file; missing or blocked results keep `check` blocked. `plan --risk NAME --specialist NAME` adds coordinator specialist work without replacing either lead's concern team. Workers may run concurrently within `--max-workers`; host subagent capacity is separate and children must fit their parent's deadline. Each `work` invocation runs one task. `check` exits 0 for approved, 1 for blocked, 2 for invalid requests; `finish` marks the run complete only after checks approve.
 
@@ -136,11 +143,11 @@ Use `dialect propose --worker <author> --manifest FILE`, then each named partici
 
 ### Revisions, reports and recovery
 
-`technical-plan`, `implementation-ready`, and `report-ready` describe the approval target; approval always belongs to the captured revision. Source project files remain untouched. Apply authorized changes outside the snapshot, then run `revise` with no running tasks, authorize the new revision and plan again. Old approvals cannot approve changed inputs; affected assumptions are invalidated. Active runs execute their pinned protocol bundle; `protocol-proposal --text TEXT --evidence TEXT` records future changes, which require a new run to take effect.
+`technical-plan`, `implementation-ready`, and `report-ready` describe the approval target; review verdicts always belong to the captured revision. Source project files remain untouched. Apply authorized changes outside the snapshot, then run `revise` with no running tasks and plan again. The initial run grant continues within scope without another go. Old review verdicts cannot approve changed inputs; affected assumptions are invalidated. Active runs execute their pinned protocol bundle; `protocol-proposal --text TEXT --evidence TEXT` records future changes, which require a new run to take effect.
 
 `status --json` shows work, budgets, decision requests and uncovered paths; `handoff` emits a replacement worker checkpoint. During blind review use `handoff --worker <own-role>`; it exposes only your task details and peer status, while unfiltered `status` and `handoff` can expose peer evidence. `export` regenerates `.reviews/design-review/exports/OPTIONS.md`, `COVERAGE.md`, `DECISIONS.md`, `SUMMARY.md`, and `TRANSCRIPT.html` from stored records/events, with current approval checks. Do not hand-edit generated reports.
 
-`pause --reason TEXT` stops new claims; `resume` reconstructs expired work without automatically repeating uncertain writes. `recover --data FILE` requires terminal `APPROVE`; JSON contains `task_id`, `outcome` (`completed`, `failed`, `cancelled`, `retry`) and factual `evidence`. When process termination cannot be observed, establish that the worker stopped: either pass `process_termination_evidence` with the recovery decision, or first use `recover --confirm-termination --data FILE` with only `task_id` and factual `evidence`. Then resolve or retry the task explicitly. Never retry uncertain execution solely because its lease expired.
+`pause --reason TEXT` stops new claims; `resume` reconstructs expired work without automatically repeating uncertain writes. `recover --data FILE` uses the initial run grant for current in-scope read-only tasks, without another confirmation; other recovery, including `execute`, retains terminal `APPROVE`. JSON contains `task_id`, `outcome` (`completed`, `failed`, `cancelled`, `retry`) and factual `evidence`. When process termination cannot be observed, establish that the worker stopped: either pass `process_termination_evidence` with the recovery decision, or first use `recover --confirm-termination --data FILE` with only `task_id` and factual `evidence`. Then resolve or retry the task explicitly. Never retry uncertain execution solely because its lease expired.
 
 ### Research and evaluation
 

@@ -185,6 +185,57 @@ class ReviewCliTests(unittest.TestCase):
         self.cli('inspect', '--paths', 'input.txt', expected=2)
         self.cli('authorize', '--chat-approval', '-', expected=2, input=json.dumps(approval))
 
+    def test_startup_handoff_precedes_go_and_one_go_covers_later_revisions(self):
+        checkpoint = self.cli('handoff', '--worker', 'reviewer-2')
+        self.assertEqual('sequence', checkpoint['run_id'])
+        self.assertEqual(str(self.run), checkpoint['run_dir'])
+        self.assertEqual([], checkpoint['tasks'])
+        self.assertFalse(checkpoint['start_authorized'])
+        self.assertFalse(checkpoint['start_approval_recorded'])
+        self.cli('plan')
+        blocked = self.work('reviewer-1')
+        self.assertEqual('blocked', blocked['state'])
+        approval = self.chat_approval(follow_revisions=True, message='go')
+        self.cli('authorize', '--chat-approval', '-', input=json.dumps(approval))
+        self.assertTrue(self.cli('handoff', '--worker', 'reviewer-2')['start_authorized'])
+        self.assertEqual('completed', self.work('reviewer-1')['data']['status'])
+        self.assertEqual('completed', self.work('reviewer-2')['data']['status'])
+        self.cross_check()
+        self.cli('challenge')
+        self.work('challenger')
+        self.assertEqual('APPROVED', self.cli('check')['result'])
+
+        (self.project / 'input.txt').write_text('new evidence after the initial go\n')
+        changed = self.cli('revise')
+        self.assertNotEqual(approval['revision'], changed['revision'])
+        self.assertEqual('BLOCKED', self.cli('check', expected=1)['result'])
+        self.cli('inspect', '--paths', 'input.txt')
+        self.cli('plan')
+        self.assertEqual('completed', self.work('reviewer-1')['data']['status'])
+        self.assertEqual('completed', self.work('reviewer-2')['data']['status'])
+        with Store(self.run, readonly=True) as store:
+            grants = store.list_records('authorization')
+            self.assertEqual(1, len(grants))
+            self.assertEqual('go', grants[0]['data']['approval']['message'])
+
+    def test_initial_go_covers_evidenced_readonly_recovery_but_not_execute(self):
+        self.cli('authorize', '--chat-approval', '-', input=json.dumps(self.chat_approval(follow_revisions=True)))
+        self.cli('plan')
+        task = self.cli('task', 'claim', '--data', '-', input='{"worker":"reviewer-1"}')
+        with Store(self.run) as store:
+            data = task['data']
+            data.update(status='uncertain', execution={'terminated': True})
+            store.put_record('task', task['id'], data)
+        request = json.dumps({'task_id': task['id'], 'outcome': 'failed', 'evidence': 'Worker stopped without a result'})
+        recovered = self.cli('recover', '--data', '-', input=request)
+        self.assertEqual('failed', recovered['data']['status'])
+        self.assertEqual('Worker stopped without a result', recovered['data']['recovery_decisions'][0]['evidence'])
+        with Store(self.run) as store:
+            data.update(kind='execute', status='uncertain')
+            store.put_record('task', task['id'], data)
+        denied = self.cli('recover', '--data', '-', input=request, expected=2)
+        self.assertIn('terminal', denied['error'])
+
     def test_handoff_identifies_shared_run_and_second_reviewer_can_claim(self):
         self.cli('authorize', '--chat-approval', '-', input=json.dumps(self.chat_approval()))
         self.cli('plan')

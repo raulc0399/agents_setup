@@ -5,7 +5,7 @@ description: Research a question for the user's case with captured sources, inde
 
 # Collaborative research
 
-At the start of each new, joining or resumed session, give the user the [session overview](../collaborative-review/references/teams.md#session-overview): research question, expected recommendation/report, current phase, who does what, and how Agent 2 joins. Present it before research collection, task creation/claims or concern delegation; explain that the actual joining prompt follows initial evidence collection and planning.
+At the start of each new, joining or resumed session, give the user the [session overview](../collaborative-review/references/teams.md#session-overview): research question, expected recommendation/report, current phase, who does what, and how Agent 2 joins. Perform only minimal setup (`doctor`, `create`, role-filtered `handoff`) first, then include the complete copyable Agent 2 joining prompt with real run details in this overview. Wait for the initial `go` before research collection, planning or concern delegation; joining and resumed sessions reuse that go.
 
 Use the installed `collaborative-review/SKILL.md` for the shared coordinator and worker adapter contract. Codex installs skills under `~/.agents/skills`; Claude installs them under `~/.claude/skills`. New runs use that skill's `scripts/review.py`, SQLite records, and generated exports.
 
@@ -17,7 +17,7 @@ Research approval covers a recommendation for the user's question, context, and 
 
 ## Scope and capture
 
-Establish the question, case, exclusions, expected deliverable, and source scope before research. Reuse an existing brief and relevant project files as captured inputs; do not create an empty `REPORT.md`. If a brief must be written, obtain the required project approval first. A later change to captured inputs requires `revise` and new revision-bound authorization/reviews.
+Establish the question, case, exclusions, expected deliverable, and source scope before research. Reuse an existing brief and relevant project files as captured inputs; do not create an empty `REPORT.md`. If a brief is missing, capture its existing enclosing directory with relevant inputs and include brief creation in the startup scope. After go, write the brief and run `revise` before recording initial sources, claims or recommendations, so both teams receive it under the new revision. A later change to captured inputs requires `revise` and fresh reviews, covered by the initial go within the agreed scope.
 
 Use an absolute helper path appropriate to the installation. The examples run from the project directory; replace `research/BRIEF.md` and `src` with existing inputs, and choose a budget appropriate to the work.
 
@@ -26,7 +26,7 @@ REVIEW="$HOME/.agents/skills/collaborative-review/scripts/review.py"
 python3 "$REVIEW" --run research-001 create --project "$PWD" --paths research/BRIEF.md src --approval-scope report-ready --budget-seconds 1800 --max-workers 2
 ```
 
-Present the captured scope in chat and record the user's explicit approval with `authorize --chat-approval FILE`, following the shared review skill's approval JSON contract. Reuse approval already given for that scope and revision; do not require a terminal confirmation or invent consent. Obtain the captured `revision` from creation or `handoff --worker <own-role>` after planning; record creation requires that exact value, not a branch name or working-tree hash. Collect the initial research evidence and recommendation before `plan`, then provide the review ID, shared run directory, revision, assigned role, and a copyable joining prompt for the second agent as described in the shared skill.
+Before research, present the captured scope and copyable Agent 2 joining prompt, then wait for the initial go. Record that actual consent with `authorize --chat-approval FILE` and `follow_revisions: true`, following the shared review skill's JSON contract; no further authorization is needed within this run and scope. Obtain the exact captured `revision` from creation or pre-plan `handoff --worker <own-role>`, not a branch name or working-tree hash. After go, collect the initial research evidence and recommendation, then run `plan` to freeze the common context for both teams. Agent 2 may join immediately but waits for `start_authorized` and its task before starting its independent team.
 
 ## Sources and claims
 
@@ -74,4 +74,4 @@ After `check` returns `APPROVED`, run `finish` and `export`. Deliver `.reviews/r
 
 When evidence remains inconclusive or the budget is exhausted, run `check` and `export` with the `BLOCKED` result and deliver the available evidence, provisional conclusions, unresolved item IDs, limitations, and next decisions. Do not call `finish`, imply approval, or invent agreement to produce a report.
 
-During blind review use `handoff --worker <own-role>` so peer results stay private; afterward use `status --json` for work/blockers and `handoff` for a replacement session. Use `resume` to recover expired work. Uncertain execution effects require an operator recovery decision. A user request to dig deeper requires new evidence and renewed applicable checks; prior approval covers only its previous captured inputs and structured context. Copy an export elsewhere only when the user authorized that destination, and obtain permission before overwriting an existing file.
+During blind review use `handoff --worker <own-role>` so peer results stay private; afterward use `status --json` for work/blockers and `handoff` for a replacement session. Use `resume` to recover expired work. Evidence-backed recovery of current in-scope read-only work uses the initial run grant without another confirmation. Uncertain `execute` effects require separate operator confirmation. A user request to dig deeper within the agreed scope requires new evidence and renewed applicable checks, without new authorization; review verdicts still bind to the captured inputs and structured context. Copy an export elsewhere only when the user authorized that destination, and obtain permission before overwriting an existing file.

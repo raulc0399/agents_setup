@@ -37,9 +37,10 @@ The agent speaking with the user opens each new, joining or resumed session with
 - Goal and result: name the user's question or reviewed files and the expected recommendation, review verdict or report.
 - Current phase: say whether this is setup, research collection, independent review, cross-checking, point agreement or final challenge; identify this chat's role.
 - Who does what: Agent 1 coordinates setup and its own concern team; Agent 2 independently covers the same scope with a separate team; a fresh challenger checks the integrated result later. Name known concern assignments and actual agent identities, clearly marking work that is only planned.
-- Joining: for a separate Agent 2 chat, explain that the user pastes the forthcoming joining prompt into a session with access to the same project and run directory. Say when it will appear: after authorization, `plan` and `handoff`; research first collects its initial evidence and recommendation. If Agent 2 is already present or explicitly delegated, report that actual arrangement.
+- Joining: include the complete copyable prompt now, using real details from minimal setup (`doctor`, `create`, role-filtered `handoff`), before research or `plan`. The user pastes it into a session with access to the same project and run directory. If Agent 2 is already present or explicitly delegated, report that actual arrangement.
+- Startup gate: explain that one explicit `go` covers the full review/research workflow and later in-scope revisions. Wait for it before substantive work; record it with `follow_revisions: true`.
 
-For joining or resumed sessions, first verify the existing run using `handoff --worker <own-role>`; summarize the current role and next action without exposing private peer findings. Do not invent run IDs, revisions, running workers or completed work to fill the overview. This overview adds no approval gate: continue authorized work, and Agent 1 does not wait for Agent 2 to join after publishing the prompt.
+For joining or resumed sessions, first verify the existing run using `handoff --worker <own-role>`; summarize the current role and next action without exposing private peer findings. Do not invent run IDs, revisions, running workers or completed work to fill the overview. Joining and resuming add no approval gate. If `start_authorized` is false and `start_approval_recorded` is false, wait for the original startup go; if permission was previously recorded, stop and report that it no longer covers the run instead of waiting or requesting another go; if true but no assigned task exists, Agent 1 is still preparing the plan or common research context. Recheck role-filtered handoff at intervals of at most 30 seconds within the run deadline, without requesting another go. After recording go and planning, Agent 1 starts its review without waiting for Agent 2 to join.
 
 ## Start independent teams
 
@@ -70,12 +71,17 @@ The first `poll` or dispatcher cycle after every blind task completes publishes 
 
 ## Joining prompt
 
-After setup, display the joining prompt in a copyable code block using the verified skill path, run ID, absolute project/run directories, pinned revision, assigned role, requirements and concern brief. Explain that both sessions need access to that same run directory. Tell the joining agent to use `handoff --worker reviewer-2`, then add:
+During the startup overview, before waiting for go, display the joining prompt in a copyable code block using the verified skill path, run ID, absolute project/run directories, pinned revision, assigned role, requirements and concern brief. Explain that both sessions need access to that same run directory. Tell the joining agent to use `handoff --worker reviewer-2`, then add:
 
 ```text
 Give the user a brief session overview: goal, expected result, current phase,
 your reviewer-2 role, each team's responsibilities and the next action.
-Claim only reviewer-2 and immediately start your own read-only concern subagents.
+Wait until handoff shows start_authorized=true and your initial task exists;
+recheck handoff at intervals of at most 30 seconds within the run deadline.
+If start_approval_recorded=true but start_authorized=false, stop and report
+the unavailable permission instead of waiting or requesting another go.
+Do not create/plan a run. Verify the current revision,
+then claim only reviewer-2 and start your own read-only concern subagents.
 Keep your team independent until both blind reviews are submitted.
 After submission, automatically poll as reviewer-2, process peer messages, claim
 your assigned follow-ups, and route questions to your concern subagents.

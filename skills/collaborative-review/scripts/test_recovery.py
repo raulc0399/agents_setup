@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from review_core.authorization import record_authorization
+from review_core.authorization import record_authorization, revoke_authorization
 from review_core.coordinator import Coordinator
 from review_core.recovery import confirm_process_terminated, handoff, resume_run, resolve_uncertain_task
 from review_core.store import Store
@@ -30,6 +30,20 @@ class RecoveryTests(unittest.TestCase):
         task = self.coordinator.enqueue_task(kind, {'revision': 'rev', 'brief': 'Check',
             'timeout_seconds': 40, 'scope_paths': ['src']}, task_id='stable')
         return self.coordinator.claim_task('worker', lease_seconds=10)
+
+    def test_handoff_distinguishes_pending_start_from_revoked_or_expired_permission(self):
+        self.store.set_meta('paths', ['src'])
+        initial_grant = self.store.list_records('authorization')[0]
+        self.assertTrue(handoff(self.store, now=self.now)['start_approval_recorded'])
+        self.assertTrue(handoff(self.store, now=self.now)['start_authorized'])
+        revoke_authorization(self.store, initial_grant['id'])
+        revoked = handoff(self.store, now=self.now)
+        self.assertTrue(revoked['start_approval_recorded'])
+        self.assertFalse(revoked['start_authorized'])
+        record_authorization(self.store, 'rev', ['review'], ['src'], expires_at=self.now + 1)
+        expired = handoff(self.store, now=self.now + 1)
+        self.assertTrue(expired['start_approval_recorded'])
+        self.assertFalse(expired['start_authorized'])
 
     def test_read_only_recovery_preserves_identity_history_and_budget(self):
         first = self.claim()

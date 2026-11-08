@@ -8,6 +8,7 @@ import time
 
 
 OUTCOMES = {'completed', 'failed', 'cancelled', 'retry'}
+TEAM_LEADS = ('reviewer-1', 'reviewer-2')
 
 
 def _now(value):
@@ -66,6 +67,7 @@ def _worker_tasks(tasks, worker, revision):
     current = [task for task in tasks if task['data']['payload']['revision'] == revision]
     identities = {name for task in current for name in (task['data'].get('worker'),
                   task['data']['payload'].get('worker'), task['data']['payload'].get('reviewer')) if name}
+    identities.update(TEAM_LEADS)
     if not isinstance(worker, str) or not worker or worker not in identities:
         raise ValueError('Unknown handoff worker')
     visible = []
@@ -84,6 +86,7 @@ def _worker_tasks(tasks, worker, revision):
 def handoff(store, now=None, worker=None):
     """Read a consistent checkpoint without changing the run."""
     now = _now(now)
+    from .authorization import start_authorized
     from .research import visible_research_context
     with _checkpoint_transaction(store):
         tasks = store.list_records('task')
@@ -93,6 +96,9 @@ def handoff(store, now=None, worker=None):
         return {'run_id': store.run_dir.name, 'run_dir': str(store.run_dir),
                 'project_root': store.get_meta('project_root'), 'paths': store.get_meta('paths'),
                 'approval_scope': store.get_meta('approval_scope'),
+                'start_authorized': start_authorized(store, now=now),
+                'start_approval_recorded': any(r['data']['decision'] == 'approved' and
+                    'review' in r['data']['actions'] for r in store.list_records('authorization')),
                 'research_context': visible_research_context(store),
                 'status': store.get_meta('status'), 'revision': store.get_meta('revision'),
                 'tasks': tasks if worker is None else _worker_tasks(tasks, worker, store.get_meta('revision')),
