@@ -137,3 +137,68 @@ findings are handed to the Codex agent in `docs/codex-handover.md`.
   (`r1-docs-codex-only`)
 - Checks: 125 Rust tests, rustfmt, Clippy, 16 Python probe tests and the
   development script pass; each fix has a regression test that failed first.
+
+### Codex Batch A (2026-11-09)
+
+- Observer errors and unrelated-thread/unsubscribe events disconnect observation
+  and retry with bounded backoff; a background connection worker preserves bridge
+  responsiveness. Matching `thread/closed`, including during resume with verified
+  server PID, still retires the binding. Launcher readiness is independent of
+  observer connection state. (`r1-observer-teardown`)
+- `OwnedServer::drop` uses the existing SIGTERM/grace/SIGKILL shutdown path and
+  reaps the child. (`r1-server-sigkill`)
+- Successful observer connections log bounded, escaped app-server `userAgent`
+  values in the supervisor log. (`r1-codex-version`)
+- Independent read-only review found a closure-during-resume race; its regression
+  failed before propagating the typed terminal outcome through connection errors.
+  Initial observer, health and graceful-shutdown regressions also failed before
+  their fixes. Native Start/Steer/Queue remain disabled.
+- Checks: 135 Rust tests, 16 Python probe regressions, nine Codex and four Claude
+  lifecycle tests, three isolated observer-fault launcher checks, rustfmt,
+  Clippy with warnings denied, build and development prerequisites passed.
+  The no-model native probe passed on installed Codex 0.167.0, including observed
+  plugin discovery. Independent read-only review approved the corrected batch.
+- Remaining handover findings require later batches and ownership coordination;
+  child-thread native behavior remains unverified. The local review directory
+  contains only the pinned snapshot, so formal revise/plan re-review requires
+  restoring the run metadata and exports.
+
+### Codex Batch B (2026-11-09)
+
+- MCP oversized-line/response errors preserve the stdio process; foreign callers
+  are refused both before forwarding and in the serialized bridge handler.
+  (`r1-mcp-exit`, caller-refusal portion of `r1-codex-subagent`)
+- Stale private sockets recover under the bridge lease using a nonblocking
+  connection check. A verified live CLI still blocks duplicate resume; failed
+  health changes the diagnostic to existing-binding recovery. (`r1-stale-socket`)
+- Socket-length preflight precedes runtime creation; pre-spawn failures remove
+  their runtime. Retired runtimes are pruned only without live recorded processes
+  or panes and with an available bridge lease. (`r1-runtime-dir-leak`)
+- Attached launchers retain/reap the supervisor; HTTP headers have a shorter
+  deadline. Body/response stalls remain bounded at 15 seconds; the bridge remains
+  serialized. (`r1-lifecycle-minor`, mitigation for `r1-bridge-single-thread`)
+- Independent review identified an MCP precheck race and a full-listener stall;
+  both received failing regressions before their fixes. Native sends stay disabled.
+- Validation: 141 Rust tests, rustfmt, Clippy with warnings denied, build,
+  11 Codex launcher lifecycle tests and four Claude lifecycle tests passed.
+  Independent review reproduced the corrected concurrent-caller behavior and
+  approved the socket, cleanup, reaping and duplicate-resume changes.
+
+### Codex Batch C (2026-11-09)
+
+- The probe requires exact plugin discovery, with missing/similarly named plugin
+  regressions. (`r2-plugin-probe-absence`)
+- `--child-threads` persists/subscribes the parent before spawning and verifies
+  native child parent/source/root-turn identity, exact successful plugin caller
+  metadata and completion on both observers. The installed 0.167.0 probe passed;
+  neither observer captured child `thread/started` during that bounded run.
+  Subagents return findings to the bound parent per the Codex skill; native sends
+  remain disabled. (`r2-child-event-coverage`, `r1-codex-subagent`)
+- Checks: 21 Python tests, 141 Rust tests, rustfmt and Clippy with warnings denied
+  passed; no-model and maintained child native probes exited 0. Independent
+  review approved discovery/guidance and the scoped native child findings.
+  A delayed-second-observer regression failed before the final wait correction.
+- Remaining decisions are recorded in `docs/codex-integration.md`: full concurrent
+  client isolation, optional portable fixtures and empty-rollout guidance. Formal
+  re-review is blocked by missing run metadata; worker handoff explicitly reports
+  `.reviews/prism-impl-2026-11-09/run.db` does not exist.

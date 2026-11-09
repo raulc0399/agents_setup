@@ -14,9 +14,16 @@ python3 tests/probe_codex.py
 python3 tests/probe_codex.py --model-turns --model gpt-6-astra --auth-file /absolute/path/to/auth.json
 python3 tests/probe_codex.py --tui-approval --model gpt-6-astra --auth-file /absolute/path/to/auth.json
 python3 tests/probe_codex.py --tui-command --tui-switch --model gpt-6-astra --auth-file /absolute/path/to/auth.json
+python3 tests/probe_codex.py --child-threads --model gpt-6.1-sol --auth-file /absolute/path/to/auth.json
 ```
 
-The default run makes no model requests. The model run makes one new bounded
+The default run makes no model requests. `--child-threads` is a separate opt-in
+model probe: it persists a parent with a READY turn, resumes both observers before
+spawning one child, and verifies native parent/source/root-turn identity before
+the first client accepts one exact harmless plugin tool approval. The second
+observer answers none. It has bounded waits and the same isolated-home/server
+cleanup as the other modes; do not combine it with model/TUI probe flags.
+The model run makes one new bounded
 turn and steers that same turn. Its simulated CLI accepts only that turn's
 `prism_probe.inspect_caller` approval once; the simulated Prism connection never
 answers requests. The TUI run instead prints its isolated tmux socket name;
@@ -36,10 +43,12 @@ Run the probe regressions from `features/prism/`:
 python3 -m unittest discover -s tests -p probe_codex_test.py
 ```
 
-Sixteen tests cover unrelated thread/turn/server/tool results, native metadata
+Twenty-one tests cover unrelated thread/turn/server/tool results, native metadata
 consistency, missing approval/request resolution/assistant evidence, prompt
 echoes, expected versus unexpected resume failures, cleanup failures, and Linux
 process ownership including direct exec, wrapper descendants and reused PIDs.
+They also require exact plugin discovery and reject mismatched child parent,
+spawn source, root turn, tool result and caller metadata.
 Regression checks rejected the previous session/environment-based caller match
 and positive-PID-only server check before their fixes. Cleanup attempts every
 client and always terminates/reaps the launched app-server process.
@@ -76,7 +85,7 @@ no-model rerun does not re-verify those capabilities.
 | Fork identity | PASS | The tested ordinary fork had a different `thread.id` and a different `sessionId`. The schema describes session-tree sharing, so neither equality nor inequality of session IDs is a routing guarantee. |
 | Native package installation | PASS | A temporary `.codex-plugin/plugin.json` with bundled `hooks/hooks.json` installed through `codex plugin marketplace add PATH --json` then `codex plugin add prism-probe@prism-probe-local --json`. |
 | Hook trust/activation | UNTESTABLE | The installed hook did not execute without trust. The actual TUI displayed **Hooks need review**; continuing without trust left it disabled. No hook-trust bypass was used. |
-| Switch to a new thread after input | PASS | After `/new` and a new prompt, both observer clients received `thread/started` for the replacement thread. The adapter retires on this event. |
+| Switch to a new thread after input | PASS | After `/new` and a new prompt, both observer clients received `thread/started` for the replacement thread. The adapter retires its observation on this event; the bridge reconnects to its original bound thread without terminating the CLI. This does not verify current TUI focus. |
 | Immediate TUI focus after `/new` | UNTESTABLE | `/new` alone produced no observer lifecycle event before the next input. This does not prove immediate invalidation when the TUI changes focus; native sends remain disabled. |
 | Queue/other lifecycle races | UNTESTABLE | Queue cancellation, resume/clear/reload invalidation and reconnect outcome reconciliation require further native checks. Queue mode remains disabled. |
 
@@ -139,11 +148,108 @@ Package presence never establishes hook trust or pane authority.
 `src/adapters/mod.rs` defines `AgentAdapter`, `Capabilities` and `NativeEvent`.
 `src/adapters/codex.rs` implements bounded Unix WebSocket RPC, per-connection
 initialization, exact-thread resume, native event filtering, approval observation
-without replies, conservative retirement, generation checks, duplicate request
+without replies, observer retirement, generation checks, duplicate request
 protection, and unknown delivery without automatic retries. Accepted input stays
 `Submitted`; an acknowledgement does not claim that input started execution.
 The public constructor has no capability bypass: start/steer/queue remain gated.
 The private send engine is exercised only through adapter unit tests.
+
+### Review fixes: Codex Batch A (2026-11-09)
+
+Observer connection/RPC/poll failures, socket closure, another thread starting,
+and `thread/unsubscribed` disconnect observation without terminating the private
+app-server or Codex TUI. The bridge retries the same bound thread with exponential
+backoff from 1 to 30 seconds. One background connection worker keeps bounded
+handshake/resume calls from blocking bridge health and pane lifecycle checks.
+Reconnection rechecks the reported app-server PID; it never rebinds the workspace
+or retries a user input. `thread/closed` for the bound thread still retires the
+binding, including closure during resume when the reported server PID matches.
+
+The UI reports observer disconnection while launcher readiness uses authenticated
+bridge health independently. A successful observer connection logs the bounded,
+escaped `initialize.userAgent` in `.prism/run/<uuid>/supervisor.log`.
+Owned app-server shutdown sends SIGTERM, waits up to two seconds, then escalates
+to SIGKILL and reaps the child if it has not exited.
+
+The isolated no-model probe on installed `codex-cli 0.167.0` passed again,
+including explicit observation of `plugin_probe` discovery and its process
+ownership. That no-model run did not verify child-thread plugin inheritance or event delivery,
+current TUI focus, model-turn approval ownership, or native send safety.
+Start/Steer/Queue remain disabled. Fake-server regressions establish the recovery
+behavior above; they do not establish new native Codex event contracts.
+
+Batch A validation: 135 Rust tests, 16 Python probe regressions, nine Codex and
+four Claude lifecycle tests, rustfmt, Clippy with warnings denied, build and
+development prerequisites passed. Three additional isolated launcher checks
+confirmed failed-handshake recovery, unrelated-thread session preservation and
+closure during resume. Independent read-only review approved the corrected
+closure-during-resume behavior after its regression failed before the fix.
+
+### Review fixes: Codex Batch B (2026-11-09)
+
+MCP drains oversized input lines and returns a bounded JSON-RPC error before
+serving the next line; oversized responses also produce an error without exiting.
+A caller from another thread receives `isError` before forwarding. The bridge
+rechecks Codex caller identity in its serialized handler so concurrent first
+callers cannot retire the thread that bound first. This does not establish which
+native caller arrives first or verify subagent plugin inheritance.
+
+Under its exclusive lease, the bridge replaces only an owned private socket
+whose nonblocking connection attempt reports connection refused. A live or full
+listener, symlink, or unexpected file is refused. Duplicate launch still refuses
+a verified live CLI/native process when health fails, and names the existing
+binding for bridge recovery; health failure never authorizes a duplicate session.
+
+The launcher checks socket-path length before creating a runtime, removes its
+new runtime on pre-spawn failure, and prunes retired runtimes under the launch
+lock only when their native process, CLI and UI have exited and their bridge
+lease is available. Runtimes with a live disconnected UI remain available.
+The attached launcher retains and reaps its supervisor child.
+
+HTTP headers have a 200 ms deadline, reducing idle-client stalls. Body reads and
+response writes retain their bounded 15-second deadline; request handling is
+still serialized, so this is not full concurrent-client isolation.
+
+Batch B validation: 141 Rust tests, rustfmt, Clippy with warnings denied, build,
+11 Codex launcher tests and four Claude lifecycle tests passed. Independent
+read-only review approved the changes, including a concurrent-caller reproduction
+that preserves the first binding and a runtime retained for a live UI.
+
+### Review fixes: Codex Batch C (2026-11-09)
+
+The probe now fails if `plugin_probe` is absent from native discovery; a similar
+name cannot pass. Its process ownership check still runs when the exact plugin
+is present. The Codex skill directs subagents/forks to return findings to the
+bound parent rather than reuse its binding or retry a foreign-thread refusal.
+
+The maintained `--child-threads` probe passed on installed `codex-cli 0.167.0`
+with `gpt-6.1-sol`. Both observers subscribed to a persisted parent before the
+spawn turn. Native `thread/read` linked the child through `parentThreadId`,
+`source.subAgent.thread_spawn.parent_thread_id` and its turn's `rootTurnId`.
+Both observers received the child's successful `plugin_probe.inspect_caller`
+result and completed turn with matching native top-level/nested thread IDs and
+nested turn ID. The exploratory full result also showed a shared parent/child
+session ID and separate MCP process IDs: plugin access does not imply process
+identity, and session ID cannot authorize the caller.
+
+Neither subscribed observer captured child `thread/started` through parent-turn
+completion in the successful probes. This is a bounded observation, not a claim
+that child creation can never emit it. One exact approval was answered by the
+simulated CLI; the second observer answered none. Other approval classes, current
+TUI focus and native Start/Steer/Queue remain unverified and disabled.
+
+Validation: 21 Python probe tests, 141 Rust tests, rustfmt and Clippy with
+warnings denied passed. The default no-model and maintained child probes exited
+0. The missing-plugin regression failed before its fix. Independent review also
+identified a delayed-observer race; its regression failed before the probe was
+changed to wait for both clients' correlated evidence within the existing deadline.
+
+Remaining decisions: full concurrent-client isolation beyond the shorter header
+deadline; optional portability of existing `/usr/bin/tmux`/`cat` test fixtures;
+and tailored launcher guidance for an unregistered thread with no persisted
+rollout (an empty thread cannot necessarily be resumed). Formal revised review
+requires restoring `.reviews/prism-impl-2026-11-09/run.db` and its exports; the
+worker handoff currently reports that the database does not exist.
 
 The shipped `plugins/codex/` package installed successfully using the actual
 Codex CLI in a disposable home. Its `.mcp.json` `env_vars` shape was also verified

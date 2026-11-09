@@ -141,10 +141,7 @@ struct OwnedServer(Child);
 
 impl Drop for OwnedServer {
     fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-        }
-        let _ = self.0.wait();
+        stop_child(&mut self.0);
     }
 }
 
@@ -271,6 +268,11 @@ fn reject_duplicate_resume(
                 .verify_binding(&binding)
                 .is_ok()
         {
+            ensure!(
+                bridge::is_ready(&path),
+                "this conversation's CLI is still live but its Prism bridge is unavailable; recover the existing binding with: prism bridge --binding {}",
+                path.display()
+            );
             bail!(
                 "this exact {} conversation already has a live Prism binding at {}; use its existing tmux pane {}",
                 agent.label(),
@@ -282,16 +284,62 @@ fn reject_duplicate_resume(
     Ok(())
 }
 
+struct UnstartedRuntime(Option<PathBuf>);
+
+impl Drop for UnstartedRuntime {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn prune_retired_runtimes(runtime: &RuntimeDirectory) -> Result<()> {
+    let root = runtime.path().parent().context("runtime root missing")?;
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        let Ok(binding) = read_binding(&path.join("binding.json")) else {
+            continue;
+        };
+        let alive = |pid, birth: &str| {
+            prism::session::process_start_time(pid).is_ok_and(|actual| actual == birth)
+        };
+        if !binding.retired
+            || alive(binding.server_pid, &binding.server_start_time)
+            || alive(binding.cli.pid, &binding.cli.start_time)
+            || binding
+                .prism
+                .as_ref()
+                .is_some_and(|pane| alive(pane.pid, &pane.start_time))
+        {
+            continue;
+        }
+        let Ok(lease) = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path.join("bridge.lock"))
+        else {
+            continue;
+        };
+        if lease.try_lock().is_err() {
+            continue;
+        }
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
 fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) -> Result<()> {
     let signals = StartupSignals::new()?;
     let agent = agent.kind();
     let native = executable(agent.cli_name())?;
     executable("tmux")?;
-    let runtime = RuntimeDirectory::create(project)?;
-    let binding_path = runtime.binding_path();
+    let project = project.canonicalize()?;
     ensure!(
-        runtime
-            .path()
+        project
+            .join(".prism/run")
+            .join(Uuid::nil().to_string())
             .join("bridge.sock")
             .as_os_str()
             .as_encoded_bytes()
@@ -299,7 +347,11 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
             < UNIX_SOCKET_LIMIT,
         "project path is too long for a private Unix socket; use a shorter canonical project path"
     );
+    let runtime = RuntimeDirectory::create(&project)?;
+    let mut unstarted = UnstartedRuntime(Some(runtime.path().to_owned()));
+    let binding_path = runtime.binding_path();
     let launch_lock = lock_launches(&runtime, &signals)?;
+    prune_retired_runtimes(&runtime)?;
     reject_duplicate_resume(&runtime, &agent, resume.as_deref())?;
     let inside = std::env::var("TMUX_PANE")
         .ok()
@@ -355,6 +407,7 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
         child: Some(command.spawn().context("start Prism supervisor")?),
         binding_path: binding_path.clone(),
     };
+    unstarted.0 = None;
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let binding = loop {
         signals.check()?;
@@ -376,7 +429,11 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
                     log_path.display()
                 );
             }
-            if bridge::connection_info(&binding_path).connected {
+            let ready = match binding.agent {
+                AgentKind::Codex => bridge::is_ready(&binding_path),
+                AgentKind::Claude => bridge::connection_info(&binding_path).connected,
+            };
+            if ready {
                 break binding;
             }
         }
@@ -387,7 +444,7 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
     };
     signals.check()?;
     // The healthy bridge now owns its lifetime; normal detach must keep it running.
-    supervisor.child.take();
+    let mut owned_supervisor = supervisor.child.take();
     drop(launch_lock);
     let tmux = TmuxClient::socket(&binding.tmux.socket_path);
     if detach {
@@ -406,6 +463,11 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
     } else {
         let mut attached = AttachedClient(tmux.attach(&binding)?);
         loop {
+            if let Some(child) = &mut owned_supervisor
+                && child.try_wait()?.is_some()
+            {
+                owned_supervisor = None;
+            }
             ensure!(
                 !signals.stopping.load(Ordering::Relaxed),
                 "Prism attachment interrupted; the registered session remains {}",
@@ -617,7 +679,11 @@ fn native_cli(options: NativeCli) -> Result<()> {
                 "binding retired before {} startup",
                 binding.agent.label()
             );
-            if bridge::connection_info(&options.binding).connected {
+            let ready = match binding.agent {
+                AgentKind::Codex => bridge::is_ready(&options.binding),
+                AgentKind::Claude => bridge::connection_info(&options.binding).connected,
+            };
+            if ready {
                 break binding;
             }
         }
@@ -712,5 +778,59 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("prism: {error:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+
+    #[test]
+    fn overlong_launch_does_not_create_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("p".repeat(100));
+        fs::create_dir(&project).unwrap();
+        assert!(launch(Agent::Codex, &project, None, true).is_err());
+        assert!(!project.join(".prism").exists());
+    }
+
+    #[test]
+    fn owned_codex_server_gets_graceful_shutdown() {
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "trap 'echo stopped; exit 0' TERM; echo ready; while :; do :; done",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        assert_eq!(line, "ready\n");
+        drop(OwnedServer(child));
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        assert_eq!(line, "stopped\n");
+    }
+
+    #[test]
+    fn owned_codex_server_escalates_when_sigterm_is_ignored() {
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; echo ready; exec sleep 30"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        assert_eq!(line, "ready\n");
+        let started = Instant::now();
+        drop(OwnedServer(child));
+        assert!(started.elapsed() >= SHUTDOWN_GRACE);
+        assert!(started.elapsed() < SHUTDOWN_GRACE + Duration::from_secs(2));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
     }
 }

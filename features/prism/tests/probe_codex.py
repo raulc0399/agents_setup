@@ -180,6 +180,102 @@ async def inspect_mcp(rpc, thread_id, report, name, server="prism_probe"):
     return observed
 
 
+def child_of_turn(detail, child, parent, turn, root):
+    source = detail.get("source", {})
+    return (isinstance(source, dict) and detail.get("id") == child and child != parent
+            and detail.get("parentThreadId") == parent
+            and source.get("subAgent", {}).get("thread_spawn", {}).get("parent_thread_id") == parent
+            and any(t.get("id") == turn and t.get("rootTurnId") == root for t in detail.get("turns", [])))
+
+
+def child_tool_observed(events, child, turn, root):
+    if not isinstance(turn, str) or not turn:
+        return False
+    completed = any(e.get("method") == "turn/completed" and e.get("params", {}).get("threadId") == child
+                    and e.get("params", {}).get("turn", {}).get("id") == turn
+                    and e.get("params", {}).get("turn", {}).get("rootTurnId") == root
+                    and not e.get("params", {}).get("turn", {}).get("error")
+                    and e.get("params", {}).get("turn", {}).get("status") == "completed" for e in events)
+    if not completed:
+        return False
+    for event in events:
+        params = event.get("params", {})
+        item = params.get("item", {})
+        if (event.get("method") != "item/completed" or params.get("threadId") != child or params.get("turnId") != turn
+                or item.get("type") != "mcpToolCall" or item.get("server") != "plugin_probe"
+                or item.get("tool") != "inspect_caller" or item.get("arguments") != {}
+                or item.get("status") != "completed" or item.get("error") or (item.get("result") or {}).get("isError")):
+            continue
+        for content in (item.get("result") or {}).get("content", []):
+            try:
+                observed = json.loads(content.get("text", ""))
+                if exact_caller(observed, child) and observed.get("identity", {}).get("turn_id") == turn:
+                    return True
+            except (ValueError, TypeError, AttributeError):
+                continue
+    return False
+
+
+async def child_probe(first, second, parent, report, args):
+    bootstrap = await first.call("turn/start", {"threadId": parent, "model": args.model, "effort": "low",
+                                              "input": [{"type": "text", "text": "Reply READY. Use no tools."}]})
+    bootstrap_id = bootstrap["turn"]["id"]
+    deadline = time.monotonic() + TURN_TIMEOUT
+    while not any(e.get("method") == "turn/completed" and e.get("params", {}).get("threadId") == parent
+                  and e.get("params", {}).get("turn", {}).get("id") == bootstrap_id
+                  and e.get("params", {}).get("turn", {}).get("status") == "completed" for e in first.events):
+        if time.monotonic() >= deadline:
+            await first.call("turn/interrupt", {"threadId": parent, "turnId": bootstrap_id})
+            raise RuntimeError("child probe bootstrap did not complete")
+        await asyncio.sleep(0.05)
+    for client in [first, second]:
+        resumed = await client.call("thread/resume", {"threadId": parent})
+        if resumed["thread"]["id"] != parent:
+            raise RuntimeError("child probe observer resumed a different parent")
+    offsets = [len(first.events), len(second.events)]
+    prompt = "This is an isolated Prism integration probe. Spawn exactly one subagent. Tell it: Call the plugin_probe inspect_caller MCP tool exactly once, then reply CHILD_DONE. Do not use any other tools or write files. Wait for the child to finish. Then reply PARENT_DONE. Do not call the MCP tool yourself."
+    started = await first.call("turn/start", {"threadId": parent, "model": args.model, "effort": "low",
+                                            "input": [{"type": "text", "text": prompt}]})
+    turn = started["turn"]["id"]
+    children, answered = {}, set()
+    deadline = time.monotonic() + TURN_TIMEOUT
+    completed = None
+    while time.monotonic() < deadline:
+        for event in first.events[offsets[0]:]:
+            params = event.get("params", {})
+            meta = params.get("_meta", {})
+            child = params.get("threadId")
+            if (event.get("method") == "mcpServer/elicitation/request" and event.get("id") not in answered
+                    and child and child != parent and params.get("serverName") == "plugin_probe"
+                    and params.get("mode") == "form" and meta.get("codex_approval_kind") == "mcp_tool_call"
+                    and meta.get("tool_name") == "inspect_caller" and meta.get("tool_params") == {}):
+                answered.add(event["id"])
+                detail = (await first.call("thread/read", {"threadId": child, "includeTurns": True}))["thread"]
+                if child_of_turn(detail, child, parent, params.get("turnId"), turn) and not children:
+                    children[child] = {"turn": params.get("turnId"), "parent": detail["parentThreadId"], "source": detail.get("source")}
+                    await first.socket.send(json.dumps({"id": event["id"], "result": {"action": "accept", "content": {}}}))
+            if (event.get("method") == "turn/completed" and params.get("threadId") == parent
+                    and params.get("turn", {}).get("id") == turn):
+                completed = params["turn"]
+        if completed and children and all(
+                child_tool_observed(client.events[offset:], child, info["turn"], turn)
+                for client, offset in [(first, offsets[0]), (second, offsets[1])]
+                for child, info in children.items()):
+            break
+        await asyncio.sleep(0.05)
+    if not completed:
+        await first.call("turn/interrupt", {"threadId": parent, "turnId": turn})
+    check(report, "child_parent_completed", bool(completed) and completed.get("status") == "completed", completed)
+    check(report, "child_parent_identity", len(children) == 1, children)
+    report["child_thread_started_observations"] = {}
+    for label, client, offset in [("first", first, offsets[0]), ("second", second, offsets[1])]:
+        events = client.events[offset:]
+        check(report, "child_plugin_caller_" + label, len(children) == 1 and all(child_tool_observed(events, child, info["turn"], turn) for child, info in children.items()),
+              {"parent_subscribed_before_spawn": True, "observer_replied": label == "first" and bool(children)})
+        report["child_thread_started_observations"][label] = [e["params"]["thread"]["id"] for e in events
+            if e.get("method") == "thread/started" and e.get("params", {}).get("thread", {}).get("id") in children]
+
+
 def is_probe_approval(event, thread_id, turn_id):
     params = event.get("params", {})
     meta = params.get("_meta", {})
@@ -400,6 +496,7 @@ async def run_native(args, directory, report):
                   "Native MCP PID and birth identity must have the verified app-server as parent.")
             servers = await first.call("mcpServerStatus/list", {})
             report["plugin_mcp_names"] = [server["name"] for server in servers["data"] if "plugin_probe" in server["name"]]
+            check(report, "native_plugin_mcp_discovery", "plugin_probe" in report["plugin_mcp_names"], report["plugin_mcp_names"])
             if "plugin_probe" in report["plugin_mcp_names"]:
                 plugin_mcp = await inspect_mcp(first, thread["id"], report, "native_plugin_mcp_caller", "plugin_probe")
                 check(report, "native_plugin_mcp_process_ownership", server_owned and mcp_process_owned(plugin_mcp, native_pid, native_birth),
@@ -419,7 +516,9 @@ async def run_native(args, directory, report):
                 check(report, "idle_steer_rejected", False, "Unexpected success")
             except RuntimeError as error:
                 check(report, "idle_steer_rejected", "No active turn" in str(error) or "no active turn" in str(error), str(error))
-            if args.model_turns:
+            if getattr(args, "child_threads", False):
+                await child_probe(first, second, thread["id"], report, args)
+            elif args.model_turns:
                 await model_probe(first, second, thread["id"], report, args, directory, env, tmux_socket)
                 forked = await first.call("thread/fork", {"threadId": thread["id"]})
                 check(report, "fork_identity", forked["thread"]["id"] != thread["id"], {"different_thread": forked["thread"]["id"] != thread["id"], "shared_session": forked["thread"]["sessionId"] == thread["sessionId"]})
@@ -432,6 +531,7 @@ def main():
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--mcp-server", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--model-turns", action="store_true", help="Run one bounded model turn in a new isolated thread")
+    parser.add_argument("--child-threads", action="store_true", help="Run isolated parent/child model turns and verify inherited plugin caller identity")
     parser.add_argument("--tui-approval", action="store_true", help="Require manual approval in an isolated tmux Codex TUI; JSON-RPC clients never approve")
     parser.add_argument("--tui-switch", action="store_true", help="After TUI approval, test whether /new is observable by other clients")
     parser.add_argument("--tui-command", action="store_true", help="Require actual TUI approval of one command writing a probe-owned temporary file")
@@ -447,7 +547,9 @@ def main():
         return 0
     report = {"host": platform.platform(), "date": time.strftime("%Y-%m-%d", time.gmtime()), "checks": {}}
     report["cli_version"] = subprocess.check_output([args.codex, "--version"], text=True, timeout=RPC_TIMEOUT).strip()
-    for name in ["model_turn_completed", "approval_ownership", "busy_steering", "queue_cancellation", "native_plugin_hooks", "trusted_pane_bootstrap", "model_generated_mcp_caller"]:
+    if args.child_threads and (args.model_turns or args.tui_approval):
+        parser.error("--child-threads is a separate probe; do not combine it with other model/TUI modes")
+    for name in ["model_turn_completed", "approval_ownership", "busy_steering", "queue_cancellation", "native_plugin_hooks", "trusted_pane_bootstrap", "model_generated_mcp_caller", "child_parent_completed", "child_parent_identity", "child_plugin_caller_first", "child_plugin_caller_second"]:
         report["checks"][name] = {"status": "untestable", "evidence": "Not exercised by this run; capability remains disabled."}
     try:
         with tempfile.TemporaryDirectory(prefix="prism-codex-") as temporary:

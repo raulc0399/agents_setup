@@ -17,6 +17,10 @@ automatically extract conversation content or open another agent conversation.
   answer in this exact conversation, then revise the referenced content if asked.
 - Native caller identity comes from the CLI transport. Never supply conversation,
   pane, server identity or binding credentials as model arguments.
+- Subagents and forked threads must return their findings to the bound parent
+  conversation for publication. Do not reuse the parent's Prism binding, spoof
+  its identity, or retry a refusal from a different thread. Plugin inheritance
+  does not establish authority to publish into the parent's workspace.
 - If the tools report an unregistered or disconnected binding, show their exact
   launcher/resume instruction. Do not guess a pane or create a replacement thread.
 - If native sending is unavailable, ask the user to explicitly share the question

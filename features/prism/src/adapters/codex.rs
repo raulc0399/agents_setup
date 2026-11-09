@@ -17,17 +17,20 @@ use uuid::Uuid;
 const MAX_EVENTS: usize = 512;
 const MAX_ATTEMPTS: usize = 1024;
 const EVENT_POLL_TIMEOUT: Duration = Duration::from_millis(10);
+const THREAD_CLOSED_REASON: &str = "Codex closed the bound thread";
 const SEND_GATE_REASON: &str = "Native sends are disabled: current TUI conversation focus and all required approval ownership checks are not verified. Share the question and retrieve it from the bound Codex conversation.";
 
 #[derive(Debug, thiserror::Error)]
-enum RpcError {
+pub(crate) enum RpcError {
     #[error("Codex rejected the request ({code}): {message}")]
     Rejected { code: i64, message: String },
     #[error("{0}")]
     Connection(String),
+    #[error("{THREAD_CLOSED_REASON}")]
+    ThreadClosed { server_pid: u32 },
 }
 
-fn connect_unix(path: &Path) -> io::Result<UnixStream> {
+pub(crate) fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     let bytes = path.as_os_str().as_bytes();
     // SAFETY: zero is valid for the plain C Unix socket address structure.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -114,6 +117,7 @@ pub struct CodexAdapter {
     next_request_id: u64,
     events: Vec<NativeEvent>,
     retired: Option<String>,
+    thread_closed: bool,
     capabilities: Capabilities,
     attempts: HashMap<Uuid, (String, DeliveryOutcome)>,
     pub server_user_agent: String,
@@ -146,6 +150,7 @@ impl CodexAdapter {
             next_request_id: 0,
             events: Vec::new(),
             retired: None,
+            thread_closed: false,
             capabilities: Capabilities {
                 start: false,
                 steer: false,
@@ -185,6 +190,14 @@ impl CodexAdapter {
         &self.thread_id
     }
 
+    pub(crate) fn thread_closed(&self) -> bool {
+        self.thread_closed
+    }
+
+    pub(crate) fn retirement_reason(&self) -> Option<&str> {
+        self.retired.as_deref()
+    }
+
     fn push_event(&mut self, event: NativeEvent) {
         if self.events.len() >= MAX_EVENTS {
             self.events.clear();
@@ -217,7 +230,11 @@ impl CodexAdapter {
             return;
         }
         match method {
-            "thread/closed" | "thread/unsubscribed" => self.retire("Codex closed the bound thread"),
+            "thread/closed" => {
+                self.thread_closed = true;
+                self.retire(THREAD_CLOSED_REASON);
+            }
+            "thread/unsubscribed" => self.retire("Codex unsubscribed the observer"),
             "turn/started" => {
                 if let Some(turn_id) = params["turn"]["id"].as_str() {
                     self.push_event(NativeEvent::TurnStarted {
@@ -288,6 +305,11 @@ impl CodexAdapter {
             };
             if message.get("method").is_some() {
                 self.observe(&message);
+                if self.thread_closed {
+                    return Err(RpcError::ThreadClosed {
+                        server_pid: self.server_pid,
+                    });
+                }
                 if let Some(reason) = &self.retired {
                     return Err(RpcError::Connection(reason.clone()));
                 }
@@ -739,7 +761,7 @@ mod contract {
     }
 
     #[test]
-    fn different_thread_start_retires_the_binding() {
+    fn different_thread_start_retires_only_the_observer() {
         let fixture = Fixture::new("normal");
         let mut adapter = fixture.connect();
         adapter.observe(

@@ -106,6 +106,18 @@ pub fn operation(name: &str, arguments: Value) -> Result<Operation> {
 fn tool_result(request: &Value, binding_path: Option<&Path>) -> Result<Value> {
     let thread = native_thread(request)?;
     let binding_path = binding_path.with_context(|| format!("Prism requires a trusted tmux binding. Resume this exact conversation with: prism --agent codex --resume {thread}. An unregistered CLI cannot safely identify its pane."))?;
+    let binding = crate::session::read_binding(binding_path)?;
+    ensure!(
+        binding.agent == crate::model::AgentKind::Codex,
+        "Prism MCP requires a Codex binding"
+    );
+    ensure!(
+        binding
+            .conversation
+            .as_deref()
+            .is_none_or(|bound| bound == thread),
+        "Only the bound Codex thread may use this Prism binding; child and unrelated threads must not reuse it"
+    );
     let name = request["params"]["name"]
         .as_str()
         .context("tool name missing")?;
@@ -169,22 +181,28 @@ pub fn serve<R: BufRead, W: Write>(
         if count == 0 {
             return Ok(());
         }
-        ensure!(
-            count <= MAX_PAYLOAD_BYTES,
-            "MCP request exceeds payload limit"
-        );
-        let response = match serde_json::from_slice::<Value>(&bytes) {
-            Ok(request) => handle(&request, binding_path),
-            Err(_) => Some(
-                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid JSON"}}),
-            ),
+        let response = if count > MAX_PAYLOAD_BYTES {
+            if bytes.last() != Some(&b'\n') {
+                input.skip_until(b'\n')?;
+            }
+            Some(
+                json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"MCP request exceeds payload limit"}}),
+            )
+        } else {
+            match serde_json::from_slice::<Value>(&bytes) {
+                Ok(request) => handle(&request, binding_path),
+                Err(_) => Some(
+                    json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid JSON"}}),
+                ),
+            }
         };
         if let Some(response) = response {
-            let bytes = serde_json::to_vec(&response)?;
-            ensure!(
-                bytes.len() <= MAX_RESPONSE_BYTES,
-                "MCP response exceeds payload limit"
-            );
+            let mut bytes = serde_json::to_vec(&response)?;
+            if bytes.len() > MAX_RESPONSE_BYTES {
+                bytes = serde_json::to_vec(
+                    &json!({"jsonrpc":"2.0","id":response["id"],"error":{"code":-32603,"message":"MCP response exceeds payload limit"}}),
+                )?;
+            }
             output.write_all(&bytes)?;
             output.write_all(b"\n")?;
             output.flush()?;

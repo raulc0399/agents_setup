@@ -1,6 +1,7 @@
 """Regression tests for native evidence attribution and probe cleanup."""
 
 import json
+import asyncio
 from pathlib import Path
 import subprocess
 import tempfile
@@ -125,10 +126,91 @@ class ProcessIdentityTests(unittest.TestCase):
         self.assertEqual(identity, {"threadId": "wrong"})
 
 
+class ChildEvidenceTests(unittest.TestCase):
+    def test_child_parent_source_and_root_must_all_match(self):
+        detail = {"id": "child", "parentThreadId": "parent", "source": {"subAgent": {"thread_spawn": {"parent_thread_id": "parent"}}}, "turns": [{"id": "turn", "rootTurnId": "root"}]}
+        self.assertTrue(probe.child_of_turn(detail, "child", "parent", "turn", "root"))
+        for path in [("id",), ("parentThreadId",), ("source", "subAgent", "thread_spawn", "parent_thread_id"), ("turns", 0, "id"), ("turns", 0, "rootTurnId")]:
+            changed = json.loads(json.dumps(detail))
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = "unrelated"
+            self.assertFalse(probe.child_of_turn(changed, "child", "parent", "turn", "root"))
+
+    def test_child_tool_requires_exact_successful_correlated_result(self):
+        events = native_events()[2:]
+        events[0]["params"]["item"].update(server="plugin_probe", arguments={})
+        events[-1]["params"]["turn"]["rootTurnId"] = "root"
+        self.assertTrue(probe.child_tool_observed(events, "thread", "turn", "root"))
+        paths = [(0, "params", "threadId"), (0, "params", "turnId"), (0, "params", "item", "server"), (0, "params", "item", "tool"), (0, "params", "item", "status"), (0, "params", "item", "error"), (0, "params", "item", "arguments"), (-1, "params", "turn", "id"), (-1, "params", "turn", "rootTurnId"), (-1, "params", "turn", "status"), (-1, "params", "turn", "error")]
+        for path in paths:
+            changed = json.loads(json.dumps(events))
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = "unrelated"
+            self.assertFalse(probe.child_tool_observed(changed, "thread", "turn", "root"), path)
+        for field in ["threadId", "thread_id", "turn_id"]:
+            changed = json.loads(json.dumps(events))
+            content = changed[0]["params"]["item"]["result"]["content"][0]
+            observed = json.loads(content["text"])
+            observed["identity"][field] = "unrelated"
+            content["text"] = json.dumps(observed)
+            self.assertFalse(probe.child_tool_observed(changed, "thread", "turn", "root"))
+
+
+class ChildObserverTimingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_child_probe_waits_for_the_second_observer(self):
+        events = native_events()[2:]
+        events[0]["params"]["item"].update(server="plugin_probe", arguments={})
+        events[-1]["params"]["turn"]["rootTurnId"] = "root"
+        first = SimpleNamespace(events=[], socket=SimpleNamespace())
+        second = SimpleNamespace(events=[], call=AsyncMock(return_value={"thread": {"id": "parent"}}))
+        started = 0
+
+        async def call(method, params):
+            nonlocal started
+            if method == "thread/resume":
+                return {"thread": {"id": "parent"}}
+            if method == "thread/read":
+                return {"thread": {"id": "thread", "parentThreadId": "parent", "source": {"subAgent": {"thread_spawn": {"parent_thread_id": "parent"}}}, "turns": [{"id": "turn", "rootTurnId": "root"}]}}
+            self.assertEqual(method, "turn/start")
+            started += 1
+            if started == 1:
+                first.events.append({"method": "turn/completed", "params": {"threadId": "parent", "turn": {"id": "bootstrap", "status": "completed"}}})
+                return {"turn": {"id": "bootstrap"}}
+            approval = native_events()[0]
+            approval["params"]["serverName"] = "plugin_probe"
+            first.events.append(approval)
+            return {"turn": {"id": "root"}}
+
+        async def approve(response):
+            first.events.extend(events)
+            first.events.append({"method": "turn/completed", "params": {"threadId": "parent", "turn": {"id": "root", "status": "completed"}}})
+            asyncio.get_running_loop().call_later(0.1, second.events.extend, events)
+
+        first.call = call
+        first.socket.send = approve
+        report = {"checks": {}}
+        await probe.child_probe(first, second, "parent", report, SimpleNamespace(model="test"))
+        self.assertEqual(report["checks"]["child_plugin_caller_second"]["status"], "pass")
+
+
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
-    async def run_native(self, *, tui=False, close_error=False, resume_error=None, tmux_timeout=False):
+    async def test_missing_plugin_discovery_fails_probe(self):
+        for names in [[], ["unrelated_plugin_probe"]]:
+            report, _, _ = await self.run_native(plugin_names=names)
+            self.assertEqual(report["checks"].get("native_plugin_mcp_discovery", {}).get("status"), "fail")
+
+    async def test_exact_plugin_discovery_is_required(self):
+        report, _, _ = await self.run_native(plugin_names=["plugin_probe"])
+        self.assertEqual(report["checks"]["native_plugin_mcp_discovery"]["status"], "pass")
+        self.assertIn("native_plugin_mcp_process_ownership", report["checks"])
+
+    async def run_native(self, *, tui=False, close_error=False, resume_error=None, tmux_timeout=False, plugin_names=()):
         first = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("close failed") if close_error else None),
-                                call=AsyncMock(side_effect=[{"process": {"id": 42}}, {"thread": {"id": "thread", "sessionId": "thread"}}, {"data": []}]))
+                                call=AsyncMock(side_effect=[{"process": {"id": 42}}, {"thread": {"id": "thread", "sessionId": "thread"}}, {"data": [{"name": name} for name in plugin_names]}]))
         second = SimpleNamespace(close=AsyncMock(), call=AsyncMock(side_effect=[resume_error or RuntimeError("thread/resume: -32600: no rollout found for thread id thread"), {"thread": {"id": "other"}}, RuntimeError("turn/steer: -32600: no active turn to steer")]))
         server = Mock()
         args = SimpleNamespace(auth_file=None, codex="codex", model="test", model_turns=False, tui_approval=tui)

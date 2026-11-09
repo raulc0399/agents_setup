@@ -70,6 +70,29 @@ fn stale_socket_is_not_a_connected_bridge() {
 }
 
 #[test]
+fn codex_mcp_refuses_foreign_thread_before_contacting_bridge() {
+    let mut fixture = Fixture::new();
+    fixture
+        .binding
+        .bind_conversation(&Uuid::new_v4().to_string())
+        .unwrap();
+    fixture.runtime.write_binding(&fixture.binding).unwrap();
+    let response = prism::mcp::handle(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"prism_inspect","arguments":{},"_meta":{"threadId":Uuid::new_v4().to_string()}}}), Some(&fixture.runtime.binding_path())).unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("bound Codex thread")
+    );
+    assert!(
+        !prism::session::read_binding(&fixture.runtime.binding_path())
+            .unwrap()
+            .retired
+    );
+}
+
+#[test]
 fn authentication_precedes_binding_and_retirement() {
     let mut fixture = Fixture::new();
     let thread = Uuid::new_v4().to_string();
@@ -286,38 +309,44 @@ fn health_requires_an_authenticated_matching_live_service() {
     use std::io::{Read, Write};
     use std::time::Duration;
     let fixture = Fixture::new();
-    for wrong_generation in [false, true] {
+    for (wrong_generation, native_connected) in [(false, true), (true, true), (false, false)] {
         let socket = socket_path(&fixture.runtime.binding_path()).unwrap();
         let listener = UnixListener::bind(&socket).unwrap();
         let token = fixture.binding.token.clone();
         let id = fixture.binding.binding_id;
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                }
+                let header = String::from_utf8(header).unwrap().to_lowercase();
+                assert!(header.starts_with("get /health http/1.1"));
+                assert!(header.contains(&format!("authorization: bearer {token}")));
+                let body = serde_json::json!({"version":PROTOCOL_VERSION,"binding_id":id,"generation":if wrong_generation { 2 } else { 1 },"native_connected":native_connected}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
                 .unwrap();
-            let mut header = Vec::new();
-            while !header.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                stream.read_exact(&mut byte).unwrap();
-                header.push(byte[0]);
             }
-            let header = String::from_utf8(header).unwrap().to_lowercase();
-            assert!(header.starts_with("get /health http/1.1"));
-            assert!(header.contains(&format!("authorization: bearer {token}")));
-            let body = serde_json::json!({"version":PROTOCOL_VERSION,"binding_id":id,"generation":if wrong_generation { 2 } else { 1 }}).to_string();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
         });
         let info = connection_info(&fixture.runtime.binding_path());
-        assert_eq!(info.connected, !wrong_generation);
+        assert_eq!(info.connected, !wrong_generation && native_connected);
         if info.connected {
             assert_eq!(info.send_modes, vec![prism::model::DeliveryMode::Share]);
         }
+        assert_eq!(
+            prism::bridge::is_ready(&fixture.runtime.binding_path()),
+            !wrong_generation
+        );
         server.join().unwrap();
         std::fs::remove_file(socket).unwrap();
     }

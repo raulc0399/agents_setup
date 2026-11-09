@@ -1,6 +1,10 @@
 //! Authenticated, conversation-bound operations used by native CLI extensions.
 use crate::actions::{ContentAction, PublishRequest};
-use crate::adapters::{AgentAdapter, NativeEvent, claude::ClaudeAdapter, codex::CodexAdapter};
+use crate::adapters::{
+    AgentAdapter, NativeEvent,
+    claude::ClaudeAdapter,
+    codex::{CodexAdapter, RpcError as CodexRpcError},
+};
 use crate::model::{AgentKind, DeliveryMode, Id, MAX_PAYLOAD_BYTES};
 use crate::session::{LiveBinding, TmuxClient, process_start_time, read_binding, write_binding};
 use crate::store::Store;
@@ -10,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -23,10 +27,14 @@ pub const PROTOCOL_VERSION: u16 = 1;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const BINDING_VERIFY_RETRIES: u32 = 5;
+const NATIVE_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const NATIVE_RETRY_MAX: Duration = Duration::from_secs(30);
+const MAX_NATIVE_VERSION_CHARS: usize = 256;
 const RESPONSE_LIMIT: usize = 4 * MAX_PAYLOAD_BYTES;
 const LIST_LIMIT: usize = 100;
 const QUESTION_PREVIEW_CHARS: usize = 512;
 const HEADER_LIMIT: usize = 16 * 1024;
+const HEADER_TIMEOUT: Duration = Duration::from_millis(200);
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_LIFECYCLE_REASON_BYTES: usize = 64;
 const LIFECYCLE_IS_NATIVE: &str = "lifecycle events are native for this agent";
@@ -317,32 +325,21 @@ impl BridgeClient {
     }
 }
 
-/// The bridge-owned observer of the bound native conversation, created once per connection.
+/// Bridge-owned native observation, scoped to the bound conversation.
 enum NativeObserver {
-    Codex(Box<CodexAdapter>),
+    Codex(CodexObserver),
     Claude(ClaudeAdapter),
 }
 
 impl NativeObserver {
     fn connect(binding: &LiveBinding, conversation: &str) -> Result<Self> {
         match binding.agent {
-            AgentKind::Codex => {
-                let socket = binding
-                    .server_endpoint
-                    .strip_prefix("unix://")
-                    .context("native server must use a Unix socket")?;
-                let adapter = CodexAdapter::connect(
-                    Path::new(socket),
-                    conversation,
-                    binding.generation,
-                    IO_TIMEOUT,
-                )?;
-                ensure!(
-                    adapter.server_pid == binding.server_pid,
-                    "native server process changed"
-                );
-                Ok(Self::Codex(Box::new(adapter)))
-            }
+            AgentKind::Codex => Ok(Self::Codex(CodexObserver {
+                adapter: None,
+                connecting: None,
+                retry_at: Instant::now(),
+                retry_delay: NATIVE_RETRY_INITIAL,
+            })),
             AgentKind::Claude => Ok(Self::Claude(ClaudeAdapter::new(
                 conversation,
                 binding.generation,
@@ -350,11 +347,111 @@ impl NativeObserver {
         }
     }
 
-    fn adapter(&mut self) -> &mut dyn AgentAdapter {
+    fn connected(&self) -> bool {
         match self {
-            Self::Codex(adapter) => adapter.as_mut(),
-            Self::Claude(adapter) => adapter,
+            Self::Codex(observer) => observer.adapter.is_some(),
+            Self::Claude(_) => true,
         }
+    }
+}
+
+struct CodexObserver {
+    adapter: Option<Box<CodexAdapter>>,
+    connecting: Option<std::thread::JoinHandle<Result<CodexAdapter>>>,
+    retry_at: Instant,
+    retry_delay: Duration,
+}
+
+impl CodexObserver {
+    fn connect(binding: &LiveBinding) -> Result<CodexAdapter> {
+        let socket = binding
+            .server_endpoint
+            .strip_prefix("unix://")
+            .context("native server must use a Unix socket")?;
+        let adapter = CodexAdapter::connect(
+            Path::new(socket),
+            binding
+                .conversation
+                .as_deref()
+                .context("native thread missing")?,
+            binding.generation,
+            IO_TIMEOUT,
+        )?;
+        ensure!(
+            adapter.server_pid == binding.server_pid,
+            "native server process changed"
+        );
+        let version: String = adapter
+            .server_user_agent
+            .chars()
+            .take(MAX_NATIVE_VERSION_CHARS)
+            .collect();
+        eprintln!("prism: Codex observer connected; app-server userAgent={version:?}");
+        Ok(adapter)
+    }
+
+    fn disconnect(&mut self, reason: &str) {
+        self.adapter = None;
+        self.retry_at = Instant::now() + self.retry_delay;
+        eprintln!(
+            "prism: Codex observer disconnected ({reason}); retry in {:?}",
+            self.retry_delay
+        );
+        self.retry_delay = (self.retry_delay * 2).min(NATIVE_RETRY_MAX);
+    }
+
+    fn poll(&mut self, binding: &LiveBinding) -> Option<String> {
+        if self
+            .connecting
+            .as_ref()
+            .is_some_and(|task| task.is_finished())
+        {
+            let result = self
+                .connecting
+                .take()
+                .expect("finished connection")
+                .join()
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!("Codex observer connection worker failed"))
+                });
+            match result {
+                Ok(adapter) => self.adapter = Some(Box::new(adapter)),
+                Err(error) => {
+                    if matches!(error.downcast_ref::<CodexRpcError>(), Some(CodexRpcError::ThreadClosed { server_pid }) if *server_pid == binding.server_pid)
+                    {
+                        return Some(error.to_string());
+                    }
+                    self.disconnect(&error.to_string());
+                }
+            }
+        }
+        if let Some(adapter) = &mut self.adapter {
+            let result = adapter.poll_events();
+            if adapter.thread_closed() {
+                return adapter.retirement_reason().map(str::to_owned);
+            }
+            let reason = adapter
+                .retirement_reason()
+                .map(str::to_owned)
+                .or_else(|| result.err().map(|error| error.to_string()));
+            if let Some(reason) = reason {
+                self.disconnect(&reason);
+            } else {
+                self.retry_delay = NATIVE_RETRY_INITIAL;
+            }
+        }
+        if self.adapter.is_none() && self.connecting.is_none() && Instant::now() >= self.retry_at {
+            // A stalled handshake/resume must not block bridge health or pane lifecycle checks.
+            let binding = binding.clone();
+            match std::thread::Builder::new()
+                .name("codex-observer".into())
+                .spawn(move || Self::connect(&binding))
+            {
+                Ok(task) => self.connecting = Some(task),
+                Err(error) => self.disconnect(&error.to_string()),
+            }
+        }
+        None
     }
 }
 
@@ -370,6 +467,17 @@ struct Service {
 impl Service {
     fn handle(&mut self, token: &str, call: BridgeCall) -> Result<Value> {
         let mut binding = read_binding(&self.binding_path)?;
+        // The MCP precheck can race the first caller that binds this serialized service.
+        if binding.agent == AgentKind::Codex {
+            authenticate(&binding, token)?;
+            ensure!(
+                binding
+                    .conversation
+                    .as_deref()
+                    .is_none_or(|thread| thread == call.thread_id),
+                "Only the bound Codex thread may use this Prism binding"
+            );
+        }
         let previous_generation = binding.generation;
         let previous_workspace = binding.workspace_key().ok();
         if let Err(error) = authorize(&mut binding, token, &call) {
@@ -445,7 +553,7 @@ fn retire(path: &Path, store: &mut Store, reason: &str) -> Result<()> {
     Ok(())
 }
 
-fn healthy_binding(path: &Path) -> Result<LiveBinding> {
+fn healthy_binding(path: &Path) -> Result<(LiveBinding, bool)> {
     let binding = read_binding(path)?;
     ensure!(!binding.retired, "Binding retired; explicitly resume");
     TmuxClient::socket(&binding.tmux.socket_path).verify_binding(&binding)?;
@@ -479,12 +587,19 @@ fn healthy_binding(path: &Path) -> Result<LiveBinding> {
             && response["version"] == PROTOCOL_VERSION,
         "bridge identity changed"
     );
-    Ok(binding)
+    let native_connected =
+        binding.agent != AgentKind::Codex || response["native_connected"].as_bool().unwrap_or(true);
+    Ok((binding, native_connected))
+}
+
+/// Launcher readiness does not depend on the optional Codex lifecycle observer.
+pub fn is_ready(path: &Path) -> bool {
+    healthy_binding(path).is_ok()
 }
 
 pub fn connection_info(path: &Path) -> ConnectionInfo {
     match healthy_binding(path) {
-        Ok(binding) => ConnectionInfo {
+        Ok((binding, true)) => ConnectionInfo {
             generation: binding.generation,
             connected: true,
             send_modes: vec![DeliveryMode::Share],
@@ -492,6 +607,12 @@ pub fn connection_info(path: &Path) -> ConnectionInfo {
                 "Share explicitly, then ask {} to retrieve the Prism question",
                 binding.agent.label()
             ),
+        },
+        Ok((binding, false)) => ConnectionInfo {
+            generation: binding.generation,
+            connected: false,
+            send_modes: vec![],
+            message: "Codex observer disconnected; reconnecting".into(),
         },
         Err(error) => ConnectionInfo {
             generation: 0,
@@ -557,7 +678,7 @@ struct HttpRequest {
 fn read_request(stream: &UnixStream, timeout: Duration) -> Result<HttpRequest> {
     let mut input = BufReader::new(DeadlineReader {
         stream,
-        deadline: Instant::now() + timeout,
+        deadline: Instant::now() + timeout.min(HEADER_TIMEOUT),
     });
     let mut header = Vec::new();
     loop {
@@ -615,6 +736,7 @@ fn read_request(stream: &UnixStream, timeout: Duration) -> Result<HttpRequest> {
         "request exceeds payload limit"
     );
     let mut body = vec![0; length];
+    input.get_mut().deadline = Instant::now() + timeout;
     input.read_exact(&mut body)?;
     Ok(HttpRequest {
         health,
@@ -686,17 +808,34 @@ fn poll_native(
     if observer.is_none() {
         *observer = Some(NativeObserver::connect(binding, thread)?);
     }
-    for event in observer
-        .as_mut()
-        .expect("observer initialized")
-        .adapter()
-        .poll_events()?
-    {
+    let adapter = match observer.as_mut().expect("observer initialized") {
+        NativeObserver::Codex(observer) => return Ok(observer.poll(binding)),
+        NativeObserver::Claude(adapter) => adapter,
+    };
+    for event in adapter.poll_events()? {
         if let NativeEvent::Retired { reason } = event {
             return Ok(Some(reason));
         }
     }
     Ok(None)
+}
+
+fn bind_listener(socket: &Path) -> Result<UnixListener> {
+    if let Ok(metadata) = fs::symlink_metadata(socket) {
+        ensure!(
+            metadata.file_type().is_socket()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o7777 == 0o600,
+            "invalid existing bridge socket"
+        );
+        match crate::adapters::codex::connect_unix(socket) {
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                fs::remove_file(socket)?
+            }
+            _ => bail!("bridge socket is still live or cannot be verified"),
+        }
+    }
+    Ok(UnixListener::bind(socket)?)
 }
 
 pub fn run(binding_path: &Path) -> Result<()> {
@@ -722,10 +861,6 @@ pub fn run(binding_path: &Path) -> Result<()> {
         .try_lock()
         .context("a bridge already owns this binding")?;
     let socket = socket_path(binding_path)?;
-    ensure!(
-        !socket.exists(),
-        "bridge socket already exists; use a fresh explicit launcher/resume binding"
-    );
     let mut service = Service {
         binding_path: binding_path.to_owned(),
         executable: std::env::current_exe()?,
@@ -733,7 +868,7 @@ pub fn run(binding_path: &Path) -> Result<()> {
         observer: None,
         native_retirement: None,
     };
-    let server = UnixListener::bind(&socket)?;
+    let server = bind_listener(&socket)?;
     let mut cleanup = Cleanup {
         socket: socket.clone(),
         signals: Vec::new(),
@@ -785,8 +920,13 @@ pub fn run(binding_path: &Path) -> Result<()> {
                     let current = read_binding(binding_path)?;
                     authenticate(&current, &request.token)?;
                     TmuxClient::socket(&current.tmux.socket_path).verify_binding(&current)?;
+                    let native_connected = current.conversation.is_none()
+                        || service
+                            .observer
+                            .as_ref()
+                            .is_some_and(NativeObserver::connected);
                     return Ok(
-                        json!({"version":PROTOCOL_VERSION,"binding_id":current.binding_id,"generation":current.generation}),
+                        json!({"version":PROTOCOL_VERSION,"binding_id":current.binding_id,"generation":current.generation,"native_connected":native_connected}),
                     );
                 }
                 service.handle(&request.token, serde_json::from_slice(&request.body)?)
@@ -822,6 +962,45 @@ pub fn run(binding_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_recovery_does_not_block_on_a_full_listener() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bridge.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut clients = Vec::new();
+        while let Ok(client) = crate::adapters::codex::connect_unix(&path) {
+            clients.push(client);
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            send.send(bind_listener(&path).is_err()).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_millis(200));
+        let _accepted = listener.accept().unwrap();
+        task.join().unwrap();
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn bridge_listener_recovers_only_a_refused_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bridge.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(bind_listener(&path).is_err());
+        drop(listener);
+        assert!(bind_listener(&path).is_ok());
+    }
+
+    #[test]
+    fn slow_header_has_a_short_deadline() {
+        let (server, _client) = UnixStream::pair().unwrap();
+        let started = Instant::now();
+        assert!(read_request(&server, Duration::from_millis(500)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(400));
+    }
 
     #[test]
     fn incomplete_body_has_a_total_deadline() {
@@ -876,6 +1055,215 @@ mod tests {
         client.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 413 Payload Too Large\r\n"));
         assert!(response.len() < HEADER_LIMIT);
+    }
+
+    #[test]
+    fn codex_observer_connection_failure_keeps_binding_live() {
+        let mut fixture = Fixture::new();
+        fixture.binding.bind_conversation("thread").unwrap();
+        let result = poll_codex_connection(&mut fixture.service.observer, &fixture.binding);
+        assert!(matches!(result, Ok(None)), "{result:?}");
+        assert!(!fixture.binding.retired);
+        let Some(NativeObserver::Codex(observer)) = &fixture.service.observer else {
+            panic!("Codex observer missing");
+        };
+        assert!(observer.adapter.is_none());
+        assert!(observer.connecting.is_none());
+        assert!(observer.retry_at > Instant::now());
+    }
+
+    fn poll_codex_connection(
+        observer: &mut Option<NativeObserver>,
+        binding: &LiveBinding,
+    ) -> Result<Option<String>> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let result = poll_native(observer, binding)?;
+            if result.is_some()
+                || matches!(observer, Some(NativeObserver::Codex(observer)) if observer.connecting.is_none())
+            {
+                return Ok(result);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "observer connection did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn codex_test_connection(
+        listener: UnixListener,
+        before_resume: Option<Value>,
+    ) -> tungstenite::WebSocket<UnixStream> {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut socket = tungstenite::accept(stream).unwrap();
+        while let Ok(tungstenite::Message::Text(text)) = socket.read() {
+            let request: Value = serde_json::from_str(&text).unwrap();
+            if request["method"] == "thread/resume"
+                && let Some(event) = &before_resume
+            {
+                socket
+                    .send(tungstenite::Message::Text(event.to_string().into()))
+                    .unwrap();
+                return socket;
+            }
+            let result = match request["method"].as_str().unwrap() {
+                "initialize" => json!({"userAgent":"test/0.167.0"}),
+                "initialized" => continue,
+                "server/diagnostics" => json!({"process":{"id":std::process::id()}}),
+                "thread/resume" => json!({"thread":{"id":"thread"}}),
+                method => panic!("unexpected method {method}"),
+            };
+            socket
+                .send(tungstenite::Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
+            if request["method"] == "thread/resume" {
+                return socket;
+            }
+        }
+        panic!("observer disconnected before resume");
+    }
+
+    fn codex_observer_event(event: Value) -> Option<String> {
+        let mut fixture = Fixture::new();
+        fixture.binding.bind_conversation("thread").unwrap();
+        let socket_path = fixture._project.path().join("native.sock");
+        fixture.binding.server_endpoint = format!("unix://{}", socket_path.display());
+        let listener = UnixListener::bind(socket_path).unwrap();
+        let task = std::thread::spawn(move || {
+            let mut socket = codex_test_connection(listener, None);
+            if !event.is_null() {
+                socket
+                    .send(tungstenite::Message::Text(event.to_string().into()))
+                    .unwrap();
+            }
+            socket.close(None).unwrap();
+        });
+        poll_native(&mut fixture.service.observer, &fixture.binding).unwrap();
+        task.join().unwrap();
+        let result = poll_codex_connection(&mut fixture.service.observer, &fixture.binding);
+        result.unwrap()
+    }
+
+    #[test]
+    fn codex_observer_reconnects_after_backoff_without_rebinding() {
+        let mut fixture = Fixture::new();
+        fixture.binding.bind_conversation("thread").unwrap();
+        let path = fixture._project.path().join("native.sock");
+        fixture.binding.server_endpoint = format!("unix://{}", path.display());
+        let generation = fixture.binding.generation;
+        let observer = &mut fixture.service.observer;
+        assert!(
+            poll_codex_connection(observer, &fixture.binding)
+                .unwrap()
+                .is_none()
+        );
+        let listener = UnixListener::bind(path).unwrap();
+        assert!(poll_native(observer, &fixture.binding).unwrap().is_none());
+        let Some(NativeObserver::Codex(state)) = observer else {
+            panic!("missing observer");
+        };
+        assert!(state.connecting.is_none(), "must wait for backoff");
+        state.retry_at = Instant::now();
+        let task = std::thread::spawn(move || codex_test_connection(listener, None));
+        poll_native(observer, &fixture.binding).unwrap();
+        let _socket = task.join().unwrap();
+        assert!(
+            poll_codex_connection(observer, &fixture.binding)
+                .unwrap()
+                .is_none()
+        );
+        assert!(observer.as_ref().unwrap().connected());
+        assert_eq!(fixture.binding.generation, generation);
+        assert_eq!(fixture.binding.conversation.as_deref(), Some("thread"));
+    }
+
+    #[test]
+    fn codex_observer_close_during_resume_checks_server_identity() {
+        for server_pid in [std::process::id(), u32::MAX] {
+            let mut fixture = Fixture::new();
+            fixture.binding.bind_conversation("thread").unwrap();
+            fixture.binding.server_pid = server_pid;
+            let path = fixture._project.path().join("native.sock");
+            fixture.binding.server_endpoint = format!("unix://{}", path.display());
+            let listener = UnixListener::bind(path).unwrap();
+            let task = std::thread::spawn(move || {
+                codex_test_connection(
+                    listener,
+                    Some(json!({"method":"thread/closed","params":{"threadId":"thread"}})),
+                )
+            });
+            poll_native(&mut fixture.service.observer, &fixture.binding).unwrap();
+            let _socket = task.join().unwrap();
+            let result =
+                poll_codex_connection(&mut fixture.service.observer, &fixture.binding).unwrap();
+            assert_eq!(result.is_some(), server_pid == std::process::id());
+        }
+    }
+
+    #[test]
+    fn codex_observer_handshake_does_not_block_lifecycle_polling() {
+        let mut fixture = Fixture::new();
+        fixture.binding.bind_conversation("thread").unwrap();
+        let path = fixture._project.path().join("native.sock");
+        fixture.binding.server_endpoint = format!("unix://{}", path.display());
+        let listener = UnixListener::bind(path).unwrap();
+        poll_native(&mut fixture.service.observer, &fixture.binding).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let started = Instant::now();
+        assert!(
+            poll_native(&mut fixture.service.observer, &fixture.binding)
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(stream);
+        assert!(
+            poll_codex_connection(&mut fixture.service.observer, &fixture.binding)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_observer_socket_close_does_not_retire_binding() {
+        assert!(codex_observer_event(Value::Null).is_none());
+    }
+
+    #[test]
+    fn codex_observer_other_thread_does_not_retire_binding() {
+        assert!(
+            codex_observer_event(
+                json!({"method":"thread/started","params":{"thread":{"id":"other"}}})
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_observer_unsubscribe_does_not_retire_binding() {
+        assert!(
+            codex_observer_event(
+                json!({"method":"thread/unsubscribed","params":{"threadId":"thread"}})
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_observer_bound_thread_close_retires_binding() {
+        assert!(
+            codex_observer_event(json!({"method":"thread/closed","params":{"threadId":"thread"}}))
+                .is_some()
+        );
     }
 
     struct Fixture {
@@ -975,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_native_thread_retires_persisted_binding_and_pending_question() {
+    fn foreign_codex_thread_preserves_persisted_binding_and_shared_question() {
         use crate::actions::PrepareQuestion;
         use crate::model::{DeliveryOutcome, Selection};
         let mut fixture = Fixture::new();
@@ -1043,7 +1431,7 @@ mod tests {
                 .handle(&fixture.binding.token, call)
                 .is_err()
         );
-        assert!(read_binding(&fixture.service.binding_path).unwrap().retired);
+        assert!(!read_binding(&fixture.service.binding_path).unwrap().retired);
         assert!(matches!(
             fixture
                 .service

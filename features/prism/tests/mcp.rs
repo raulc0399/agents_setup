@@ -4,6 +4,28 @@ use std::io::Cursor;
 use uuid::Uuid;
 
 #[test]
+fn oversized_line_is_drained_before_next_request() {
+    for newline in [true, false] {
+        let mut input = vec![b'x'; prism::model::MAX_PAYLOAD_BYTES * 2];
+        if newline {
+            input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n");
+        }
+        let mut output = Vec::new();
+        serve(Cursor::new(input), &mut output, None).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(replies[0]["error"].is_object());
+        assert_eq!(replies.len(), if newline { 2 } else { 1 });
+        if newline {
+            assert_eq!(replies[1]["id"], 3);
+        }
+    }
+}
+
+#[test]
 fn native_identity_rejects_malformed_nested_metadata() {
     let thread = Uuid::new_v4().to_string();
     for nested in [

@@ -144,15 +144,38 @@ else:
         thread = str(uuid.uuid4())
         self.start(thread)
         before = self.tmux("list-panes", "-a", "-F", "#{pane_id}")
+        runtimes = set(self.project.glob(".prism/run/*"))
         result = subprocess.run([str(BINARY), "--agent", "codex", "--project", str(self.project), "--resume", thread, "--detach"], env=self.env, text=True, capture_output=True, timeout=5)
         try:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("already has a live Prism binding", result.stderr)
             self.assertEqual(self.tmux("list-panes", "-a", "-F", "#{pane_id}"), before)
+            self.assertEqual(set(self.project.glob(".prism/run/*")), runtimes)
         finally:
             if result.returncode == 0:
                 duplicate = json.loads(pathlib.Path(json.loads(result.stdout)["binding"]).read_text())
                 os.kill(duplicate["server_pid"], signal.SIGTERM)
+
+    def test_next_launch_prunes_retired_runtime_without_live_panes(self):
+        self.start(str(uuid.uuid4()))
+        previous = self.binding_path.parent
+        self.tmux("kill-pane", "-t", self.binding["cli"]["pane_id"])
+        wait_until(lambda: not alive(self.supervisor))
+        self.start(str(uuid.uuid4()))
+        self.assertFalse(previous.exists())
+
+    def test_next_launch_preserves_retired_runtime_with_live_ui(self):
+        thread = str(uuid.uuid4())
+        self.start(thread)
+        self.call({"method": "inspect", "params": {}}, thread)
+        previous = self.binding_path.parent
+        saved = json.loads(self.binding_path.read_text())
+        self.assertIsNotNone(saved["prism"])
+        self.tmux("kill-pane", "-t", self.binding["cli"]["pane_id"])
+        wait_until(lambda: not alive(self.supervisor))
+        self.start(str(uuid.uuid4()))
+        self.assertTrue(previous.exists())
+        self.assertTrue(alive(saved["prism"]["pid"]))
 
     def test_concurrent_exact_resumes_serialize_registration(self):
         thread = str(uuid.uuid4())
