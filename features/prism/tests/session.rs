@@ -574,3 +574,36 @@ fn dead_or_zoomed_owned_ui_pane_is_recovered() {
         Some(replacement)
     );
 }
+
+#[test]
+fn bridge_socket_uses_tmp_even_for_long_project_paths() {
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("p".repeat(120));
+    fs::create_dir(&project).unwrap();
+    let runtime = RuntimeDirectory::create(&project).unwrap();
+    let socket = prism::bridge::socket_path(&runtime.binding_path()).unwrap();
+    assert!(socket.starts_with("/tmp"));
+    assert!(!socket.starts_with(&project));
+    assert!(socket.as_os_str().len() < 108);
+    let directory = socket.parent().unwrap();
+    assert_eq!(fs::metadata(directory).unwrap().mode() & 0o777, 0o700);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    fs::remove_file(socket).unwrap();
+    prism::session::remove_socket_directory(&runtime.binding_path()).unwrap();
+}
+
+#[test]
+fn socket_directory_rejects_symlinks_and_public_permissions() {
+    let project = TempDir::new().unwrap();
+    let runtime = RuntimeDirectory::create(project.path()).unwrap();
+    let directory = prism::session::socket_directory(&runtime.binding_path()).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(prism::bridge::socket_path(&runtime.binding_path()).is_err());
+    fs::remove_dir(&directory).unwrap();
+    symlink(project.path(), &directory).unwrap();
+    assert!(prism::bridge::socket_path(&runtime.binding_path()).is_err());
+    assert!(prism::session::remove_socket_directory(&runtime.binding_path()).is_err());
+    fs::remove_file(directory).unwrap();
+}

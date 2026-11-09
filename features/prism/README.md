@@ -151,8 +151,9 @@ conversation restores its saved views. The `?` screen lists current controls.
 Each canonical project stores content in `.prism/state.db` (SQLite WAL).
 Workspace identity includes the project, agent and exact conversation UUID.
 New conversations receive separate content. Private runtime directories under
-`.prism/run/` contain bindings, sockets and logs; directory mode is 0700 and
-binding mode is 0600. Tokens never belong in command arguments or published
+`.prism/run/` contain bindings and logs. Sockets live in `/tmp/prism-<launch-id>/`
+and are removed on normal supervisor exit; abandoned socket directories are pruned
+on later launches for that project. Directory mode is 0700 and binding mode is 0600. Tokens never belong in command arguments or published
 content. Do not share binding files or runtime logs as public diagnostics.
 
 Schema 2 adds private UI arrangement with an in-place transactional migration

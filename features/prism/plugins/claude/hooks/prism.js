@@ -100,7 +100,7 @@ async function callBridge($, sessionId, method, params) {
   try {
     response = await $.http.fetch('http://localhost/call', {
       method: 'POST',
-      socketPath: bindingPath.slice(0, bindingPath.lastIndexOf('/')) + '/bridge.sock',
+      socketPath: '/tmp/prism-' + bindingPath.split('/').at(-2) + '/bridge.sock',
       headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + binding.token},
       body,
     });

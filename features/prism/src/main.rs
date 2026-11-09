@@ -21,7 +21,6 @@ use uuid::Uuid;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_POLL: Duration = Duration::from_millis(50);
-const UNIX_SOCKET_LIMIT: usize = 108;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Parser)]
@@ -289,6 +288,7 @@ struct UnstartedRuntime(Option<PathBuf>);
 impl Drop for UnstartedRuntime {
     fn drop(&mut self) {
         if let Some(path) = &self.0 {
+            let _ = prism::session::remove_socket_directory(&path.join("binding.json"));
             let _ = fs::remove_dir_all(path);
         }
     }
@@ -325,6 +325,7 @@ fn prune_retired_runtimes(runtime: &RuntimeDirectory) -> Result<()> {
         if lease.try_lock().is_err() {
             continue;
         }
+        prism::session::remove_socket_directory(&path.join("binding.json"))?;
         fs::remove_dir_all(path)?;
     }
     Ok(())
@@ -336,17 +337,6 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
     let native = executable(agent.cli_name())?;
     executable("tmux")?;
     let project = project.canonicalize()?;
-    ensure!(
-        project
-            .join(".prism/run")
-            .join(Uuid::nil().to_string())
-            .join("bridge.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            < UNIX_SOCKET_LIMIT,
-        "project path is too long for a private Unix socket; use a shorter canonical project path"
-    );
     let runtime = RuntimeDirectory::create(&project)?;
     let mut unstarted = UnstartedRuntime(Some(runtime.path().to_owned()));
     let binding_path = runtime.binding_path();
@@ -538,7 +528,7 @@ fn start_codex_server(
         .binding
         .parent()
         .context("binding directory missing")?;
-    let socket = directory.join("app.sock");
+    let socket = prism::session::socket_directory(&options.cli.binding)?.join("app.sock");
     let endpoint = format!("unix://{}", socket.display());
     let log = private_file(&directory.join("codex.log"))?;
     let mut command = Command::new(codex);
@@ -586,9 +576,19 @@ fn start_codex_server(
     })
 }
 
+struct SocketCleanup(PathBuf);
+
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = prism::session::remove_socket_directory(&self.0);
+    }
+}
+
 fn supervise(options: Launch) -> Result<()> {
     let signals = StartupSignals::new()?;
     let project = launch_project(&options.cli.binding)?;
+    // Declared before the native server so its process stops before sockets are removed.
+    let _sockets = SocketCleanup(options.cli.binding.clone());
     let tmux = options
         .tmux_socket
         .as_deref()
@@ -787,12 +787,16 @@ mod tests {
     use std::io::{BufRead, BufReader};
 
     #[test]
-    fn overlong_launch_does_not_create_runtime() {
+    fn long_project_socket_directory_is_removed_on_supervisor_exit() {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("p".repeat(100));
         fs::create_dir(&project).unwrap();
-        assert!(launch(Agent::Codex, &project, None, true).is_err());
-        assert!(!project.join(".prism").exists());
+        let runtime = RuntimeDirectory::create(&project).unwrap();
+        let sockets = prism::session::socket_directory(&runtime.binding_path()).unwrap();
+        assert!(sockets.is_dir());
+        drop(SocketCleanup(runtime.binding_path()));
+        assert!(!sockets.exists());
+        assert!(runtime.path().is_dir());
     }
 
     #[test]

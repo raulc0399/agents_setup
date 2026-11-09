@@ -131,7 +131,7 @@ class ClaudeLifecycle(unittest.TestCase):
         connection = http.client.HTTPConnection("localhost", timeout=5)
         connection.sock = socket.socket(socket.AF_UNIX)
         try:
-            connection.sock.connect(str(self.binding_path.parent / "bridge.sock"))
+            connection.sock.connect(str((pathlib.Path("/tmp") / ("prism-" + self.binding_path.parent.name) / "bridge.sock")))
             data = json.dumps({"version":1,"generation":self.binding["generation"],"thread_id":thread,"operation":operation})
             connection.request("POST", "/call", data, {"Authorization":f"Bearer {self.binding['token']}","Content-Type":"application/json"})
             response = connection.getresponse()
@@ -181,7 +181,7 @@ class ClaudeLifecycle(unittest.TestCase):
         self.assertTrue(alive(self.binding["server_pid"]))
         self.assertIn(self.binding["cli"]["pane_id"], self.tmux("list-panes", "-a", "-F", "#{pane_id}"))
         # The retired bridge exits and removes its socket; the CLI pane is not cleaned up for Claude.
-        wait_until(lambda: not (self.binding_path.parent / "bridge.sock").exists(), timeout=5)
+        wait_until(lambda: not ((pathlib.Path("/tmp") / ("prism-" + self.binding_path.parent.name) / "bridge.sock")).exists(), timeout=5)
         self.assertTrue(alive(self.binding["server_pid"]))
 
     def test_explicit_resume_passes_the_session_to_claude(self):

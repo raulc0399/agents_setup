@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use uuid::Uuid;
 
+const SOCKET_DIRECTORY_PREFIX: &str = "/tmp/prism-";
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const MAX_BINDING_BYTES: u64 = 64 * 1024;
@@ -162,7 +163,9 @@ impl RuntimeDirectory {
             .mode(PRIVATE_DIRECTORY_MODE)
             .create(&path)?;
         validate_private(&path, true)?;
-        Ok(Self { path })
+        let runtime = Self { path };
+        create_private_directory(&socket_directory(&runtime.binding_path())?)?;
+        Ok(runtime)
     }
 
     pub fn path(&self) -> &Path {
@@ -176,6 +179,32 @@ impl RuntimeDirectory {
     pub fn write_binding(&self, binding: &LiveBinding) -> io::Result<()> {
         write_binding(&self.binding_path(), binding)
     }
+}
+
+/// Socket paths stay short and use the local temporary filesystem.
+pub fn socket_directory(binding_path: &Path) -> io::Result<PathBuf> {
+    validate_binding_location(binding_path)?;
+    let name = binding_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| invalid("binding directory missing"))?;
+    let directory = PathBuf::from(format!("{SOCKET_DIRECTORY_PREFIX}{name}"));
+    match fs::symlink_metadata(&directory) {
+        Ok(_) => validate_private(&directory, true)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(directory)
+}
+
+pub fn remove_socket_directory(binding_path: &Path) -> io::Result<()> {
+    let directory = socket_directory(binding_path)?;
+    if !directory.try_exists()? {
+        return Ok(());
+    }
+    validate_private(&directory, true)?;
+    fs::remove_dir_all(directory)
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {

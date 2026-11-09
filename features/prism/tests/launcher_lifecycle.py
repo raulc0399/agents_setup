@@ -118,7 +118,7 @@ else:
     def call(self, operation, thread):
         connection = http.client.HTTPConnection("localhost", timeout=5)
         connection.sock = socket.socket(socket.AF_UNIX)
-        connection.sock.connect(str(self.binding_path.parent / "bridge.sock"))
+        connection.sock.connect(str((pathlib.Path("/tmp") / ("prism-" + self.binding_path.parent.name) / "bridge.sock")))
         data = json.dumps({"version":1,"generation":self.binding["generation"],"thread_id":thread,"operation":operation})
         connection.request("POST", "/call", data, {"Authorization":f"Bearer {self.binding['token']}","Content-Type":"application/json"})
         response = connection.getresponse()
@@ -281,15 +281,19 @@ os.execv("/usr/bin/tmux", ["tmux", "-L", {self.name!r}, *arguments])
             os.close(master)
             os.close(slave)
 
-    def test_longest_socket_path_is_rejected_before_spawning(self):
-        # app.sock fits at 106 bytes; bridge.sock would exceed Linux's 107-byte limit.
-        suffix_length = 106 - len(str(self.project)) - len("/.prism/run/" + str(uuid.uuid4()) + "/app.sock") - 1
-        project = self.project / ("p" * suffix_length)
-        project.mkdir()
-        result = subprocess.run([str(BINARY), "--agent", "codex", "--project", str(project), "--detach"], env=self.env, text=True, capture_output=True, timeout=5)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("project path is too long", result.stderr)
-        self.assertFalse(list(project.glob(".prism/run/*/native-process.json")))
+    def test_long_project_path_uses_private_tmp_sockets(self):
+        self.project = self.project / ("p" * 120)
+        self.project.mkdir()
+        self.start()
+        socket_path = pathlib.Path(self.binding["server_endpoint"].removeprefix("unix://"))
+        self.assertEqual(socket_path.parent.parent, pathlib.Path("/tmp"))
+        self.assertLess(len(str(socket_path)), 108)
+        self.assertEqual(socket_path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(socket_path.stat().st_mode & 0o777, 0o600)
+        self.assertTrue((socket_path.parent / "bridge.sock").is_socket())
+        self.tmux("kill-pane", "-t", self.binding["cli"]["pane_id"])
+        wait_until(lambda: not alive(self.supervisor))
+        self.assertFalse(socket_path.parent.exists())
 
     def test_supervisor_crash_terminates_private_native_server(self):
         self.start()

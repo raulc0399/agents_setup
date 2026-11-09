@@ -88,10 +88,7 @@ pub enum LifecycleEvent {
 }
 
 pub fn socket_path(binding_path: &Path) -> Result<PathBuf> {
-    Ok(binding_path
-        .parent()
-        .context("binding directory missing")?
-        .join("bridge.sock"))
+    Ok(crate::session::socket_directory(binding_path)?.join("bridge.sock"))
 }
 
 pub fn store_path(binding: &LiveBinding) -> PathBuf {
