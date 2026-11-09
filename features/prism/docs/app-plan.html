@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism desktop app plan</title>
+<style>
+  :root {
+    --bg: #f5f6f4; --surface: #ffffff; --fg: #1c2126; --muted: #5d6670; --rule: #d7dcd9;
+    --teal: #0f766e; --teal-soft: #d9f0ec; --blue: #1d4ed8; --blue-soft: #dfe8fb;
+    --amber: #b45309; --amber-soft: #fdecc8; --gone: #8a929b; --focus: #111827;
+    --pill-fg: #ffffff;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161a; --surface: #1a2026; --fg: #e5e9ec; --muted: #9aa5af; --rule: #2c353d;
+      --teal: #2dd4bf; --teal-soft: #12332f; --blue: #7aa5ff; --blue-soft: #18264a;
+      --amber: #f59e0b; --amber-soft: #3a2a0c; --gone: #6f7983; --focus: #ffffff;
+      --pill-fg: #0d1117;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
+  main { max-width: 1480px; margin: 0 auto; padding: 24px 20px 40px; }
+  .eyebrow { font: 600 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  h1 { margin: 4px 0 4px; font-size: 26px; }
+  .subtitle { margin: 0; color: var(--muted); max-width: 80ch; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 18px; }
+  .chip { font: 12px var(--mono); padding: 3px 9px; border: 1px solid var(--rule); border-radius: 999px; background: var(--surface); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; }
+  .frame { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; overflow-x: auto; }
+  svg { display: block; min-width: 1060px; width: 100%; height: auto; font-family: var(--sans); }
+  .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px; position: sticky; top: 16px; }
+  .tag { display: inline-block; font: 600 11px var(--mono); letter-spacing: .06em; padding: 2px 8px; border-radius: 4px; background: var(--blue-soft); color: var(--blue); }
+  .tag.teal { background: var(--teal-soft); color: var(--teal); }
+  .tag.amber { background: var(--amber-soft); color: var(--amber); }
+  .tag.gone { background: transparent; color: var(--gone); border: 1px dashed var(--gone); }
+  .panel h2 { margin: 10px 0 8px; font-size: 17px; }
+  .panel ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+  .panel p { margin: 0; color: var(--muted); }
+  .artifacts { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  code { font: 12px var(--mono); background: var(--bg); border: 1px solid var(--rule); border-radius: 4px; padding: 1px 5px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+  .legend i { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--muted); vertical-align: middle; margin-right: 6px; }
+  .legend i.dash { border-top-style: dashed; }
+  .legend b { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+
+  .lane { fill: var(--surface); stroke: var(--rule); }
+  .lane-title { font: 600 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+  .box rect { fill: var(--surface); stroke-width: 1.6; }
+  .box .bar { stroke: none; }
+  .box .name { font-weight: 700; font-size: 13px; fill: var(--fg); }
+  .box .sub { font-size: 11px; fill: var(--muted); }
+  .teal rect.body { stroke: var(--teal); } .teal .bar { fill: var(--teal); }
+  .blue rect.body { stroke: var(--blue); } .blue .bar { fill: var(--blue); }
+  .amber rect.body { stroke: var(--amber); } .amber .bar { fill: var(--amber); }
+  .gone rect.body { stroke: var(--gone); stroke-dasharray: 5 4; } .gone .bar { fill: var(--gone); }
+  .gone .name { fill: var(--gone); text-decoration: line-through; }
+  .flow { fill: none; stroke: var(--muted); stroke-width: 1.6; }
+  .flow.manual { stroke-dasharray: 6 5; }
+  .pill rect { fill: var(--blue); }
+  .pill.teal rect { fill: var(--teal); }
+  .pill.manual rect { fill: var(--amber); }
+  .pill.plain rect { fill: var(--muted); }
+  .pill text { fill: var(--pill-fg); font: 600 11px var(--sans); text-anchor: middle; }
+  .gate rect { fill: var(--amber); }
+  .gate text { fill: var(--pill-fg); font: 700 10px var(--mono); text-anchor: middle; }
+  [data-key] { cursor: pointer; outline: none; }
+  [data-key]:hover rect.body, [data-key]:hover > rect { filter: brightness(1.08); }
+  [data-key]:focus-visible rect, [data-key].selected rect.body, .pill.selected rect, .gate.selected rect {
+    stroke: var(--focus); stroke-width: 2.4;
+  }
+  @media (max-width: 980px) {
+    .layout { grid-template-columns: 1fr; }
+    .panel { position: static; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Prism · plan · docs/app-plan.md</div>
+  <h1>Desktop app</h1>
+  <p class="subtitle">One app on the Mac or Windows host replaces the terminal UI; every bridge in a container connects out to it.</p>
+  <div class="chips">
+    <span class="chip">9 batches</span><span class="chip">3 gates</span><span class="chip">4 flows</span>
+    <span class="chip">port 7717</span><span class="chip">Mac + Windows</span><span class="chip">unsigned builds</span>
+    <span class="chip">tmux no longer required</span>
+  </div>
+
+  <div class="layout">
+    <div class="frame">
+      <svg viewBox="0 0 1120 580" role="img" aria-label="Prism desktop app architecture and flows">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
+          </marker>
+        </defs>
+
+        <!-- lanes: where things run -->
+        <rect class="lane" x="16" y="16" width="388" height="478" rx="8"/>
+        <text class="lane-title" x="30" y="40" fill="var(--teal)">Host · Mac or Windows</text>
+        <rect class="lane" x="420" y="16" width="224" height="478" rx="8"/>
+        <text class="lane-title" x="434" y="40" fill="var(--amber)">Mounted home</text>
+        <rect class="lane" x="660" y="16" width="444" height="478" rx="8"/>
+        <text class="lane-title" x="674" y="40" fill="var(--blue)">Container · one per CLI</text>
+
+        <!-- flows (drawn under boxes) -->
+        <path class="flow" d="M670,246 L384,246" marker-end="url(#arrow)"/>
+        <path class="flow" d="M384,272 L670,272" marker-end="url(#arrow)"/>
+        <path class="flow" d="M300,230 L300,128 L440,128" marker-end="url(#arrow)"/>
+        <path class="flow" d="M755,230 L755,128 L624,128" marker-end="url(#arrow)"/>
+        <path class="flow" d="M930,242 L844,242" marker-end="url(#arrow)"/>
+        <path class="flow" d="M840,258 L926,258" marker-end="url(#arrow)"/>
+        <path class="flow" d="M930,274 L844,274" marker-end="url(#arrow)"/>
+        <path class="flow" d="M956,146 L956,226" marker-end="url(#arrow)"/>
+        <path class="flow manual" d="M1046,230 L1046,150" marker-end="url(#arrow)"/>
+        <path class="flow" d="M755,286 L755,396" marker-end="url(#arrow)"/>
+        <path class="flow" d="M220,258 L204,258" marker-end="url(#arrow)"/>
+        <path class="flow" d="M250,230 L250,128 L204,128" marker-end="url(#arrow)"/>
+        <path class="flow" d="M250,286 L250,388 L204,388" marker-end="url(#arrow)"/>
+
+        <!-- host boxes -->
+        <g class="box teal" data-key="tabs" tabindex="0" role="button" aria-label="Windows and tabs">
+          <rect class="body" x="40" y="100" width="160" height="56" rx="6"/><rect class="bar" x="40" y="100" width="5" height="56" rx="2"/>
+          <text class="name" x="54" y="123">Windows and tabs</text><text class="sub" x="54" y="141">tab per conversation</text>
+        </g>
+        <g class="box teal" data-key="views" tabindex="0" role="button" aria-label="Views">
+          <rect class="body" x="40" y="230" width="160" height="56" rx="6"/><rect class="bar" x="40" y="230" width="5" height="56" rx="2"/>
+          <text class="name" x="54" y="253">Views</text><text class="sub" x="54" y="271">cards and diagram</text>
+        </g>
+        <g class="box teal" data-key="appstate" tabindex="0" role="button" aria-label="App state">
+          <rect class="body" x="40" y="360" width="160" height="56" rx="6"/><rect class="bar" x="40" y="360" width="5" height="56" rx="2"/>
+          <text class="name" x="54" y="383">App state</text><text class="sub" x="54" y="401">layout, hidden, zoom</text>
+        </g>
+        <g class="box teal" data-key="app" tabindex="0" role="button" aria-label="Prism app">
+          <rect class="body" x="220" y="230" width="164" height="56" rx="6"/><rect class="bar" x="220" y="230" width="5" height="56" rx="2"/>
+          <text class="name" x="234" y="253">Prism app</text><text class="sub" x="234" y="271">one process, one port</text>
+        </g>
+
+        <!-- mounted home -->
+        <g class="box amber" data-key="pairing" tabindex="0" role="button" aria-label="Pairing file">
+          <rect class="body" x="440" y="100" width="184" height="56" rx="6"/><rect class="bar" x="440" y="100" width="5" height="56" rx="2"/>
+          <text class="name" x="454" y="123">Pairing file</text><text class="sub" x="454" y="141">port and token</text>
+        </g>
+
+        <!-- container boxes -->
+        <g class="box blue" data-key="cli" tabindex="0" role="button" aria-label="CLI">
+          <rect class="body" x="930" y="90" width="160" height="56" rx="6"/><rect class="bar" x="930" y="90" width="5" height="56" rx="2"/>
+          <text class="name" x="944" y="113">CLI</text><text class="sub" x="944" y="131">claude or codex</text>
+        </g>
+        <g class="box blue" data-key="plugin" tabindex="0" role="button" aria-label="Plugin">
+          <rect class="body" x="930" y="230" width="160" height="56" rx="6"/><rect class="bar" x="930" y="230" width="5" height="56" rx="2"/>
+          <text class="name" x="944" y="253">Plugin</text><text class="sub" x="944" y="271">tools and Claude mod</text>
+        </g>
+        <g class="box blue" data-key="bridge" tabindex="0" role="button" aria-label="prism bridge">
+          <rect class="body" x="670" y="230" width="170" height="56" rx="6"/><rect class="bar" x="670" y="230" width="5" height="56" rx="2"/>
+          <text class="name" x="684" y="253">prism bridge</text><text class="sub" x="684" y="271">one per conversation</text>
+        </g>
+        <g class="box blue" data-key="store" tabindex="0" role="button" aria-label="state.db">
+          <rect class="body" x="670" y="400" width="170" height="56" rx="6"/><rect class="bar" x="670" y="400" width="5" height="56" rx="2"/>
+          <text class="name" x="684" y="423">state.db</text><text class="sub" x="684" y="441">content and questions</text>
+        </g>
+        <g class="box gone" data-key="tui" tabindex="0" role="button" aria-label="Terminal UI, removed">
+          <rect class="body" x="930" y="400" width="160" height="56" rx="6"/><rect class="bar" x="930" y="400" width="5" height="56" rx="2"/>
+          <text class="name" x="944" y="423">Terminal UI, tmux</text><text class="sub" x="944" y="441">removed in batch 7</text>
+        </g>
+
+        <!-- shared crate -->
+        <g class="box amber" data-key="core" tabindex="0" role="button" aria-label="prism-core crate">
+          <rect class="body" x="16" y="512" width="1088" height="50" rx="6"/><rect class="bar" x="16" y="512" width="5" height="50" rx="2"/>
+          <text class="name" x="32" y="534">prism-core</text><text class="sub" x="32" y="551">shared crate: model, app protocol, diagram layout and SVG, built into the app and the bridge</text>
+        </g>
+
+        <!-- pills: numbered like the plan's flows -->
+        <g class="pill" data-key="f1" tabindex="0" role="button"><rect x="436" y="236" width="72" height="20" rx="10"/><text x="472" y="250">1 update</text></g>
+        <g class="pill" data-key="f4" tabindex="0" role="button"><rect x="552" y="236" width="72" height="20" rx="10"/><text x="588" y="250">4 closed</text></g>
+        <g class="pill teal" data-key="f2" tabindex="0" role="button"><rect x="440" y="262" width="56" height="20" rx="10"/><text x="468" y="276">2 ask</text></g>
+        <g class="pill teal" data-key="f3" tabindex="0" role="button"><rect x="528" y="262" width="100" height="20" rx="10"/><text x="578" y="276">3 drop / undo</text></g>
+        <g class="pill" data-key="f1" tabindex="0" role="button"><rect x="849" y="216" width="72" height="20" rx="10"/><text x="885" y="230">1 publish</text></g>
+        <g class="pill" data-key="f2" tabindex="0" role="button"><rect x="847" y="248" width="76" height="20" rx="10"/><text x="885" y="262">2 pending</text></g>
+        <g class="pill" data-key="f2" tabindex="0" role="button"><rect x="849" y="280" width="72" height="20" rx="10"/><text x="885" y="294">2 answer</text></g>
+        <g class="pill" data-key="f1" tabindex="0" role="button"><rect x="918" y="176" width="74" height="20" rx="10"/><text x="955" y="190">1 publish</text></g>
+        <g class="pill manual" data-key="f2" tabindex="0" role="button"><rect x="998" y="176" width="100" height="20" rx="10"/><text x="1048" y="190">2 fill prompt</text></g>
+        <g class="pill" data-key="f1" tabindex="0" role="button"><rect x="712" y="331" width="86" height="20" rx="10"/><text x="755" y="345">1, 3 commit</text></g>
+        <g class="pill plain" data-key="pairing" tabindex="0" role="button"><rect x="322" y="118" width="54" height="20" rx="10"/><text x="349" y="132">writes</text></g>
+        <g class="pill plain" data-key="pairing" tabindex="0" role="button"><rect x="664" y="118" width="50" height="20" rx="10"/><text x="689" y="132">reads</text></g>
+
+        <!-- gates: amber badges on the box they block -->
+        <g class="gate" data-key="g12" tabindex="0" role="button"><rect x="318" y="221" width="70" height="18" rx="9"/><text x="353" y="234">gate 1.2</text></g>
+        <g class="gate" data-key="g13" tabindex="0" role="button"><rect x="558" y="91" width="70" height="18" rx="9"/><text x="593" y="104">gate 1.3</text></g>
+        <g class="gate" data-key="g11" tabindex="0" role="button"><rect x="676" y="221" width="70" height="18" rx="9"/><text x="711" y="234">gate 1.1</text></g>
+      </svg>
+    </div>
+
+    <aside class="panel" id="panel" aria-live="polite"></aside>
+  </div>
+
+  <div class="legend">
+    <span><b style="background:var(--teal)"></b>host</span>
+    <span><b style="background:var(--blue)"></b>container</span>
+    <span><b style="background:var(--amber)"></b>gates, shared, manual</span>
+    <span><i></i>data flow, numbered like the plan's flows</span>
+    <span><i class="dash"></i>manual step</span>
+  </div>
+</main>
+
+<script>
+const DATA = {
+  goal: { tag: "Goal", tone: "teal", title: "Replace the terminal UI with a desktop app",
+    text: "A tab is one conversation; a window is a group you arrange. The CLI, its plugin and the bridge stay in the container. Click any box, pill or badge.",
+    artifacts: ["docs/app-plan.md"] },
+  app: { tag: "Batch 4", tone: "teal", title: "Prism app",
+    bullets: ["One Tauri 2 process on the host, one listening port.", "Keeps a registry of connected bridges and routes each to its tab.", "Holds no content of its own; everything comes from the bridges.", "Built unsigned on your Mac and your Windows PC (batch 8)."],
+    artifacts: ["app/", "app/src-tauri/", "port 7717"] },
+  tabs: { tag: "Batch 4.2", tone: "teal", title: "Windows and tabs",
+    bullets: ["Tab = one conversation, labeled with project and agent.", "Drag tabs between windows; a window is your group.", "The app remembers project → window; a new project opens a new window.", "Closing a tab ends nothing; a session list reopens it."],
+    artifacts: ["app/"] },
+  views: { tag: "Batches 4.3, 5, 6", tone: "teal", title: "Views",
+    bullets: ["Card list with expanded focused card and ask, hide, drop.", "Diagram: lanes, name + subtitle boxes, numbered pills, dashed manual steps, gate badges.", "Pan and zoom with wheel, pinch, drag and keys; click opens a side panel.", "Native text selection; Ask sends item plus quote."],
+    artifacts: ["prism-core/", "CLAUDE.md Diagrams (HTML)"] },
+  appstate: { tag: "Architecture", tone: "teal", title: "App state",
+    bullets: ["Window and tab arrangement, project → window memory.", "Per tab: hidden items, filter, zoom, pan, selection.", "Lives in the app's data directory on the host, not in the project."],
+    artifacts: [] },
+  pairing: { tag: "Decision 5", tone: "amber", title: "Pairing file",
+    bullets: ["The app writes its port and a token, mode 0600.", "Written to both mounted homes so Claude and Codex containers find it.", "PRISM_APP_FILE overrides the path for other setups.", "The token is what stops another local process posing as a bridge."],
+    artifacts: ["~/.claude/prism/app.json", "~/.codex/prism/app.json", "PRISM_APP_FILE"] },
+  cli: { tag: "Unchanged", tone: "blue", title: "CLI",
+    bullets: ["claude or codex, started by d_claude or d_codex in its own container.", "Identified by process ID and start time; tmux is no longer required (decision 2).", "Its prompt box receives ask quotes from the Claude mod."],
+    artifacts: [] },
+  plugin: { tag: "Batch 7.4, 9", tone: "blue", title: "Plugin",
+    bullets: ["Tools: publish, inspect, action, questions, answer.", "The Claude mod polls pending questions and fills the prompt box.", "/prism reports the app connection instead of opening a pane.", "Codex-only changes go to the Codex agent."],
+    artifacts: ["plugins/claude/hooks/prism.js", "plugins/codex/", "docs/codex-handover.md"] },
+  bridge: { tag: "Batch 3", tone: "blue", title: "prism bridge",
+    bullets: ["One per conversation; owns the store and every check.", "New: WebSocket client that dials out to the app, with reconnect.", "Sends hello and snapshot on connect, update after each committed change.", "Applies ask, action, undo from the app through the existing shared actions."],
+    artifacts: ["src/bridge.rs", "src/applink.rs", "tests/applink.rs"] },
+  store: { tag: "Unchanged", tone: "blue", title: "state.db",
+    bullets: ["SQLite in the project's .prism directory.", "Content, questions, answers and undo records.", "Private view tables are no longer used once the app owns view state."],
+    artifacts: [".prism/state.db", "src/store.rs"] },
+  tui: { tag: "Batch 7", tone: "gone", title: "Terminal UI, tmux and the launcher go",
+    bullets: ["Delete src/ui and its tests once the app covers list, diagram and ask.", "Remove the Prism pane handling and the tmux requirement.", "Remove the older prism --agent launcher and its supervisor.", "Drop ratatui, crossterm, resvg, usvg, tiny-skia, fontdb."],
+    artifacts: ["src/ui/", "src/session.rs", "src/main.rs", "tests/launcher.rs"] },
+  core: { tag: "Batch 2", tone: "amber", title: "prism-core",
+    bullets: ["Portable crate used by the bridge and the app.", "Model types, app protocol messages with a version number.", "Diagram layout and SVG moved from src/ui/graph.rs; ids on shapes for clicks.", "Must land before batches 3, 4 and 5."],
+    artifacts: ["prism-core/", "src/ui/graph.rs"] },
+  f1: { tag: "Flow 1", tone: "blue", title: "Publish",
+    bullets: ["The agent calls the publish tool.", "The bridge validates and commits a revision to the store.", "The bridge sends update; the tab redraws."],
+    artifacts: ["mcp__prism__publish"] },
+  f2: { tag: "Flow 2", tone: "teal", title: "Ask and answer",
+    bullets: ["Select text or an item in the app and press Ask.", "The bridge stores a shared question; the mod's poll picks it up.", "The mod fills the prompt box; you send it. That step is manual.", "The agent records its reply with the answer tool; the tab shows it."],
+    artifacts: ["mcp__prism__answer", "pending", "prompt_filled"] },
+  f3: { tag: "Flow 3", tone: "teal", title: "Drop and undo",
+    bullets: ["The app sends the command with the revision it saw.", "The bridge applies it through the same checks as the tools.", "Every connected view gets the update."],
+    artifacts: ["mcp__prism__action"] },
+  f4: { tag: "Flow 4", tone: "blue", title: "Session end",
+    bullets: ["The bridge sends closed when the conversation ends.", "The tab stays, marked ended, until you close it.", "A newer bridge for the same conversation replaces the older one."],
+    artifacts: [] },
+  g11: { tag: "Gate 1.1", tone: "amber", title: "Container reaches the host",
+    bullets: ["Probe: a container connects to a host listener through host.docker.internal.", "Verified on Docker Desktop for Mac; note what Windows and plain Linux Docker need.", "Blocks batch 3."],
+    artifacts: ["host.docker.internal:7717"] },
+  g12: { tag: "Gate 1.2", tone: "amber", title: "Tauri builds on the Mac",
+    bullets: ["Probe: a minimal Tauri 2 app builds and opens on your Mac.", "Blocks batch 4."],
+    artifacts: ["app/src-tauri/"] },
+  g13: { tag: "Gate 1.3", tone: "amber", title: "Pairing file is visible",
+    bullets: ["Confirm the file shows up in a Claude container and in a Codex container.", "Blocks batch 3."],
+    artifacts: ["~/.claude/prism/app.json", "~/.codex/prism/app.json"] },
+};
+
+const panel = document.getElementById("panel");
+const escapeHtml = text => text.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+function show(key) {
+  const item = DATA[key];
+  const body = item.bullets
+    ? "<ul>" + item.bullets.map(b => "<li>" + escapeHtml(b) + "</li>").join("") + "</ul>"
+    : "<p>" + escapeHtml(item.text) + "</p>";
+  const artifacts = item.artifacts.length
+    ? '<div class="artifacts">' + item.artifacts.map(a => "<code>" + escapeHtml(a) + "</code>").join("") + "</div>"
+    : "";
+  panel.innerHTML = '<span class="tag ' + item.tone + '">' + escapeHtml(item.tag) + "</span><h2>" + escapeHtml(item.title) + "</h2>" + body + artifacts;
+  for (const node of document.querySelectorAll("[data-key]")) {
+    node.classList.toggle("selected", node.dataset.key === key);
+  }
+}
+
+for (const node of document.querySelectorAll("[data-key]")) {
+  node.addEventListener("click", () => show(node.dataset.key));
+  node.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      show(node.dataset.key);
+    }
+  });
+}
+show("goal");
+</script>
+</body>
+</html>

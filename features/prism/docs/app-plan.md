@@ -1,6 +1,30 @@
 # Prism desktop app: plan
 
 Status: plan only. Nothing here is implemented; saving this file authorizes no code change.
+Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
+
+## Start here (handover)
+
+- **Code today**: `features/prism/` is one Rust crate. `src/bridge.rs` (bridge and tool
+  operations), `src/store.rs` (SQLite), `src/attachment.rs` (attach a running CLI),
+  `src/session.rs` (bindings, tmux), `src/ui/` (terminal UI, to be removed),
+  `plugins/claude/` (mod, tools, skill), `plugins/codex/` and `src/adapters/codex.rs`
+  (Codex agent's area).
+- **Build and test**: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+  `cargo test --locked --all-targets`, `cargo build --locked --release`; install with
+  `install -m 755 target/release/prism ~/.local/bin/prism`.
+- **Environment**: each CLI runs in its own throwaway container (`d_claude`, `d_codex`,
+  `docker compose run --rm`). Only the project and `~/.claude` / `~/.codex` survive a new
+  container; `~/.local/bin/prism` must be reinstalled after one.
+- **The Claude mod loads at session start.** A change to `plugins/claude/hooks/prism.js`
+  needs a Claude restart (`/exit`, `claude -c`).
+- **Lessons from the terminal test (2026-11-09)**, all relevant to the bridge that stays:
+  the project mount can report stale file attributes right after a rename, so binding
+  reads retry briefly; the mod polls every second through the read-only `pending`
+  operation; a bridge that died is restarted by the next attach.
+- **Working rules**: plan and approval before code, one batch at a time, validation after
+  each batch (see the repository's `AGENTS.md`).
+- **First step**: batch 1, the three gates. No product code before they pass.
 
 ## Goal
 
@@ -20,9 +44,9 @@ the Linux container.
 
 - **Connection**: the bridge opens a WebSocket to `host.docker.internal:<port>`; both sides
   send. If the app is not running the bridge retries quietly and the CLI is unaffected.
-- **Pairing**: the app writes `{port, token}` to `~/.claude/prism/app.json` (mode 0600).
-  `~/.claude` is mounted into the Claude containers. `PRISM_APP_FILE` overrides the path for
-  containers that mount something else (Codex).
+- **Pairing**: the app writes `{port, token}` (mode 0600) to `~/.claude/prism/app.json` and
+  `~/.codex/prism/app.json`. The Claude containers mount the first, the Codex containers the
+  second. `PRISM_APP_FILE` overrides the path for any other setup.
 - **Identity**: each bridge announces container host name, project, agent, conversation and
   CLI process. The app keys tabs by conversation and remembers project → window.
 - **View state** (hidden items, filter, zoom, pan, selection) moves into the app's own data
@@ -42,7 +66,7 @@ the Linux container.
    1.1 Probe: a container reaches a host listener through `host.docker.internal` on Docker
        Desktop for Mac; note what Windows and plain Linux Docker need.
    1.2 Probe: a minimal Tauri 2 app builds and opens on the user's Mac.
-   1.3 Confirm the pairing file is visible in the Claude container and decide the Codex path.
+   1.3 Confirm the pairing file is visible in a Claude container and in a Codex container.
 
 2. **`prism-core` crate**
    2.1 Cargo workspace: `prism-core` (portable), `prism` (bridge, Linux), `app/src-tauri`.
@@ -78,17 +102,19 @@ the Linux container.
    6.2 Question state on the item: shared, in prompt box, answered, with the answer text.
    6.3 Drop and undo; filter and hide stay local to the tab.
 
-7. **Remove the terminal UI** (needs explicit approval, see Decisions 1 and 2)
+7. **Remove the terminal UI, the tmux requirement and the old launcher** (Decisions 1 and 2)
    7.1 Delete `src/ui/`, `tests/ui.rs`, `tests/diagram.rs`, `tests/graph.rs` (moved to core),
        `examples/`, and the dependencies `ratatui`, `crossterm`, `resvg`, `usvg`,
        `tiny-skia`, `fontdb`.
    7.2 Remove the Prism pane handling: `ensure_ui`, pane tags, `allow-passthrough`, the
        `pane` field in tool results; `/prism` reports the app connection instead.
-   7.3 Update plugin texts, `SKILL.md`, README and `docs/validation.md`.
+   7.3 Attach without tmux: identify the CLI by process ID and start time; delete the
+       `prism --agent` launcher, its supervisor and their tests.
+   7.4 Update plugin texts, `SKILL.md`, README and `docs/validation.md`.
 
 8. **Packaging**
-   8.1 macOS `.app` / `.dmg`, built on the user's Mac; unsigned first.
-   8.2 Windows installer, built in CI or on a Windows machine.
+   8.1 macOS `.app` / `.dmg`, built on the user's Mac, unsigned.
+   8.2 Windows installer, built on the user's Windows PC, unsigned.
    8.3 Version handshake so an old bridge and a new app refuse each other with a clear message.
 
 9. **Codex**
@@ -115,20 +141,19 @@ the Linux container.
 
 Batch 2 must land before 3, 4 and 5 start; 3 and 4 can then run in parallel.
 
-## Decisions needed
+## Decisions (settled 2026-11-09)
 
-1. **Delete the terminal UI** (about 4,400 lines in `src/ui/` plus its tests) once the app
-   covers list, diagram and ask. Confirm.
-2. **tmux**: with no UI pane, Prism needs tmux only to identify the CLI pane. Proposal: drop
-   the requirement and identify the CLI by process ID and start time, which the binding
-   already records. This also retires the older `prism --agent` launcher (`src/main.rs`
-   supervisor, most of `src/session.rs`, `tests/launcher.rs`, `tests/launcher_lifecycle.py`).
-   Confirm, or keep tmux and the launcher.
-3. **Windows build**: CI (GitHub Actions) or a Windows machine you provide.
-4. **Signing**: unsigned builds for your own machines, or Apple Developer ID and a Windows
-   certificate for distribution.
-5. **Codex containers**: where the pairing file is visible there.
-6. **Default port**: 7717 unless it collides with something you run.
+1. **Terminal UI**: deleted once the app covers list, diagram and ask (batch 7).
+2. **tmux**: no longer required. The CLI is identified by process ID and start time, which
+   the binding already records. The older `prism --agent` launcher goes with it
+   (`src/main.rs` supervisor, most of `src/session.rs`, `tests/launcher.rs`,
+   `tests/launcher_lifecycle.py`).
+3. **Builds**: on the user's own machines, one build command on the Mac and one on the
+   Windows PC. No CI.
+4. **Signing**: none; unsigned builds for the user's own machines.
+5. **Pairing file**: written to both `~/.claude/prism/app.json` and
+   `~/.codex/prism/app.json`; `d_claude` mounts the first, `d_codex` the second.
+6. **Port**: 7717.
 
 ## Risks
 
