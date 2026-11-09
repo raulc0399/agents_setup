@@ -694,11 +694,7 @@ impl UiState {
             .ok_or_else(|| anyhow::anyhow!("No document"))?;
         let (id, revision) = (document.id, document.revision);
         // Persisted records survive restarts and cover archives made through the agent tool.
-        let undo_id = store
-            .undo_records(self.workspace.id, id)?
-            .pop()
-            .ok_or_else(|| anyhow::anyhow!("No action to undo for this document"))?;
-        store.undo(self.workspace.id, id, revision, undo_id)?;
+        store.undo_latest(self.workspace.id, id, revision)?;
         self.refresh(store)?;
         self.message = "Action undone".into();
         Ok(())

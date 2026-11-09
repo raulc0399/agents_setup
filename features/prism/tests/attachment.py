@@ -35,6 +35,8 @@ class Attachment(unittest.TestCase):
         for key in ["TMUX", "TMUX_PANE", "PRISM_BINDING_FILE"]:
             self.environment.pop(key, None)
         self.environment["PATH"] = str(BINARY.parent) + ":" + self.environment["PATH"]
+        # A pairing file that does not exist: test bridges never dial a desktop app on the host.
+        self.environment["PRISM_APP_FILE"] = str(self.project / "no-prism-app.json")
 
     def tearDown(self):
         subprocess.run(["tmux", "-L", self.name, "kill-server"], capture_output=True)
@@ -156,7 +158,7 @@ while True: time.sleep(1)
         script = self.project / "conversation.py"
         script.write_text('''import os, pathlib, subprocess, sys, time
 root = pathlib.Path.cwd()
-env = dict(os.environ, CLAUDE_CONFIG_DIR=str(root / "config"), DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
+env = dict(os.environ, CLAUDE_CONFIG_DIR=str(root / "config"), DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1", PRISM_APP_FILE=str(root / "no-prism-app.json"))
 with root.joinpath("stdout").open("w") as out, root.joinpath("stderr").open("w") as err:
     result = subprocess.run(sys.argv[1:], env=env, stdout=out, stderr=err, timeout=60)
 root.joinpath("done").write_text(str(result.returncode))

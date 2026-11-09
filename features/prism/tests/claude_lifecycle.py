@@ -34,7 +34,7 @@ project.joinpath("claude-args.json").write_text(json.dumps({{"args": sys.argv[1:
 if project.joinpath("wrapper-mode").read_text().strip() == "print":
     command = [{real!r}, *sys.argv[1:], "-p", "/prism", "--plugin-dir", {plugin!r}, "--setting-sources", "",
                "--strict-mcp-config", "--output-format", "json", "--no-session-persistence"]
-    env = dict(os.environ, CLAUDE_CONFIG_DIR={config!r}, DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
+    env = dict(os.environ, CLAUDE_CONFIG_DIR={config!r}, DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1", PRISM_APP_FILE=str(project / "no-prism-app.json"))
     with project.joinpath("claude-stdout.json").open("w") as stdout, project.joinpath("claude-stderr.txt").open("w") as stderr:
         subprocess.run(command, cwd=project, env=env, stdout=stdout, stderr=stderr, timeout={timeout})
 while not project.joinpath("wrapper-stop").exists():
@@ -75,7 +75,8 @@ class ClaudeLifecycle(unittest.TestCase):
         wrapper.write_text("#!" + sys.executable + WRAPPER.format(project=str(self.project), real=str(REAL_CLAUDE), plugin=str(PLUGIN), config=str(self.config), timeout=CLAUDE_TIMEOUT))
         wrapper.chmod(0o700)
         (self.project / "wrapper-mode").write_text("record")
-        self.env = dict(os.environ, TMUX=tmux_env, TMUX_PANE=pane, TERM="xterm-256color", CLAUDE_CONFIG_DIR=str(self.config), DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
+        # A pairing file that does not exist: test bridges never dial a desktop app on the host.
+        self.env = dict(os.environ, TMUX=tmux_env, TMUX_PANE=pane, TERM="xterm-256color", CLAUDE_CONFIG_DIR=str(self.config), DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1", PRISM_APP_FILE=str(self.project / "no-prism-app.json"))
         self.env["PATH"] = f"{self.project}:{self.env['PATH']}"
         self.env.pop("PRISM_BINDING_FILE", None)
         self.binding = None

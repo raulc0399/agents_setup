@@ -468,6 +468,35 @@ fn restart_race_child() {
 }
 
 #[test]
+fn binding_records_when_its_conversation_was_bound() {
+    let project = TempDir::new().unwrap();
+    let runtime = RuntimeDirectory::create(project.path()).unwrap();
+    let server = Server::new();
+    let mut binding = server.binding(project.path());
+    assert_eq!(binding.bound_at_ms, 0);
+    let before = prism::session::unix_time_ms();
+    binding.bind_conversation("thread-timed").unwrap();
+    let bound_at_ms = binding.bound_at_ms;
+    assert!(bound_at_ms >= before);
+    binding.bind_conversation("thread-timed").unwrap();
+    assert_eq!(binding.bound_at_ms, bound_at_ms);
+    runtime.write_binding(&binding).unwrap();
+    // A writer that never saw the bound time cannot reset it.
+    let mut stale = binding.clone();
+    stale.bound_at_ms = 0;
+    runtime.write_binding(&stale).unwrap();
+    assert_eq!(
+        read_binding(&runtime.binding_path()).unwrap().bound_at_ms,
+        bound_at_ms
+    );
+    // Bindings written before the field existed still load, without a bound time.
+    let mut older = serde_json::to_value(&binding).unwrap();
+    older.as_object_mut().unwrap().remove("bound_at_ms");
+    let older: LiveBinding = serde_json::from_value(older).unwrap();
+    assert_eq!(older.bound_at_ms, 0);
+}
+
+#[test]
 fn stale_bridge_writes_preserve_conversation_and_ui_and_cannot_revive_retirement() {
     let project = TempDir::new().unwrap();
     let runtime = RuntimeDirectory::create(project.path()).unwrap();

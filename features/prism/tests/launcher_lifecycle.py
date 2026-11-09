@@ -49,7 +49,8 @@ class LauncherLifecycle(unittest.TestCase):
         self.tmux("new-session", "-d", "-x", "160", "-y", "48", "-s", "anchor", "cat")
         pane = self.tmux("display-message", "-p", "#{pane_id}")
         tmux_env = self.tmux("display-message", "-p", "#{socket_path},#{pid},0")
-        self.env = dict(os.environ, TMUX=tmux_env, TMUX_PANE=pane, TERM="xterm-256color")
+        # A pairing file that does not exist: test bridges never dial a desktop app on the host.
+        self.env = dict(os.environ, TMUX=tmux_env, TMUX_PANE=pane, TERM="xterm-256color", PRISM_APP_FILE=str(self.project / "no-prism-app.json"))
         self.anchor = pane
         executable = self.project / "codex"
         executable.write_text("#!" + sys.executable + '''

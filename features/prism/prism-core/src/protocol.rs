@@ -139,7 +139,9 @@ pub struct Session {
     pub binding_id: Id,
     /// When the conversation was bound (or resumed) to this CLI, in milliseconds since the
     /// Unix epoch. It belongs to the binding, so a restarted bridge reports the same value.
-    /// Never 0: a bridge that loads an older binding without it fills it in first.
+    /// Never 0: a bridge that loads an older binding without it fills in 1, which means the
+    /// bind time is unknown (the binding was written before this field existed) and always
+    /// loses to a recorded time.
     pub bound_at_ms: u64,
 }
 

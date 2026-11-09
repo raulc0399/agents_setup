@@ -493,7 +493,12 @@ fn claude_session_end_retires_the_binding_and_preserves_shared_questions() {
         (workspace.id, shared)
     };
     let bridge_path = binding_path.clone();
-    let bridge = std::thread::spawn(move || prism::bridge::run(&bridge_path));
+    // No pairing file: the bridge never dials a desktop app that happens to run on the host.
+    let link = prism::applink::LinkConfig {
+        pairing_file: Some(fixture.project.path().join("no-app.json")),
+        ..prism::applink::LinkConfig::from_env()
+    };
+    let bridge = std::thread::spawn(move || prism::bridge::run_with_link(&bridge_path, link));
     let deadline = Instant::now() + Duration::from_secs(10);
     while !connection_info(&binding_path).connected {
         assert!(Instant::now() < deadline, "bridge did not start");

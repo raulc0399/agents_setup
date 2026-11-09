@@ -5,6 +5,7 @@ use crate::adapters::{
     claude::ClaudeAdapter,
     codex::{CodexAdapter, RpcError as CodexRpcError},
 };
+use crate::applink::{AppLink, LinkConfig};
 use crate::model::{AgentKind, DeliveryMode, DeliveryOutcome, Id, MAX_PAYLOAD_BYTES};
 use crate::session::{LiveBinding, TmuxClient, process_start_time, read_binding, write_binding};
 use crate::store::Store;
@@ -38,6 +39,7 @@ const HEADER_TIMEOUT: Duration = Duration::from_millis(200);
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_LIFECYCLE_REASON_BYTES: usize = 64;
 const LIFECYCLE_IS_NATIVE: &str = "lifecycle events are native for this agent";
+const DISCONNECTED: &str = "bridge disconnected";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,11 +234,7 @@ pub fn apply_operation(
             request_id: None,
             cursor,
         }) => {
-            let questions = store
-                .questions(workspace.id)?
-                .into_iter()
-                .filter(|question| question.mode == DeliveryMode::Share)
-                .collect::<Vec<_>>();
+            let questions = store.shared_questions(workspace.id)?;
             let total = questions.len();
             let mut page = questions
                 .into_iter()
@@ -275,12 +273,9 @@ pub fn apply_operation(
         }
         Operation::Pending(_) => {
             let questions = store
-                .questions(workspace.id)?
+                .shared_questions(workspace.id)?
                 .into_iter()
-                .filter(|question| {
-                    question.mode == DeliveryMode::Share
-                        && question.outcome == DeliveryOutcome::Pending
-                })
+                .filter(|question| question.outcome == DeliveryOutcome::Pending)
                 .take(PENDING_LIMIT)
                 .map(|question| json!({"request_id":question.request_id,"text":question.text}))
                 .collect::<Vec<_>>();
@@ -906,6 +901,12 @@ fn bind_listener(socket: &Path) -> Result<UnixListener> {
 }
 
 pub fn run(binding_path: &Path) -> Result<()> {
+    run_with_link(binding_path, LinkConfig::from_env())
+}
+
+/// Runs the bridge with its link to the desktop app; see `applink` for how the link behaves
+/// while the app is absent.
+pub fn run_with_link(binding_path: &Path, link: LinkConfig) -> Result<()> {
     let binding = wait_for_binding(binding_path)?;
     let directory = binding_path.parent().context("binding directory missing")?;
     let lease = OpenOptions::new()
@@ -939,6 +940,14 @@ pub fn run(binding_path: &Path) -> Result<()> {
     let mut cleanup = Cleanup {
         socket: socket.clone(),
         signals: Vec::new(),
+    };
+    // The link is optional: without its thread the bridge serves the tools as before.
+    let link = match AppLink::start(binding_path, link) {
+        Ok(link) => Some(link),
+        Err(error) => {
+            eprintln!("prism: app link unavailable ({error})");
+            None
+        }
     };
     let result = (|| -> Result<()> {
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
@@ -1007,11 +1016,11 @@ pub fn run(binding_path: &Path) -> Result<()> {
     let retirement = retire(
         binding_path,
         &mut service.store,
-        service
-            .native_retirement
-            .as_deref()
-            .unwrap_or("bridge disconnected"),
+        service.native_retirement.as_deref().unwrap_or(DISCONNECTED),
     );
+    if let Some(link) = link {
+        link.close(service.native_retirement.as_deref().unwrap_or(DISCONNECTED));
+    }
     drop(server);
     drop(cleanup);
     // Only launcher-started Codex owns a private server; attached CLIs belong to the user.

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_APP_PORT: u16 = 7717;
 /// Name under which a container reaches the host that runs the app.
 pub const DEFAULT_APP_HOST: &str = "host.docker.internal";
+/// Environment variable that replaces `DEFAULT_APP_HOST`.
+pub const APP_HOST_ENV: &str = "PRISM_APP_HOST";
 /// Location below the CLI configuration directory (`~/.claude`, `~/.codex`).
 pub const PAIRING_FILE: &str = "prism/app.json";
 /// Environment variable that replaces the pairing file path.

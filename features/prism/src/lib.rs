@@ -11,6 +11,7 @@ pub mod ui;
 
 pub mod adapters;
 
+pub mod applink;
 pub mod bridge;
 
 pub mod mcp;

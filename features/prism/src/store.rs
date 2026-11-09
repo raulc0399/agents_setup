@@ -8,7 +8,8 @@ use std::path::Path;
 use std::time::Duration;
 
 const SCHEMA_VERSION: i64 = 2;
-const BUSY_TIMEOUT_SECONDS: u64 = 3;
+/// How long a connection waits for another one's write lock on the store.
+pub const BUSY_TIMEOUT_SECONDS: u64 = 3;
 
 pub struct Store {
     connection: Connection,
@@ -223,6 +224,22 @@ impl Store {
             .collect()
     }
 
+    /// Undoes the latest action on the document that can still be undone. The revision is
+    /// checked first, so a resent undo that already committed reports a conflict.
+    pub fn undo_latest(
+        &mut self,
+        workspace: Id,
+        document: Id,
+        expected_revision: u64,
+    ) -> Result<Document> {
+        check_revision(&self.document(workspace, document)?, expected_revision)?;
+        let undo_id = self
+            .undo_records(workspace, document)?
+            .pop()
+            .ok_or_else(|| Error::NotFound("action to undo for this document".into()))?;
+        self.undo(workspace, document, expected_revision, undo_id)
+    }
+
     pub fn undo(
         &mut self,
         workspace: Id,
@@ -421,6 +438,15 @@ impl Store {
 
     pub fn question(&self, workspace: Id, request_id: Id) -> Result<Question> {
         read_question(&self.connection, workspace, request_id)
+    }
+
+    /// Questions explicitly shared for CLI retrieval; no other question leaves the store.
+    pub fn shared_questions(&self, workspace: Id) -> Result<Vec<Question>> {
+        Ok(self
+            .questions(workspace)?
+            .into_iter()
+            .filter(|question| question.mode == DeliveryMode::Share)
+            .collect())
     }
 
     pub fn questions(&self, workspace: Id) -> Result<Vec<Question>> {

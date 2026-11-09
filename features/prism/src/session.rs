@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const SOCKET_DIRECTORY_PREFIX: &str = "/tmp/prism-";
@@ -36,6 +36,16 @@ pub fn process_start_time(pid: u32) -> io::Result<String> {
         .nth(18)
         .map(str::to_owned)
         .ok_or_else(|| invalid("missing process start time"))
+}
+
+/// Milliseconds since the Unix epoch; never 0, which marks a binding without a bound time.
+pub fn unix_time_ms() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    u64::try_from(elapsed.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +82,10 @@ pub struct LiveBinding {
     pub retired: bool,
     #[serde(default)]
     pub attached: bool,
+    /// When the conversation was bound to this CLI, in milliseconds since the Unix epoch. 0 in
+    /// bindings written before it was recorded; the bridge fills those in.
+    #[serde(default)]
+    pub bound_at_ms: u64,
 }
 
 impl LiveBinding {
@@ -103,6 +117,7 @@ impl LiveBinding {
             generation: 1,
             retired: false,
             attached: false,
+            bound_at_ms: 0,
         })
     }
 
@@ -119,6 +134,7 @@ impl LiveBinding {
             return Ok(());
         }
         self.conversation = Some(conversation.to_owned());
+        self.bound_at_ms = unix_time_ms();
         Ok(())
     }
 
@@ -348,6 +364,10 @@ pub fn write_binding(path: &Path, binding: &LiveBinding) -> io::Result<()> {
                     .is_some_and(|current| current != conversation)
                 {
                     return Err(invalid("cannot replace the bound native conversation"));
+                }
+                // The bound time belongs to the stored conversation; a stale writer keeps it.
+                if stored.bound_at_ms != 0 {
+                    updated.bound_at_ms = stored.bound_at_ms;
                 }
                 updated.conversation = stored.conversation;
             }
