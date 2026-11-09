@@ -1,5 +1,8 @@
 # Claude implementation handover
 
+> Status 2026-11-09: implemented. See `docs/claude-continuation.md` for the
+> implementation record and `docs/validation.md` for the real Claude loop.
+
 Shared Prism and Codex source baseline: **`f476550`**, following `f913411`,
 `09e4c4d`, and `d771855`. Read the latest HEAD and repository status before work;
 subsequent documentation commits do not change that source baseline.

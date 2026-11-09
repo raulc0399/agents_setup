@@ -1,13 +1,21 @@
 # Prism validation
 
 Validation uses Linux `/proc`, Debian 12 aarch64, tmux 3.3a, Codex CLI/app-server
-0.167.0, Node 24.22.2, and Rust 1.99.1. Native automatic Start/Steer/Queue remain
-disabled; none of these checks clears the immediate-conversation-switch gate.
+0.167.0, Claude Code 2.1.319, Node 24.22.2, and Rust 1.99.1. Native automatic
+Start/Steer/Queue remain disabled for both agents; none of these checks clears
+the Codex conversation-switch gate or supplies Claude request-to-turn correlation.
 
-Final combined result: **100 Rust tests, 16 Python probe regressions, 9
-release-binary lifecycle tests**, formatting, Clippy and release build passed.
+Codex release result (f476550): **100 Rust tests, 16 Python probe regressions,
+9 release-binary lifecycle tests**, formatting, Clippy and release build passed.
 `cargo install --locked --path . --root "$HOME/.local"` installed Prism 0.1.0;
 `prism@prism-local` 0.1.0 is installed and enabled in the user's Codex home.
+
+Claude integration result (2026-11-09): **116 Rust tests** (7 Claude adapter
+contract tests, 4 Claude package tests, lifecycle and agent-separation tests),
+**16 Codex probe regressions, 9 Codex lifecycle tests, 4 Claude lifecycle
+tests**, formatting, Clippy with warnings denied and the release build passed
+after the independent review fixes. The host's development toolchain is wiped on
+container restart; reinstall it per `docs/development-setup.md` first.
 
 ## Automated checks
 
@@ -24,6 +32,8 @@ python3 -m venv /tmp/prism-validation-venv
 /tmp/prism-validation-venv/bin/python -m unittest discover -s tests -p probe_codex_test.py
 PRISM_BINARY=target/debug/prism /tmp/prism-validation-venv/bin/python tests/launcher_lifecycle.py
 /tmp/prism-validation-venv/bin/python tests/probe_codex.py
+PRISM_BINARY=target/debug/prism python3 tests/claude_lifecycle.py
+python3 tests/probe_claude.py
 ```
 
 `launcher_lifecycle.py` uses a temporary project, a fake native WebSocket server,
@@ -31,6 +41,15 @@ and its own tmux server. It tests real Prism processes and terminal behavior,
 without model usage. Native protocol evidence comes separately from
 `probe_codex.py` and the real-model loop below. The default native probe creates
 its own Codex home/server and does not make model requests.
+
+`claude_lifecycle.py` uses the real launcher, the real installed `claude` CLI in
+print mode (`--plugin-dir plugins/claude`, isolated `CLAUDE_CONFIG_DIR`, no login,
+no model request) and its own tmux server. It proves the pre-bound
+`--session-id`, the CLI pane as the recorded native process, the mod's `/prism`
+reaching the bridge and opening the UI pane to the right, foreign session
+rejection, lifecycle retirement with the CLI pane kept alive, and explicit
+`--resume` forwarding. `probe_claude.py` records the native mod runtime facts in
+`docs/claude-integration.md`.
 
 ## Real Codex loop
 
@@ -63,3 +82,34 @@ private socket mode, actual server identity, and expected rejection of a fresh
 unpersisted thread resume. See `docs/codex-integration.md` for the unresolved
 native delivery gates. A passing fake-server lifecycle test does not certify
 all Codex versions or bypass these gates.
+
+## Real Claude loop
+
+The check on 2026-11-09 used a temporary project (`/tmp/pl/project`, a short path
+because of the Unix socket limit), a temporary isolated `CLAUDE_CONFIG_DIR`
+holding a 0600 copy of the user's claude.ai login plus onboarding state, the
+shipped `plugins/claude` package installed there through
+`claude plugin marketplace add` and `claude plugin install prism@prism-local`
+(not `--plugin-dir`), the release `prism --agent claude --project PATH --detach`
+launcher inside a private tmux server, the ordinary interactive `claude` CLI
+(2.1.319, Opus 5.5, auto permission mode by default in that fresh config), the
+bridge and the real UI. The copied credentials were deleted afterwards. This
+check consumes Claude usage.
+
+| Check | Observed result |
+| --- | --- |
+| Launch and identity | `binding.json` recorded `agent: claude`, the pre-bound session UUID, `server_endpoint: claude-cli://%1` and the CLI pane PID; the pane ran `claude --session-id` with that UUID after the folder-trust prompt. |
+| `/prism` from the installed mod | Opened Prism pane `%2` to the right (0 documents) without a model turn. |
+| Publication and caller binding | The real model called `mcp__prism__publish` with three steps, one finding and three relationships; revision 1 appeared in the pane. No permission prompt was shown under auto mode; Prism has no approval channel and answered none. |
+| Shared actions | UI acceptance, archive (cascading the finding's relationship) and undo advanced revisions 2, 3 and 4; the archived content was restored. |
+| Stable revision | The model inspected and republished at expected revision 4 → revision 5, adding "Enforce size limit" and re-pointing an existing relationship while keeping every existing ID. |
+| Stale selection | Sharing a draft selected at revision 4 after revision 5 was refused as STALE with the draft kept; reselect and `Ctrl-S` shared it. A retrieval requested before the Share correctly reported no shared questions. |
+| Share retrieval | The same Claude session retrieved the frozen question through `mcp__prism__questions` and answered with the marker `PRISM_ANSWERED`. |
+| `/clear` | The mod's `session.end` report retired the binding (generation 2) within seconds; the CLI pane stayed alive; the UI showed `Disconnected · Binding retired; explicitly resume` with revision 5 retained; `/prism` in the new session returned `prism --agent claude --resume <new session UUID>`. |
+| Exit and exact resume | After `/exit`, `--resume <original UUID>` restored revision 5 and the shared question in a new binding and reopened a pane on `/prism`; a second live exact resume was rejected naming the existing pane. |
+| Simultaneous sessions | A second `prism --agent claude` in the same project created a separate window, binding and empty workspace while the first stayed connected. |
+| CLI exit | `/exit` in each pane retired its binding; Prism sent no signal to any Claude process. |
+
+Interactive approval ownership in default (non-auto) permission mode and
+busy-queue cancellation were not exercised; they gate only the disabled native
+send modes, not Share.

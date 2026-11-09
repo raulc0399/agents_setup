@@ -71,3 +71,41 @@ Codex probes/docs and `plugins/codex/`. The primary integrator owns `src/store.r
   exit/resume passed. Native Start/Steer/Queue remain disabled.
 - End-user instructions are in README.md; evidence is in docs/validation.md;
   the Claude implementation prompt is in docs/claude-handover.md.
+
+## Claude integration (2026-11-08/09)
+
+The user approved the plan in `docs/claude-continuation.md` ("go all"): Claude
+launch with a pre-bound session ID, the CLI pane process as the owned native
+process, bridge lifecycle reports from the native mod, Start/Steer/Queue
+disabled for Claude, and an authenticated isolated real-model loop.
+
+Ownership was disjoint: the shared integration agent owned `src/main.rs`,
+`src/session.rs`, `src/bridge.rs`, `src/model.rs`, `src/adapters/mod.rs`,
+`tests/bridge.rs`, `tests/core.rs`, `tests/launcher.rs`, `tests/session.rs`; the
+Claude feature agent owned `src/adapters/claude.rs`, `plugins/claude/`,
+`tests/claude.rs`, `tests/claude_lifecycle.py`, `tests/probe_claude.py`,
+`docs/claude-integration.md`; the integrator owned the toolchain, README,
+IMPLEMENTATION, HANDOVER, validation docs and the real loop. Two read-only
+reviewers reviewed each feature; the integrator applied the shared-file fixes
+after both feature agents were lost to container restarts.
+
+- [x] Batch 1: toolchain reinstall, baseline green, probe rerun on 2.1.319,
+  interactive contracts (`--session-id`, exact `--resume`, `/clear` lifecycle,
+  installed-mod activation) verified in an isolated `CLAUDE_CONFIG_DIR`.
+- [x] Batch 2: adapter, launcher/bridge glue, package and tests; 116 Rust,
+  16 + 9 + 4 Python tests; independent reviews and fixes (lifecycle refused for
+  Codex bindings before any persistence, retirement reason kept when the pane
+  dies first, flat `Operation::Lifecycle(LifecycleEvent)` wire shape, reason
+  restricted to lowercase identifiers, `--codex-home` requires `--codex`, pane
+  survival asserted; mod reports `e.sessionId` at `session.end`, refuses
+  subagent tool calls, decodes its module URL, shares the delivery fingerprint
+  helper with Codex, skill directory `prism-workspace`, lifecycle test stops its
+  supervisor before cleanup). Declined: removing `ClaudeAdapter::session_id`
+  (mirrors `CodexAdapter::thread_id`); tmux stderr already masked in `session.rs`.
+- [x] Batch 3: real authenticated Claude loop, documentation, final review,
+  reviewed commits. Details in `docs/validation.md`.
+
+Codex behavior is unchanged except that a native retirement observed through
+the Codex adapter now records the adapter's reason instead of the generic
+"bridge disconnected" when invalidating pending deliveries; Codex has no
+enabled native deliveries, so no stored outcome changes in practice.
