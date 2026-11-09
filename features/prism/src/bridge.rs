@@ -1,7 +1,7 @@
 //! Authenticated, conversation-bound operations used by native CLI extensions.
 use crate::actions::{ContentAction, PublishRequest};
-use crate::adapters::{AgentAdapter, NativeEvent, codex::CodexAdapter};
-use crate::model::{DeliveryMode, Id, MAX_PAYLOAD_BYTES};
+use crate::adapters::{AgentAdapter, NativeEvent, claude::ClaudeAdapter, codex::CodexAdapter};
+use crate::model::{AgentKind, DeliveryMode, Id, MAX_PAYLOAD_BYTES};
 use crate::session::{LiveBinding, TmuxClient, process_start_time, read_binding, write_binding};
 use crate::store::Store;
 use crate::ui::ConnectionInfo;
@@ -27,6 +27,8 @@ const LIST_LIMIT: usize = 100;
 const QUESTION_PREVIEW_CHARS: usize = 512;
 const HEADER_LIMIT: usize = 16 * 1024;
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
+const MAX_LIFECYCLE_REASON_BYTES: usize = 64;
+const LIFECYCLE_IS_NATIVE: &str = "lifecycle events are native for this agent";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +46,7 @@ pub enum Operation {
     Inspect(InspectParams),
     Action(ActionParams),
     Questions(QuestionParams),
+    Lifecycle(LifecycleEvent),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,6 +69,13 @@ pub struct ActionParams {
 pub struct QuestionParams {
     pub request_id: Option<Id>,
     pub cursor: Option<Id>,
+}
+
+/// Native lifecycle observations reported by a CLI extension that has no server to poll.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LifecycleEvent {
+    SessionEnd { reason: String },
 }
 
 pub fn socket_path(binding_path: &Path) -> Result<PathBuf> {
@@ -91,7 +101,7 @@ pub fn wait_for_binding(path: &Path) -> Result<LiveBinding> {
             }
             Err(error) => {
                 return Err(error).context(
-                    "no verified Prism binding; launch or resume with prism --agent codex",
+                    "no verified Prism binding; launch or resume with prism --agent codex|claude",
                 );
             }
         }
@@ -234,6 +244,7 @@ pub fn apply_operation(
         Operation::Inspect(_) | Operation::Questions(_) => {
             bail!("cursor is only valid when listing summaries")
         }
+        Operation::Lifecycle(_) => bail!("lifecycle events are not content operations"),
     }
 }
 
@@ -305,10 +316,54 @@ impl BridgeClient {
     }
 }
 
+/// The bridge-owned observer of the bound native conversation, created once per connection.
+enum NativeObserver {
+    Codex(Box<CodexAdapter>),
+    Claude(ClaudeAdapter),
+}
+
+impl NativeObserver {
+    fn connect(binding: &LiveBinding, conversation: &str) -> Result<Self> {
+        match binding.agent {
+            AgentKind::Codex => {
+                let socket = binding
+                    .server_endpoint
+                    .strip_prefix("unix://")
+                    .context("native server must use a Unix socket")?;
+                let adapter = CodexAdapter::connect(
+                    Path::new(socket),
+                    conversation,
+                    binding.generation,
+                    IO_TIMEOUT,
+                )?;
+                ensure!(
+                    adapter.server_pid == binding.server_pid,
+                    "native server process changed"
+                );
+                Ok(Self::Codex(Box::new(adapter)))
+            }
+            AgentKind::Claude => Ok(Self::Claude(ClaudeAdapter::new(
+                conversation,
+                binding.generation,
+            )?)),
+        }
+    }
+
+    fn adapter(&mut self) -> &mut dyn AgentAdapter {
+        match self {
+            Self::Codex(adapter) => adapter.as_mut(),
+            Self::Claude(adapter) => adapter,
+        }
+    }
+}
+
 struct Service {
     binding_path: PathBuf,
     executable: PathBuf,
     store: Store,
+    observer: Option<NativeObserver>,
+    /// The native reason for retirement, kept even when the CLI pane dies before the next poll.
+    native_retirement: Option<String>,
 }
 
 impl Service {
@@ -330,11 +385,20 @@ impl Service {
             }
             return Err(error);
         }
+        // Lifecycle reports are Claude-only; refuse before any binding state is persisted.
+        if matches!(call.operation, Operation::Lifecycle(_)) {
+            ensure!(binding.agent == AgentKind::Claude, LIFECYCLE_IS_NATIVE);
+        }
         let tmux = TmuxClient::socket(&binding.tmux.socket_path);
         tmux.verify_binding(&binding)?;
         write_binding(&self.binding_path, &binding)?;
         binding = read_binding(&self.binding_path)?;
         authorize(&mut binding, token, &call)?;
+        if let Operation::Lifecycle(event) = &call.operation {
+            // The bridge loop retires the binding once the observer reports the event.
+            self.observe_lifecycle(event)?;
+            return Ok(json!({"data":{"retiring":true}}));
+        }
         let data = apply_operation(&mut self.store, &binding, call.operation)?;
         // Publication is already committed. Pane failure must not roll it back or replay it.
         let pane = match tmux.ensure_ui(&mut binding, &self.binding_path, &self.executable) {
@@ -342,6 +406,26 @@ impl Service {
             Err(error) => json!({"error":error.to_string()}),
         };
         Ok(json!({"data":data,"pane":pane}))
+    }
+
+    /// Only Claude reports lifecycle over the bridge; Codex lifecycle is observed natively.
+    fn observe_lifecycle(&mut self, event: &LifecycleEvent) -> Result<()> {
+        let LifecycleEvent::SessionEnd { reason } = event;
+        // The reason is rendered and persisted verbatim, so only identifier characters pass.
+        ensure!(
+            reason.len() <= MAX_LIFECYCLE_REASON_BYTES
+                && reason
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            "lifecycle reason must be a short lowercase identifier"
+        );
+        // The bridge loop creates the pre-bound Claude observer before it accepts any call.
+        let Some(NativeObserver::Claude(adapter)) = &mut self.observer else {
+            bail!(LIFECYCLE_IS_NATIVE);
+        };
+        adapter.observe_session_end(reason);
+        self.native_retirement = adapter.retired().map(str::to_owned);
+        Ok(())
     }
 }
 
@@ -403,7 +487,10 @@ pub fn connection_info(path: &Path) -> ConnectionInfo {
             generation: binding.generation,
             connected: true,
             send_modes: vec![DeliveryMode::Share],
-            message: "Share explicitly, then ask Codex to retrieve the Prism question".into(),
+            message: format!(
+                "Share explicitly, then ask {} to retrieve the Prism question",
+                binding.agent.label()
+            ),
         },
         Err(error) => ConnectionInfo {
             generation: 0,
@@ -576,33 +663,28 @@ impl Drop for Cleanup {
     }
 }
 
-fn poll_native(observer: &mut Option<CodexAdapter>, binding: &LiveBinding) -> Result<()> {
+/// Returns the native retirement reason once the observer reports that the conversation ended.
+fn poll_native(
+    observer: &mut Option<NativeObserver>,
+    binding: &LiveBinding,
+) -> Result<Option<String>> {
     let Some(thread) = &binding.conversation else {
-        return Ok(());
+        return Ok(None);
     };
     if observer.is_none() {
-        let socket = binding
-            .server_endpoint
-            .strip_prefix("unix://")
-            .context("native server must use a Unix socket")?;
-        let adapter =
-            CodexAdapter::connect(Path::new(socket), thread, binding.generation, IO_TIMEOUT)?;
-        ensure!(
-            adapter.server_pid == binding.server_pid,
-            "native server process changed"
-        );
-        *observer = Some(adapter);
+        *observer = Some(NativeObserver::connect(binding, thread)?);
     }
     for event in observer
         .as_mut()
         .expect("observer initialized")
+        .adapter()
         .poll_events()?
     {
         if let NativeEvent::Retired { reason } = event {
-            bail!("{reason}");
+            return Ok(Some(reason));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 pub fn run(binding_path: &Path) -> Result<()> {
@@ -636,6 +718,8 @@ pub fn run(binding_path: &Path) -> Result<()> {
         binding_path: binding_path.to_owned(),
         executable: std::env::current_exe()?,
         store: Store::open(store_path(&binding))?,
+        observer: None,
+        native_retirement: None,
     };
     let server = UnixListener::bind(&socket)?;
     let mut cleanup = Cleanup {
@@ -655,7 +739,6 @@ pub fn run(binding_path: &Path) -> Result<()> {
                 .signals
                 .push(signal_hook::flag::register(signal, stopping.clone())?);
         }
-        let mut observer = None;
         while !stopping.load(Ordering::Relaxed) {
             let current = read_binding(binding_path)?;
             if current.retired
@@ -665,7 +748,10 @@ pub fn run(binding_path: &Path) -> Result<()> {
             {
                 break;
             }
-            poll_native(&mut observer, &current)?;
+            if let Some(reason) = poll_native(&mut service.observer, &current)? {
+                service.native_retirement = Some(reason.clone());
+                bail!("{reason}");
+            }
             let stream = match server.accept() {
                 Ok((stream, _)) => stream,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -691,11 +777,20 @@ pub fn run(binding_path: &Path) -> Result<()> {
         }
         Ok(())
     })();
-    let retirement = retire(binding_path, &mut service.store, "bridge disconnected");
+    let retirement = retire(
+        binding_path,
+        &mut service.store,
+        service
+            .native_retirement
+            .as_deref()
+            .unwrap_or("bridge disconnected"),
+    );
     drop(server);
     drop(cleanup);
-    if process_start_time(binding.server_pid).ok().as_deref()
-        == Some(binding.server_start_time.as_str())
+    // Only Codex owns a private server; the Claude pane process belongs to the user's CLI.
+    if binding.agent == AgentKind::Codex
+        && process_start_time(binding.server_pid).ok().as_deref()
+            == Some(binding.server_start_time.as_str())
     {
         // This server was created exclusively for this launcher binding.
         unsafe {
@@ -782,6 +877,7 @@ mod tests {
                 .unwrap();
             let binding = LiveBinding::new(
                 project.path(),
+                AgentKind::Codex,
                 "unix:///unused".into(),
                 std::process::id(),
                 tmux.identity().unwrap(),
@@ -794,6 +890,8 @@ mod tests {
                 binding_path: runtime.binding_path(),
                 executable: project.path().join("missing-executable"),
                 store: Store::open(store_path(&binding)).unwrap(),
+                observer: None,
+                native_retirement: None,
             };
             Self {
                 _project: project,
@@ -936,6 +1034,49 @@ mod tests {
                 .outcome,
             DeliveryOutcome::Pending
         ));
+    }
+
+    #[test]
+    fn lifecycle_wire_shape_is_flat_and_denies_unknown_fields() {
+        let operation: Operation = serde_json::from_value(
+            json!({"method":"lifecycle","params":{"event":"session_end","reason":"clear"}}),
+        )
+        .unwrap();
+        assert!(matches!(
+            operation,
+            Operation::Lifecycle(LifecycleEvent::SessionEnd { ref reason }) if reason == "clear"
+        ));
+        assert!(
+            serde_json::from_value::<Operation>(
+                json!({"method":"lifecycle","params":{"event":"session_end","reason":"clear","pane":"%1"}}),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn codex_binding_rejects_lifecycle_events_without_retiring() {
+        let mut fixture = Fixture::new();
+        let thread = Id::new_v4().to_string();
+        let call = BridgeCall {
+            version: PROTOCOL_VERSION,
+            generation: 1,
+            thread_id: thread.clone(),
+            operation: Operation::Lifecycle(LifecycleEvent::SessionEnd {
+                reason: "clear".into(),
+            }),
+        };
+        let error = fixture
+            .service
+            .handle(&fixture.binding.token, call)
+            .unwrap_err();
+        assert!(error.to_string().contains("native for this agent"));
+        assert!(fixture.service.observer.is_none());
+        // An operation invalid for the agent must not pre-bind the conversation either.
+        let stored = read_binding(&fixture.service.binding_path).unwrap();
+        assert!(!stored.retired);
+        assert_eq!(stored.generation, 1);
+        assert!(stored.conversation.is_none());
     }
 
     #[test]

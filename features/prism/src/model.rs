@@ -18,6 +18,22 @@ pub enum AgentKind {
     Claude,
 }
 
+impl AgentKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            AgentKind::Codex => "Codex",
+            AgentKind::Claude => "Claude",
+        }
+    }
+
+    pub fn cli_name(&self) -> &'static str {
+        match self {
+            AgentKind::Codex => "codex",
+            AgentKind::Claude => "claude",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceKey {
     pub project: String,

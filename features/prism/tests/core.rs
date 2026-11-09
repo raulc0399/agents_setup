@@ -329,6 +329,21 @@ fn archiving_group_changes_only_group_record() {
 }
 
 #[test]
+fn identical_conversation_ids_under_different_agents_are_separate_workspaces() {
+    let mut store = Store::open(":memory:").unwrap();
+    let conversation = Id::new_v4().to_string();
+    let codex = store.workspace(&key(&conversation)).unwrap().id;
+    let mut claude_key = key(&conversation);
+    claude_key.agent = AgentKind::Claude;
+    let claude = store.workspace(&claude_key).unwrap().id;
+    assert_ne!(codex, claude);
+    let result = store.publish(codex, &publication()).unwrap();
+    assert!(store.documents(claude).unwrap().is_empty());
+    assert!(store.document(claude, result.document_id).is_err());
+    assert_eq!(store.workspace(&claude_key).unwrap().id, claude);
+}
+
+#[test]
 fn workspace_identity_and_private_views_survive_restart() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.db");

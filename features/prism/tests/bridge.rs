@@ -1,6 +1,7 @@
 use prism::bridge::{
     BridgeCall, InspectParams, Operation, PROTOCOL_VERSION, authorize, connection_info, socket_path,
 };
+use prism::model::AgentKind;
 use prism::session::{LiveBinding, RuntimeDirectory, TmuxClient};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -16,6 +17,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_agent(AgentKind::Codex)
+    }
+
+    fn with_agent(agent: AgentKind) -> Self {
         let project = TempDir::new().unwrap();
         let runtime = RuntimeDirectory::create(project.path()).unwrap();
         let name = format!("prism-bridge-test-{}", Uuid::new_v4());
@@ -23,10 +28,16 @@ impl Fixture {
         let pane = tmux
             .launch_cli(project.path(), Path::new("/usr/bin/cat"), &[], None)
             .unwrap();
+        // Claude records the CLI pane process itself; Codex records its private server.
+        let (endpoint, server_pid) = match agent {
+            AgentKind::Codex => ("unix:///unused".to_owned(), std::process::id()),
+            AgentKind::Claude => (format!("claude-cli://{}", pane.pane_id), pane.pid),
+        };
         let binding = LiveBinding::new(
             project.path(),
-            "unix:///unused".into(),
-            std::process::id(),
+            agent,
+            endpoint,
+            server_pid,
             tmux.identity().unwrap(),
             pane,
         )
@@ -310,6 +321,146 @@ fn health_requires_an_authenticated_matching_live_service() {
         server.join().unwrap();
         std::fs::remove_file(socket).unwrap();
     }
+}
+
+#[test]
+fn health_message_names_the_bound_agent() {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+    for (agent, label) in [(AgentKind::Codex, "Codex"), (AgentKind::Claude, "Claude")] {
+        let fixture = Fixture::with_agent(agent);
+        let socket = socket_path(&fixture.runtime.binding_path()).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let id = fixture.binding.binding_id;
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+            }
+            let body =
+                serde_json::json!({"version":PROTOCOL_VERSION,"binding_id":id,"generation":1})
+                    .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let info = connection_info(&fixture.runtime.binding_path());
+        server.join().unwrap();
+        assert!(info.connected);
+        assert_eq!(
+            info.message,
+            format!("Share explicitly, then ask {label} to retrieve the Prism question")
+        );
+    }
+}
+
+#[test]
+fn claude_session_end_retires_the_binding_and_preserves_shared_questions() {
+    use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
+    use prism::bridge::{BridgeClient, LifecycleEvent};
+    use prism::model::{DeliveryMode, DeliveryOutcome, ElementKind, Id, Selection};
+    use prism::store::Store;
+    use std::time::{Duration, Instant};
+    let mut fixture = Fixture::with_agent(AgentKind::Claude);
+    let session = Uuid::new_v4().to_string();
+    fixture.binding.bind_conversation(&session).unwrap();
+    fixture.runtime.write_binding(&fixture.binding).unwrap();
+    let binding_path = fixture.runtime.binding_path();
+    let store_path = prism::bridge::store_path(&fixture.binding);
+    let (workspace, shared) = {
+        let mut store = Store::open(&store_path).unwrap();
+        let workspace = store
+            .workspace(&fixture.binding.workspace_key().unwrap())
+            .unwrap();
+        let element = Id::new_v4();
+        let document = store
+            .publish(
+                workspace.id,
+                &PublishRequest {
+                    request_id: Id::new_v4(),
+                    document_id: None,
+                    expected_revision: None,
+                    title: "Doc".into(),
+                    elements: vec![ElementInput {
+                        id: element,
+                        title: "Node".into(),
+                        body: String::new(),
+                        kind: ElementKind::Text,
+                        source: None,
+                    }],
+                    relationships: vec![],
+                    groups: vec![],
+                },
+            )
+            .unwrap();
+        let shared = store
+            .prepare_question(
+                workspace.id,
+                &PrepareQuestion {
+                    request_id: Id::new_v4(),
+                    generation: 1,
+                    selection: Selection {
+                        document_id: document.document_id,
+                        revision: 1,
+                        ids: vec![element],
+                    },
+                    text: "Shared before /clear".into(),
+                    mode: DeliveryMode::Share,
+                },
+            )
+            .unwrap();
+        (workspace.id, shared)
+    };
+    let bridge_path = binding_path.clone();
+    let bridge = std::thread::spawn(move || prism::bridge::run(&bridge_path));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !connection_info(&binding_path).connected {
+        assert!(Instant::now() < deadline, "bridge did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let result = BridgeClient::new(&binding_path)
+        .unwrap()
+        .call(
+            &session,
+            Operation::Lifecycle(LifecycleEvent::SessionEnd {
+                reason: "clear".into(),
+            }),
+        )
+        .unwrap();
+    assert_eq!(result["data"]["retiring"], true);
+    assert!(result.get("pane").is_none());
+    let error = bridge.join().unwrap().unwrap_err().to_string();
+    assert!(error.contains("clear"), "{error}");
+    // The Claude pane is the user's CLI: retirement must leave it running.
+    let panes = Command::new("tmux")
+        .args(["-L", &fixture.name, "list-panes", "-a", "-F", "#{pane_id}"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8(panes.stdout)
+            .unwrap()
+            .lines()
+            .any(|id| id == fixture.binding.cli.pane_id),
+        "Claude CLI pane must survive retirement"
+    );
+    let retired = prism::session::read_binding(&binding_path).unwrap();
+    assert!(retired.retired);
+    assert_eq!(retired.generation, 2);
+    let store = Store::open(&store_path).unwrap();
+    let question = store.question(workspace, shared.request_id).unwrap();
+    assert_eq!(question.mode, DeliveryMode::Share);
+    assert_eq!(question.outcome, shared.outcome);
+    assert!(!matches!(question.outcome, DeliveryOutcome::Failed { .. }));
+    assert!(fixture.project.path().join(".prism/state.db").exists());
 }
 
 #[test]

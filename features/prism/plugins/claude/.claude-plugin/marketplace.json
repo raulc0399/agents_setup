@@ -1,0 +1,12 @@
+{
+  "name": "prism-local",
+  "owner": {"name": "Prism"},
+  "plugins": [
+    {
+      "name": "prism",
+      "source": "./",
+      "description": "Publish requested visual content to the bound Prism workspace beside this Claude conversation.",
+      "version": "0.1.0"
+    }
+  ]
+}

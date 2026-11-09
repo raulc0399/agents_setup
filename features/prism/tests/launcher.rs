@@ -9,7 +9,7 @@ fn binary() -> &'static str {
 fn launcher_requires_explicit_supported_agent_and_exact_resume_uuid() {
     for args in [
         vec![],
-        vec!["--agent", "claude"],
+        vec!["--agent", "gemini"],
         vec!["--agent", "codex", "--resume", "latest"],
         vec!["--resume", "00000000-0000-0000-0000-000000000001"],
     ] {
@@ -26,6 +26,7 @@ fn launcher_requires_explicit_supported_agent_and_exact_resume_uuid() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(output.status.success());
     assert!(help.contains("--detach"));
+    assert!(help.contains("codex") && help.contains("claude"));
     assert!(!help.contains("supervise"));
     assert!(!help.contains("native-cli"));
 }

@@ -1,0 +1,5 @@
+{
+  "name": "prism",
+  "version": "0.1.0",
+  "description": "Publish requested visual content to the bound Prism workspace beside this Claude conversation."
+}

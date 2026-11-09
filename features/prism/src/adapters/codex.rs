@@ -1,7 +1,7 @@
 //! Exact-thread Codex app-server client. Approval requests are never answered.
 
-use super::{AgentAdapter, Capabilities, NativeEvent};
-use crate::model::{DeliveryMode, DeliveryOutcome, MAX_PAYLOAD_BYTES, MAX_TEXT_BYTES, Question};
+use super::{AgentAdapter, Capabilities, NativeEvent, delivery_fingerprint};
+use crate::model::{DeliveryMode, DeliveryOutcome, Question};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -410,24 +410,10 @@ impl AgentAdapter for CodexAdapter {
                 reason: "Question belongs to a stale binding generation".to_owned(),
             };
         }
-        let fingerprint = match serde_json::to_string(&(
-            question.workspace_id,
-            question.generation,
-            &question.snapshot,
-            &question.text,
-            &question.mode,
-        )) {
-            Ok(fingerprint)
-                if fingerprint.len() <= MAX_PAYLOAD_BYTES
-                    && question.text.len() <= MAX_TEXT_BYTES =>
-            {
-                fingerprint
-            }
-            _ => {
-                return DeliveryOutcome::Refused {
-                    reason: "Question exceeds the native delivery bounds".to_owned(),
-                };
-            }
+        let Some(fingerprint) = delivery_fingerprint(question) else {
+            return DeliveryOutcome::Refused {
+                reason: "Question exceeds the native delivery bounds".to_owned(),
+            };
         };
         if let Some((previous, outcome)) = self.attempts.get(&question.request_id) {
             return if previous == &fingerprint {

@@ -1,0 +1,276 @@
+[
+  {
+    "name": "publish",
+    "description": "Publish or revise requested visual content and open Prism beside this registered Claude conversation. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Retrying the same request ID requires the identical payload.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "document_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 512
+              },
+              "body": {
+                "type": "string",
+                "maxLength": 65536
+              },
+              "kind": {
+                "enum": [
+                  "text",
+                  "step",
+                  "finding",
+                  "question"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "body",
+              "kind",
+              "source"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 2000
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "from": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "to": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 512
+              },
+              "direction": {
+                "enum": [
+                  "directed",
+                  "undirected",
+                  "bidirectional"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "from",
+              "to",
+              "label",
+              "direction"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 4000
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 512
+              },
+              "members": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "members"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 500
+        }
+      },
+      "required": [
+        "request_id",
+        "document_id",
+        "expected_revision",
+        "title",
+        "elements",
+        "relationships",
+        "groups"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "inspect",
+    "description": "Inspect published Prism content in this exact Claude conversation. Omit document_id to list at most 100 document summaries; repeat with returned next_cursor until null. Private view selections and drafts are never returned.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "document_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "action",
+    "description": "Apply explicitly requested acceptance or archive to shared content IDs at the expected revision. Acceptance is content feedback, never permission to implement or run tools.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "document_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "action": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "enum": [
+                "accept",
+                "archive"
+              ]
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "minItems": 1,
+              "maxItems": 6500,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "action",
+            "ids"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "document_id",
+        "expected_revision",
+        "action"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "questions",
+    "description": "Retrieve questions the user explicitly shared from Prism into this Claude conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this conversation, then publish requested visual revisions. This never reads private drafts.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+]

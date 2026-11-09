@@ -1,3 +1,4 @@
+use prism::model::AgentKind;
 use prism::session::{LiveBinding, RuntimeDirectory, TmuxClient, read_binding};
 use std::ffi::OsString;
 use std::fs;
@@ -43,6 +44,7 @@ impl Server {
             .unwrap();
         let binding = LiveBinding::new(
             project,
+            AgentKind::Codex,
             "unix:///test-owned-native-server".into(),
             std::process::id(),
             self.client.identity().unwrap(),

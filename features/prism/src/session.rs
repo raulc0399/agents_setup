@@ -70,8 +70,14 @@ pub struct LiveBinding {
 }
 
 impl LiveBinding {
+    /// The recorded native process is the launcher-owned process whose birth identity
+    /// authorizes this binding. Codex records its private app-server (`unix://<socket>`).
+    /// Claude has no server: the supervisor records the CLI pane process, because
+    /// `prism native-cli` execs `claude` and keeps the same PID and birth time, with the
+    /// endpoint `claude-cli://<pane_id>`.
     pub fn new(
         project: &Path,
+        agent: AgentKind,
         server_endpoint: String,
         server_pid: u32,
         tmux: TmuxIdentity,
@@ -80,7 +86,7 @@ impl LiveBinding {
         Ok(Self {
             binding_id: Uuid::new_v4(),
             project: project.canonicalize()?,
-            agent: AgentKind::Codex,
+            agent,
             conversation: None,
             server_endpoint,
             server_pid,

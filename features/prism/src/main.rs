@@ -1,4 +1,4 @@
-//! Linux launcher and entry points for one explicitly registered Codex conversation.
+//! Linux launcher and entry points for one explicitly registered Codex or Claude conversation.
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use prism::bridge;
@@ -27,13 +27,13 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 #[derive(Parser)]
 #[command(
     version,
-    about = "A visual workspace beside an explicitly bound Codex CLI",
+    about = "A visual workspace beside an explicitly bound Codex or Claude CLI",
     subcommand_negates_reqs = true
 )]
 struct Cli {
     #[arg(long, value_enum, required = true)]
     agent: Option<Agent>,
-    /// Resume this exact persisted Codex thread UUID; never chooses a recent thread.
+    /// Resume this exact persisted Codex thread or Claude session UUID; never chooses a recent one.
     #[arg(long, value_parser = conversation_id, requires = "agent")]
     resume: Option<String>,
     #[arg(long, default_value = ".")]
@@ -48,6 +48,16 @@ struct Cli {
 #[derive(Clone, Copy, ValueEnum)]
 enum Agent {
     Codex,
+    Claude,
+}
+
+impl Agent {
+    fn kind(self) -> AgentKind {
+        match self {
+            Agent::Codex => AgentKind::Codex,
+            Agent::Claude => AgentKind::Claude,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -74,10 +84,17 @@ struct Bound {
 struct NativeCli {
     #[arg(long)]
     binding: PathBuf,
-    #[arg(long)]
-    codex: PathBuf,
-    #[arg(long)]
+    #[arg(long, required_unless_present = "claude", conflicts_with = "claude")]
+    codex: Option<PathBuf>,
+    #[arg(long, requires = "codex")]
     codex_home: Option<PathBuf>,
+    #[arg(long)]
+    claude: Option<PathBuf>,
+    #[arg(long, requires = "claude")]
+    claude_config_dir: Option<PathBuf>,
+    /// The pre-bound Claude conversation is a persisted session to resume, not a new session ID.
+    #[arg(long, requires = "claude")]
+    resume_conversation: bool,
 }
 
 #[derive(Args)]
@@ -234,7 +251,11 @@ fn lock_launches(runtime: &RuntimeDirectory, signals: &StartupSignals) -> Result
     }
 }
 
-fn reject_duplicate_resume(runtime: &RuntimeDirectory, conversation: Option<&str>) -> Result<()> {
+fn reject_duplicate_resume(
+    runtime: &RuntimeDirectory,
+    agent: &AgentKind,
+    conversation: Option<&str>,
+) -> Result<()> {
     let Some(conversation) = conversation else {
         return Ok(());
     };
@@ -243,7 +264,7 @@ fn reject_duplicate_resume(runtime: &RuntimeDirectory, conversation: Option<&str
         let Ok(binding) = read_binding(&path) else {
             continue;
         };
-        if binding.agent == AgentKind::Codex
+        if binding.agent == *agent
             && binding.conversation.as_deref() == Some(conversation)
             && !binding.retired
             && TmuxClient::socket(&binding.tmux.socket_path)
@@ -251,7 +272,8 @@ fn reject_duplicate_resume(runtime: &RuntimeDirectory, conversation: Option<&str
                 .is_ok()
         {
             bail!(
-                "this exact Codex conversation already has a live Prism binding at {}; use its existing tmux pane {}",
+                "this exact {} conversation already has a live Prism binding at {}; use its existing tmux pane {}",
+                agent.label(),
                 path.display(),
                 binding.cli.pane_id
             );
@@ -262,8 +284,8 @@ fn reject_duplicate_resume(runtime: &RuntimeDirectory, conversation: Option<&str
 
 fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) -> Result<()> {
     let signals = StartupSignals::new()?;
-    let Agent::Codex = agent;
-    let codex = executable("codex")?;
+    let agent = agent.kind();
+    let native = executable(agent.cli_name())?;
     executable("tmux")?;
     let runtime = RuntimeDirectory::create(project)?;
     let binding_path = runtime.binding_path();
@@ -278,7 +300,7 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
         "project path is too long for a private Unix socket; use a shorter canonical project path"
     );
     let launch_lock = lock_launches(&runtime, &signals)?;
-    reject_duplicate_resume(&runtime, resume.as_deref())?;
+    reject_duplicate_resume(&runtime, &agent, resume.as_deref())?;
     let inside = std::env::var("TMUX_PANE")
         .ok()
         .filter(|_| std::env::var_os("TMUX").is_some());
@@ -289,17 +311,22 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
     };
     let log_path = runtime.path().join("supervisor.log");
     let log = private_file(&log_path)?;
+    // Each CLI has its own configuration directory variable, forwarded only when set.
+    let (cli_flag, configuration, configuration_flag) = match agent {
+        AgentKind::Codex => ("--codex", "CODEX_HOME", "--codex-home"),
+        AgentKind::Claude => ("--claude", "CLAUDE_CONFIG_DIR", "--claude-config-dir"),
+    };
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("supervise")
         .arg("--binding")
         .arg(&binding_path)
-        .arg("--codex")
-        .arg(&codex);
-    if let Some(home) = std::env::var_os("CODEX_HOME") {
+        .arg(cli_flag)
+        .arg(&native);
+    if let Some(directory) = std::env::var_os(configuration) {
         command
-            .arg("--codex-home")
-            .arg(PathBuf::from(home).canonicalize()?);
+            .arg(configuration_flag)
+            .arg(PathBuf::from(directory).canonicalize()?);
     }
     if let Some(resume) = resume {
         command.arg("--resume").arg(resume);
@@ -371,8 +398,10 @@ fn launch(agent: Agent, project: &Path, resume: Option<String>, detach: bool) ->
     } else if inside.is_some() {
         tmux.select(&binding)?;
         println!(
-            "Prism registered Codex in {}. Ask Codex to open Prism.",
-            binding.cli.pane_id
+            "Prism registered {} in {}. Ask {} to open Prism.",
+            agent.label(),
+            binding.cli.pane_id,
+            agent.label()
         );
     } else {
         let mut attached = AttachedClient(tmux.attach(&binding)?);
@@ -430,9 +459,18 @@ fn launch_project(binding_path: &Path) -> Result<PathBuf> {
     Ok(project.to_owned())
 }
 
-fn supervise(options: Launch) -> Result<()> {
-    let signals = StartupSignals::new()?;
-    let project = launch_project(&options.cli.binding)?;
+/// Codex alone gets a private app-server; the pane TUI connects to it with `--remote`.
+struct CodexServer {
+    process: OwnedServer,
+    endpoint: String,
+}
+
+fn start_codex_server(
+    codex: &Path,
+    options: &Launch,
+    project: &Path,
+    signals: &StartupSignals,
+) -> Result<CodexServer> {
     let directory = options
         .cli
         .binding
@@ -441,10 +479,10 @@ fn supervise(options: Launch) -> Result<()> {
     let socket = directory.join("app.sock");
     let endpoint = format!("unix://{}", socket.display());
     let log = private_file(&directory.join("codex.log"))?;
-    let mut command = Command::new(&options.cli.codex);
+    let mut command = Command::new(codex);
     command
         .args(["app-server", "--listen", &endpoint])
-        .current_dir(&project)
+        .current_dir(project)
         .env("PRISM_BINDING_FILE", &options.cli.binding)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
@@ -480,6 +518,15 @@ fn supervise(options: Launch) -> Result<()> {
     }
     signals.check()?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+    Ok(CodexServer {
+        process: server,
+        endpoint,
+    })
+}
+
+fn supervise(options: Launch) -> Result<()> {
+    let signals = StartupSignals::new()?;
+    let project = launch_project(&options.cli.binding)?;
     let tmux = options
         .tmux_socket
         .as_deref()
@@ -489,21 +536,63 @@ fn supervise(options: Launch) -> Result<()> {
         OsString::from("native-cli"),
         OsString::from("--binding"),
         options.cli.binding.as_os_str().to_owned(),
-        OsString::from("--codex"),
-        options.cli.codex.as_os_str().to_owned(),
     ];
-    if let Some(home) = &options.cli.codex_home {
-        arguments.extend([OsString::from("--codex-home"), home.as_os_str().to_owned()]);
-    }
+    let server = match &options.cli.claude {
+        Some(claude) => {
+            arguments.extend([OsString::from("--claude"), claude.as_os_str().to_owned()]);
+            if let Some(directory) = &options.cli.claude_config_dir {
+                arguments.extend([
+                    OsString::from("--claude-config-dir"),
+                    directory.as_os_str().to_owned(),
+                ]);
+            }
+            if options.resume.is_some() {
+                arguments.push(OsString::from("--resume-conversation"));
+            }
+            None
+        }
+        None => {
+            let codex = options
+                .cli
+                .codex
+                .as_deref()
+                .context("--codex or --claude is required")?;
+            arguments.extend([OsString::from("--codex"), codex.as_os_str().to_owned()]);
+            if let Some(home) = &options.cli.codex_home {
+                arguments.extend([OsString::from("--codex-home"), home.as_os_str().to_owned()]);
+            }
+            Some(start_codex_server(codex, &options, &project, &signals)?)
+        }
+    };
     let cli = tmux.launch_cli(
         &project,
         &std::env::current_exe()?,
         &arguments,
         options.inside_pane.as_deref(),
     )?;
-    let mut binding = LiveBinding::new(&project, endpoint, server.0.id(), tmux.identity()?, cli)?;
-    if let Some(resume) = &options.resume {
-        binding.bind_conversation(resume)?;
+    let mut binding = match &server {
+        Some(server) => LiveBinding::new(
+            &project,
+            AgentKind::Codex,
+            server.endpoint.clone(),
+            server.process.0.id(),
+            tmux.identity()?,
+            cli,
+        )?,
+        None => LiveBinding::new(
+            &project,
+            AgentKind::Claude,
+            format!("claude-cli://{}", cli.pane_id),
+            cli.pid,
+            tmux.identity()?,
+            cli,
+        )?,
+    };
+    // Claude receives its session ID from the launcher, so the conversation is bound up front.
+    match (&options.resume, binding.agent == AgentKind::Claude) {
+        (Some(resume), _) => binding.bind_conversation(resume)?,
+        (None, true) => binding.bind_conversation(&Uuid::new_v4().to_string())?,
+        (None, false) => {}
     }
     tmux.tag_cli(&binding)?;
     let result = (|| {
@@ -512,7 +601,10 @@ fn supervise(options: Launch) -> Result<()> {
         bridge::run(&options.cli.binding)
     })();
     // Use the original tag generation: bridge retirement increments the persisted generation.
-    let _ = tmux.cleanup_cli(&binding);
+    // The Claude pane is the user's CLI and stays open; only the Codex TUI pane is Prism's.
+    if binding.agent == AgentKind::Codex {
+        let _ = tmux.cleanup_cli(&binding);
+    }
     result
 }
 
@@ -520,7 +612,11 @@ fn native_cli(options: NativeCli) -> Result<()> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let binding = loop {
         if let Ok(binding) = read_binding(&options.binding) {
-            ensure!(!binding.retired, "binding retired before Codex startup");
+            ensure!(
+                !binding.retired,
+                "binding retired before {} startup",
+                binding.agent.label()
+            );
             if bridge::connection_info(&options.binding).connected {
                 break binding;
             }
@@ -531,7 +627,14 @@ fn native_cli(options: NativeCli) -> Result<()> {
         );
         std::thread::sleep(STARTUP_POLL);
     };
-    let mut command = Command::new(&options.codex);
+    if let Some(claude) = &options.claude {
+        return exec_claude(claude, &options, &binding);
+    }
+    let codex = options
+        .codex
+        .as_ref()
+        .context("--codex or --claude is required")?;
+    let mut command = Command::new(codex);
     if let Some(conversation) = binding.conversation {
         command.args(["resume", &conversation]);
     }
@@ -545,6 +648,27 @@ fn native_cli(options: NativeCli) -> Result<()> {
     Err(command.exec()).context("start Codex TUI")
 }
 
+/// Claude is told its exact session: a fresh `--session-id` or an explicit `--resume`.
+fn exec_claude(claude: &Path, options: &NativeCli, binding: &LiveBinding) -> Result<()> {
+    let conversation = binding
+        .conversation
+        .as_deref()
+        .context("Claude conversation must be bound by the supervisor")?;
+    let mut command = Command::new(claude);
+    if options.resume_conversation {
+        command.args(["--resume", conversation]);
+    } else {
+        command.args(["--session-id", conversation]);
+    }
+    command
+        .current_dir(&binding.project)
+        .env("PRISM_BINDING_FILE", &options.binding);
+    if let Some(directory) = &options.claude_config_dir {
+        command.env("CLAUDE_CONFIG_DIR", directory);
+    }
+    Err(command.exec()).context("start Claude CLI")
+}
+
 fn run_ui(path: &Path) -> Result<()> {
     let binding = read_binding(path)?;
     let key = WorkspaceKey {
@@ -553,7 +677,7 @@ fn run_ui(path: &Path) -> Result<()> {
             .to_str()
             .context("project path must be UTF-8")?
             .to_owned(),
-        agent: AgentKind::Codex,
+        agent: binding.agent.clone(),
         conversation: binding
             .conversation
             .clone()
@@ -576,7 +700,7 @@ fn run() -> Result<()> {
         Some(Entry::Supervise(options)) => supervise(options),
         Some(Entry::NativeCli(options)) => native_cli(options),
         None => launch(
-            cli.agent.context("--agent codex is required")?,
+            cli.agent.context("--agent codex|claude is required")?,
             &cli.project,
             cli.resume,
             cli.detach,
