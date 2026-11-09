@@ -1,6 +1,6 @@
 # Prism
 
-Prism 0.1.0 is a project-local visual workspace beside a launcher-bound Codex or
+Prism 0.1.0 is a project-local visual workspace beside an existing Codex or
 Claude Code conversation in tmux. It provides lists, diagrams, acceptance,
 archive/undo, private questions, and multiple views of shared content. Both CLIs
 share one application; each has its own native package under `plugins/`.
@@ -66,41 +66,36 @@ skill. Installed mods activate in new sessions without `--plugin-dir`. See
 [plugins/claude/README.md](plugins/claude/README.md) and
 [Claude integration evidence](docs/claude-integration.md).
 
-## Open a conversation
+## Open Prism from a conversation
+
+Start a tmux session, then run your normal CLI from the project:
 
 ```sh
 cd /path/to/project
-prism --agent codex
-prism --agent claude
+tmux
+codex
+# Or: claude
 ```
 
-Outside tmux, Prism creates and attaches a new tmux session. Inside tmux, it
-creates and selects a new window in the current session. For Codex it launches
-the normal TUI against its own private app-server. For Claude it launches the
-normal `claude` CLI with a fresh `--session-id` that Prism binds up front; there
-is no separate server. Ask the CLI to “show this plan in Prism”; the native
-publication tool opens the pane to the right. Later tool calls reuse that pane.
-No UI pane opens until a Prism tool is called, or until you run `/prism` in
-Claude, which opens or refreshes the pane without a model turn.
+Discuss your task normally. When needed, ask “show this plan in Prism”. The
+native plugin attaches to the current conversation and opens Prism in a pane to
+the right. Later calls reuse it; closing the Prism pane lets the next call reopen
+it. Claude also provides `/prism` to open the pane without a model turn.
+The original CLI stays running in its original pane throughout.
 
-Resume only an explicitly identified persisted conversation:
+Outside tmux, Prism asks you to start the CLI inside tmux; it cannot split an
+ordinary terminal. Install the plugin before starting the CLI so its native
+tools are loaded. No `prism --agent ...` launcher or conversation restart is
+required to open Prism from an already-running CLI with the plugin loaded.
 
-```sh
-prism --agent codex --project /path/to/project --resume THREAD_UUID
-prism --agent claude --project /path/to/project --resume SESSION_UUID
-```
+Pane routing uses inherited tmux identity plus verified process ancestry, never
+a model-provided pane or a recently active terminal. Codex supplies the native
+thread ID through MCP metadata; Claude reads its own session ID in the mod.
+The application keeps sockets in private `/tmp` directories and binds all content
+to that exact project, agent and conversation.
 
-Installing the plugin into an already-running unregistered CLI does not prove
-which tmux pane owns it. Its tools return a launcher/resume instruction. Exit
-that CLI before explicitly resuming it through Prism; Prism never chooses a
-recent conversation or adopts a pane by project path alone. A second launch of
-the same live project/conversation is rejected with the existing binding and pane.
-
-`prism --agent codex --detach` and `prism --agent claude --detach` start without
-attaching, for managed terminal sessions and integration checks. `prism ui --binding /protected/binding.json`
-reopens the persisted workspace for that binding; use the launcher's actual
-binding path. `prism bridge --binding PATH` and `prism mcp` are service entry
-points normally started by the launcher and native plugin.
+The older explicit launcher remains available for existing integrations. Its
+bindings are still accepted, but the native plugins no longer require it.
 
 ## Work with content
 
@@ -162,32 +157,27 @@ are refused. Stop live Prism processes before copying `.prism/` for a backup;
 include SQLite's WAL/SHM files if copying a live database. Keep `.prism/` out of
 version control.
 
-CLI exit, server loss or an observed conversation switch retires the binding.
-Persisted content remains available. Codex `/new` may not be observed until
-another native event or tool call; this is why native automatic sends remain
-disabled. Claude `/clear`, `/resume`, `/logout` and exit are reported by the
-mod's `session.end` hook: the binding retires within seconds, the Prism pane
-shows disconnected state, and the Claude CLI pane stays open (Prism never
-terminates a Claude process). Its tools then return the exact
-`prism --agent claude --resume SESSION_UUID` instruction for the new session.
-Use a fresh explicit launcher/resume binding after retirement. Questions with
-unknown outcomes are never resent automatically.
+Closing the native connection retires the binding and releases the Prism pane;
+the attached CLI is never terminated. Codex attachment follows its MCP process
+lifetime; it does not observe app-server thread events. Claude reports session
+changes through `session.end`. A different live Codex thread cannot reuse the
+same pane's binding. Persisted content remains available, and unknown question
+outcomes are never resent automatically.
 
 If pane creation fails after publication, the tool returns the committed revision
 and pane error separately. Retry the identical publication with the same request
 ID; it replays the result without duplicating the revision. Changed payloads need
-a fresh request ID. A too-long canonical project path is rejected because Unix
-sockets have a platform path-length limit; use a shorter actual project path.
+a fresh request ID. Socket paths under `/tmp` do not grow with the project path.
 
 Diagnostics: `prism --help`, `codex --version`, `claude --version`, `tmux -V`,
 `codex plugin list --marketplace prism-local --json`, `claude plugin list`, and
-the specific binding's `supervisor.log` and `codex.log`. An unavailable bridge
+the specific binding's `bridge.log` (or `supervisor.log` and `codex.log` for the older launcher). An unavailable bridge
 disables Share even if a stale socket remains. Do not delete the project
 database to repair a runtime connection.
 
 ## Remove
 
-Exit the launcher-owned CLI session and Prism UI, then run the commands for the
+Exit the CLI session and Prism UI, then run the commands for the
 packages you installed:
 
 ```sh
@@ -209,6 +199,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 python3 -m unittest discover -s tests -p probe_codex_test.py
 PRISM_BINARY=target/debug/prism python3 tests/claude_lifecycle.py
+PRISM_BINARY=target/debug/prism python3 tests/attachment.py
 ```
 
 Completed checks and the real Codex and Claude publication/Share/revision loops

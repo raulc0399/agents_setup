@@ -105,7 +105,23 @@ pub fn operation(name: &str, arguments: Value) -> Result<Operation> {
 
 fn tool_result(request: &Value, binding_path: Option<&Path>) -> Result<Value> {
     let thread = native_thread(request)?;
-    let binding_path = binding_path.with_context(|| format!("Prism requires a trusted tmux binding. Resume this exact conversation with: prism --agent codex --resume {thread}. An unregistered CLI cannot safely identify its pane."))?;
+    let name = request["params"]["name"]
+        .as_str()
+        .context("tool name missing")?;
+    let operation = operation(name, request["params"]["arguments"].clone())?;
+
+    let attached;
+    let binding_path = match binding_path {
+        Some(path) => path,
+        None => {
+            attached = crate::attachment::ensure_attached(
+                crate::model::AgentKind::Codex,
+                &thread,
+                std::process::id(),
+            )?;
+            &attached
+        }
+    };
     let binding = crate::session::read_binding(binding_path)?;
     ensure!(
         binding.agent == crate::model::AgentKind::Codex,
@@ -118,10 +134,6 @@ fn tool_result(request: &Value, binding_path: Option<&Path>) -> Result<Value> {
             .is_none_or(|bound| bound == thread),
         "Only the bound Codex thread may use this Prism binding; child and unrelated threads must not reuse it"
     );
-    let name = request["params"]["name"]
-        .as_str()
-        .context("tool name missing")?;
-    let operation = operation(name, request["params"]["arguments"].clone())?;
     BridgeClient::new(binding_path)?.call(&thread, operation)
 }
 

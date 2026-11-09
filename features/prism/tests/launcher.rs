@@ -36,6 +36,8 @@ fn mcp_routes_without_launcher_registration_and_reports_missing_identity() {
     let mut child = Command::new(binary())
         .arg("mcp")
         .env_remove("PRISM_BINDING_FILE")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -57,7 +59,7 @@ fn mcp_routes_without_launcher_registration_and_reports_missing_identity() {
         replies[1]["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("prism --agent codex --resume")
+            .contains("Start codex or claude inside tmux")
     );
 }
 

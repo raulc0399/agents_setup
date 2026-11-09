@@ -65,12 +65,25 @@ enum Entry {
     Ui(Bound),
     /// Serve native MCP over standard input/output; configured by the Codex plugin.
     Mcp,
+    /// Attach a native plugin to its existing tmux conversation.
+    #[command(hide = true)]
+    Attach(Attach),
+    #[command(hide = true)]
+    AttachedBridge(Bound),
     /// Run the authenticated bridge for a protected launcher binding.
     Bridge(Bound),
     #[command(hide = true)]
     Supervise(Launch),
     #[command(hide = true)]
     NativeCli(NativeCli),
+}
+
+#[derive(Args)]
+struct Attach {
+    #[arg(long, value_enum)]
+    agent: Agent,
+    #[arg(long, value_parser = conversation_id)]
+    conversation: String,
 }
 
 #[derive(Args)]
@@ -758,6 +771,22 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Entry::Ui(options)) => run_ui(&options.binding),
+        Some(Entry::Attach(options)) => {
+            ensure!(
+                matches!(options.agent, Agent::Claude),
+                "Codex attaches through its native MCP transport"
+            );
+            // SAFETY: getppid has no memory preconditions; the native Claude hook starts this child.
+            let parent = unsafe { libc::getppid() } as u32;
+            let binding = prism::attachment::ensure_attached(
+                options.agent.kind(),
+                &options.conversation,
+                parent,
+            )?;
+            println!("{}", serde_json::json!({"binding": binding}));
+            Ok(())
+        }
+        Some(Entry::AttachedBridge(options)) => prism::attachment::run_bridge(&options.binding),
         Some(Entry::Bridge(options)) => bridge::run(&options.binding),
         Some(Entry::Mcp) => {
             let binding = std::env::var_os("PRISM_BINDING_FILE").map(PathBuf::from);

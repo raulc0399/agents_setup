@@ -799,6 +799,9 @@ fn poll_native(
     observer: &mut Option<NativeObserver>,
     binding: &LiveBinding,
 ) -> Result<Option<String>> {
+    if binding.attached && binding.agent == AgentKind::Codex {
+        return Ok(None);
+    }
     let Some(thread) = &binding.conversation else {
         return Ok(None);
     };
@@ -917,7 +920,8 @@ pub fn run(binding_path: &Path) -> Result<()> {
                     let current = read_binding(binding_path)?;
                     authenticate(&current, &request.token)?;
                     TmuxClient::socket(&current.tmux.socket_path).verify_binding(&current)?;
-                    let native_connected = current.conversation.is_none()
+                    let native_connected = current.attached
+                        || current.conversation.is_none()
                         || service
                             .observer
                             .as_ref()
@@ -943,8 +947,9 @@ pub fn run(binding_path: &Path) -> Result<()> {
     );
     drop(server);
     drop(cleanup);
-    // Only Codex owns a private server; the Claude pane process belongs to the user's CLI.
-    if binding.agent == AgentKind::Codex
+    // Only launcher-started Codex owns a private server; attached CLIs belong to the user.
+    if !binding.attached
+        && binding.agent == AgentKind::Codex
         && process_start_time(binding.server_pid).ok().as_deref()
             == Some(binding.server_start_time.as_str())
     {
@@ -952,6 +957,13 @@ pub fn run(binding_path: &Path) -> Result<()> {
         unsafe {
             libc::kill(binding.server_pid as i32, libc::SIGTERM);
         }
+    }
+    if binding.attached {
+        // The lease is still held: only the bridge that owned this runtime may release it.
+        let mut tagged = read_binding(binding_path).unwrap_or_else(|_| binding.clone());
+        tagged.generation = binding.generation;
+        let _ = TmuxClient::socket(&binding.tmux.socket_path).release_attached(&tagged);
+        let _ = crate::session::remove_socket_directory(binding_path);
     }
     result.and(retirement)
 }

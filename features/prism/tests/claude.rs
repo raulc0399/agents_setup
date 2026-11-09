@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const UNREGISTERED_INSTRUCTION: &str = "Prism requires a trusted tmux binding. Resume this exact conversation with: prism --agent claude --resume <sessionId>. An unregistered CLI cannot safely identify its pane.";
+const UNREGISTERED_INSTRUCTION: &str = "Prism needs tmux. Start codex or claude inside tmux, then ask to open Prism in that conversation.";
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/claude")
@@ -100,7 +100,7 @@ fn module_wires_every_tool_the_command_and_the_exact_instruction() {
         assert!(skill.contains(&format!("mcp__prism__{name}")));
     }
     assert!(skill.contains("/prism"));
-    assert!(skill.contains("prism --agent claude --resume"));
+    assert!(skill.contains("inside tmux"));
     // A skill named `prism` claims `/prism:prism` and the CLI refuses the mod's `/prism` command.
     assert!(skill.starts_with("---\nname: prism-workspace\n"));
     assert!(module.contains("e.agentId !== undefined"));

@@ -290,3 +290,13 @@ python3 -m unittest discover -s features/prism/tests -p probe_codex_test.py
 Independent review identified the pagination, fragmented-frame deadline and
 probe-attribution defects addressed above; final integration review and release
 evidence are recorded in `../IMPLEMENTATION.md`.
+
+### On-demand attachment (2026-11-09)
+
+The launcher requirement above describes the earlier implementation. The native
+plugin now forwards `TMUX` and `TMUX_PANE` and checks the MCP process ancestry
+against the exact pane before creating an attachment. `_meta.threadId` still
+supplies the native caller identity; no pane or credential comes from model
+arguments. An isolated ordinary Codex 0.167.0 TUI successfully opened the Prism
+pane through `prism_inspect`, preserving its original conversation and pane.
+See `docs/validation.md` and `tests/attachment.py` for the checks and limitations.

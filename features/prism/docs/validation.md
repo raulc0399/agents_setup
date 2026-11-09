@@ -113,3 +113,25 @@ check consumes Claude usage.
 Interactive approval ownership in default (non-auto) permission mode and
 busy-queue cancellation were not exercised; they gate only the disabled native
 send modes, not Share.
+
+## On-demand tmux attachment (2026-11-09)
+
+The native plugins now attach to an already-running CLI inside tmux. The first
+Prism call verifies inherited tmux identity against Linux process ancestry,
+creates the bridge, and opens the UI to the right without launching another CLI.
+Attached bindings never authorize termination of the user's CLI or its pane.
+
+`tests/attachment.py` verifies lazy attachment, publication, pane reuse/reopening,
+refusal of unrelated processes and conflicting conversations, duplicate bridge
+ownership, outside-tmux instructions, and real Claude `/prism` through its native
+process API. Its four tests passed without model requests.
+
+A separate isolated real Codex 0.167.0 TUI, started normally with the native Prism
+plugin, called `prism_inspect` after its one-time tool approval. The call returned
+`pane.id = "%1"`, the original pane remained `%0`, and the assistant confirmed
+completion. No `prism --agent`, `--remote`, or replacement conversation was used.
+The isolated tmux server and temporary Codex home were removed afterwards.
+
+The attachment tracks Codex's MCP process lifetime, not app-server thread events;
+it rejects a different live thread claiming the same pane. Claude session-end
+hooks retire their attachment. Native Start/Steer/Queue remain disabled.

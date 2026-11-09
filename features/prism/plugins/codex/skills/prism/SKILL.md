@@ -6,6 +6,7 @@ description: Publish lists, plans, findings and diagrams to Prism when the user 
 Use the native Prism tools for content the user asks to see visually. Do not
 automatically extract conversation content or open another agent conversation.
 
+- To open Prism without publishing content, call `prism_inspect` with `{}`.
 - Call `prism_inspect` before revising existing content; preserve stable IDs and
   use its current document revision when calling `prism_publish` or `prism_action`.
 - When listing documents or shared questions, repeat with returned `next_cursor`
@@ -21,8 +22,10 @@ automatically extract conversation content or open another agent conversation.
   conversation for publication. Do not reuse the parent's Prism binding, spoof
   its identity, or retry a refusal from a different thread. Plugin inheritance
   does not establish authority to publish into the parent's workspace.
-- If the tools report an unregistered or disconnected binding, show their exact
-  launcher/resume instruction. Do not guess a pane or create a replacement thread.
+- Start the normal CLI inside tmux. The first Prism tool attaches to this
+  conversation and opens the application to its right; later calls reuse it.
+- If attachment fails, show the tool's exact instruction. Never relaunch the
+  CLI through Prism, guess another pane, or start a replacement conversation.
 - If native sending is unavailable, ask the user to explicitly share the question
   in Prism and invoke this skill to retrieve it. Never claim a queued or unknown
   delivery started, and never retry an unknown delivery automatically.

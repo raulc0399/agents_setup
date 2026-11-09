@@ -1,7 +1,8 @@
 // Prism native mod for Claude Code. Identity comes from $.session.id(); the trusted
-// launcher binding (PRISM_BINDING_FILE) and the authenticated Unix bridge own everything else.
+// on-demand tmux attachment and authenticated Unix bridge own pane routing.
 
-const INSTRUCTION = 'Prism requires a trusted tmux binding. Resume this exact conversation with: prism --agent claude --resume <sessionId>. An unregistered CLI cannot safely identify its pane.';
+const INSTRUCTION = 'Prism needs tmux. Start codex or claude inside tmux, then ask to open Prism in that conversation.';
+const bindings = new Map();
 const SUBAGENT_REFUSAL = 'Prism tools are available only to the main conversation the user is watching, not to subagents.';
 const PROTOCOL_VERSION = 1;
 const COMMAND_NAME = 'prism';
@@ -81,7 +82,18 @@ async function openPane($) {
 // The bridge bounds its own response size and answers 413 with an {error} body.
 async function callBridge($, sessionId, method, params) {
   const instruction = INSTRUCTION.replace('<sessionId>', sessionId);
-  const bindingPath = await $.env.get('PRISM_BINDING_FILE');
+  let bindingPath = await $.env.get('PRISM_BINDING_FILE') || bindings.get(sessionId);
+  if (!bindingPath && method !== 'lifecycle') {
+    if (!await $.env.get('TMUX') || !await $.env.get('TMUX_PANE')) {
+      return {error: instruction};
+    }
+    const attached = await $.process.run(['prism', 'attach', '--agent', 'claude', '--conversation', sessionId]);
+    if (attached.exitCode !== 0) {
+      return {error: attached.stderr.trim() || instruction};
+    }
+    bindingPath = JSON.parse(attached.stdout).binding;
+    bindings.set(sessionId, bindingPath);
+  }
   if (!bindingPath) {
     return {error: instruction};
   }

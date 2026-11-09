@@ -23,9 +23,10 @@ automatically extract conversation content or open another agent conversation.
 - Native caller identity is the current Claude session ID, read by the mod
   itself. Never supply conversation, pane, server identity or binding
   credentials as model arguments.
-- If the tools report an unregistered or disconnected binding, show their exact
-  instruction (`prism --agent claude --resume <sessionId>`). Do not guess a pane
-  or start a replacement conversation.
+- Start the normal CLI inside tmux. The first Prism tool attaches to this
+  conversation and opens the application to its right; later calls reuse it.
+- If attachment fails, show the tool's exact instruction. Never relaunch the
+  CLI through Prism, guess another pane, or start a replacement conversation.
 - Native sending from Prism is disabled for Claude: ask the user to explicitly
   share the question in Prism, then retrieve it with `mcp__prism__questions`.
   Never claim a queued or unknown delivery started, and never retry an unknown

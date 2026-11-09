@@ -81,7 +81,8 @@ without notice. The file is a generated local reference, not a project dependenc
 
 `HttpInit.socketPath` is declared. The process fallback is declared as
 `$.process.run(argv, {cwd, env, stdin, timeoutMs})`, returning
-`{exitCode, stdout, stderr}`; this fallback was unnecessary and is not runtime-tested.
+`{exitCode, stdout, stderr}`; this process API is now runtime-tested by `tests/attachment.py` for on-demand
+attachment from the real `/prism` command.
 `HttpInit` has no cancellation signal or timeout field; do not invent one.
 The bridge must keep native HTTP handlers bounded and retire stale generations.
 

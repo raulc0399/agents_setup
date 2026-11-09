@@ -4,6 +4,7 @@ pub mod actions;
 pub mod model;
 pub mod store;
 
+pub mod attachment;
 pub mod session;
 
 pub mod ui;

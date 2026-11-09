@@ -8,17 +8,16 @@ codex plugin marketplace add /absolute/path/to/features/prism/plugins/codex
 codex plugin add prism@prism-local
 ```
 
-The native compatibility manifest loads `skills/prism/SKILL.md` and `.mcp.json`.
-The MCP process receives `PRISM_BINDING_FILE` only from the trusted launcher
-environment; this path identifies a protected registration file, never a
-model-provided credential. Installing the plugin in an existing unregistered
-conversation does not authorize pane discovery: its tools return the explicit
-launch/resume instruction until that binding is established.
+Start `codex` normally inside tmux and discuss your task. When needed, ask it to
+show the plan in Prism. The first tool call opens Prism to the right of that same
+conversation; later calls reuse the pane. No CLI restart or Prism launcher is needed.
 
-The launcher owns the private app-server, exact CLI pane and binding generation.
-The first server-injected MCP `_meta.threadId` completes a provisional binding;
-an explicitly resumed thread ID must match. No hooks are required or trusted by
-this package. User approvals remain in Codex.
+The native compatibility manifest loads `skills/prism/SKILL.md` and `.mcp.json`.
+The MCP process inherits `TMUX` and `TMUX_PANE`; Prism verifies process ancestry
+against the exact pane before attaching. Native `_meta.threadId` identifies the
+conversation. The MCP process owns the connection lifetime, not the user's CLI.
+Outside tmux, tools ask you to start the CLI inside tmux. No hooks are required.
+Existing launcher bindings remain compatible through `PRISM_BINDING_FILE`.
 
 Native question sending stays disabled until current-conversation lifecycle and
 all required approval ownership gates pass. Explicit sharing and retrieval from

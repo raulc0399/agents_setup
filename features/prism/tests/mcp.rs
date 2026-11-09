@@ -82,15 +82,14 @@ fn protocol_negotiation_and_notifications_are_compatible() {
 }
 
 #[test]
-fn missing_binding_has_explicit_resume_instruction() {
-    let thread = Uuid::new_v4().to_string();
-    let result = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"prism_inspect","arguments":{},"_meta":{"threadId":thread}}}), None).unwrap();
+fn missing_native_thread_cannot_attach() {
+    let result = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"prism_inspect","arguments":{}}}), None).unwrap();
     assert_eq!(result["result"]["isError"], true);
     assert!(
         result["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains(&format!("prism --agent codex --resume {thread}"))
+            .contains("native caller metadata is missing")
     );
 }
 

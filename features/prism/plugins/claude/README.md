@@ -22,26 +22,16 @@ tools refuse calls from subagents; only the main conversation publishes. The mod
 `mcp__prism__questions` plus the `/prism` command, which opens or refreshes the
 Prism pane without a model turn.
 
-The mod receives `PRISM_BINDING_FILE` only from the trusted launcher
-environment; this path identifies a protected registration file, never a
-model-provided credential. Caller identity is the current Claude session ID,
-read by the mod itself and verified by the authenticated Unix bridge. Running
-the plugin in an unregistered conversation does not authorize pane discovery:
-its tools and `/prism` return the explicit launch/resume instruction until the
-binding is established.
+Start `claude` normally inside tmux and discuss your task. When needed, use
+`/prism` or ask Claude to show the plan in Prism. The mod reads the native session
+ID and attaches through `prism attach`; process ancestry verifies the exact tmux
+pane. Prism opens to the right and later calls reuse that pane, without restarting
+Claude. Outside tmux, the mod asks you to start the CLI inside tmux.
 
-Start or explicitly resume a registered conversation with the launcher:
-
-```sh
-cd /path/to/project
-prism --agent claude
-prism --agent claude --resume SESSION_UUID
-```
-
-The launcher owns the exact CLI pane and binding generation and pre-binds the
-session ID it passes to `claude`. `/clear`, `/resume`, `/logout` and CLI exit are
-reported by the mod's `session.end` hook and retire the binding; relaunch or
-resume explicitly afterwards. User approvals remain in Claude.
+The protected binding authenticates subsequent calls. `/clear`, `/resume`,
+`/logout` and exit retire it through `session.end`; a later session attaches on
+demand. Prism never terminates the attached CLI. Existing launcher bindings
+remain compatible through `PRISM_BINDING_FILE`. User approvals remain in Claude.
 
 Native question sending stays disabled because Claude's prompt receipt carries
 no request-to-turn correlation. Explicit sharing in Prism and retrieval with

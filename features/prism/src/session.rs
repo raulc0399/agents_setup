@@ -69,6 +69,8 @@ pub struct LiveBinding {
     pub token: String,
     pub generation: u64,
     pub retired: bool,
+    #[serde(default)]
+    pub attached: bool,
 }
 
 impl LiveBinding {
@@ -99,6 +101,7 @@ impl LiveBinding {
             token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
             generation: 1,
             retired: false,
+            attached: false,
         })
     }
 
@@ -296,6 +299,7 @@ fn same_authority(left: &LiveBinding, right: &LiveBinding) -> bool {
     left.binding_id == right.binding_id
         && left.project == right.project
         && left.agent == right.agent
+        && left.attached == right.attached
         && left.server_endpoint == right.server_endpoint
         && left.server_pid == right.server_pid
         && left.server_start_time == right.server_start_time
@@ -466,6 +470,10 @@ impl TmuxClient {
             pid,
             start_time: process_start_time(pid)?,
         })
+    }
+
+    pub fn pane_identity(&self, id: &str) -> io::Result<PaneIdentity> {
+        Ok(self.pane(id)?.identity)
     }
 
     fn pane(&self, id: &str) -> io::Result<PaneState> {
@@ -809,8 +817,37 @@ impl TmuxClient {
         Ok(())
     }
 
+    /// Release only our pane tags and UI; the attached CLI belongs to the user.
+    pub fn release_attached(&self, binding: &LiveBinding) -> io::Result<()> {
+        if !binding.attached || self.identity()? != binding.tmux {
+            return Err(invalid("attached tmux identity changed"));
+        }
+        if let Some(ui) = &binding.prism
+            && self.verify_pane(ui, binding, "ui").is_ok()
+        {
+            let condition = self.pane_condition(binding, &ui.pane_id, ui.pid, Some("ui"));
+            self.guarded_output(
+                &ui.pane_id,
+                &condition,
+                &format!("kill-pane -t {}", tmux_quote(&ui.pane_id)),
+            )?;
+        }
+        self.verify_pane(&binding.cli, binding, "cli")?;
+        let condition =
+            self.pane_condition(binding, &binding.cli.pane_id, binding.cli.pid, Some("cli"));
+        let pane = tmux_quote(&binding.cli.pane_id);
+        let commands = format!(
+            "set-option -pu -t {pane} @prism_binding ; set-option -pu -t {pane} @prism_generation ; set-option -pu -t {pane} @prism_role"
+        );
+        self.guarded_output(&binding.cli.pane_id, &condition, &commands)?;
+        Ok(())
+    }
+
     /// Cleanup remains possible after the native server exits, but never adopts another pane.
     pub fn cleanup_cli(&self, binding: &LiveBinding) -> io::Result<()> {
+        if binding.attached {
+            return Err(invalid("attached CLI belongs to the user"));
+        }
         if self.identity()? != binding.tmux {
             return Err(invalid("tmux server identity changed"));
         }

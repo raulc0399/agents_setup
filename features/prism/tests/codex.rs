@@ -14,7 +14,7 @@ fn native_package_uses_bound_mcp_and_supported_manifest() {
     assert_eq!(mcp["mcpServers"]["prism"]["command"], "prism");
     assert_eq!(
         mcp["mcpServers"]["prism"]["env_vars"],
-        serde_json::json!(["PRISM_BINDING_FILE"])
+        serde_json::json!(["PRISM_BINDING_FILE", "TMUX", "TMUX_PANE"])
     );
     assert!(manifest.get("hooks").is_none());
     assert!(root.join("skills/prism/SKILL.md").is_file());
