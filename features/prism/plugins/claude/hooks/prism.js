@@ -153,6 +153,11 @@ async function callBridge($, sessionId, method, params, isRetry = false) {
       body,
     });
   } catch {
+    if (bindings.get(sessionId) === bindingPath && method !== 'lifecycle' && !isRetry) {
+      // The bridge ended without retiring its binding; attaching again restarts it.
+      bindings.delete(sessionId);
+      return callBridge($, sessionId, method, params, true);
+    }
     return {error: 'Prism bridge is unreachable. ' + instruction};
   }
   let value;

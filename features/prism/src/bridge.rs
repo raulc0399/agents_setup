@@ -543,6 +543,12 @@ impl Service {
         if matches!(call.operation, Operation::Lifecycle(_)) {
             ensure!(binding.agent == AgentKind::Claude, LIFECYCLE_IS_NATIVE);
         }
+        if matches!(call.operation, Operation::Pending(_)) {
+            // The mod polls every second: answer from the store without the tmux check,
+            // the binding rewrite, or the pane that the tools bring along.
+            let data = apply_operation(&mut self.store, &binding, call.operation)?;
+            return Ok(json!({"data":data}));
+        }
         let tmux = TmuxClient::socket(&binding.tmux.socket_path);
         tmux.verify_binding(&binding)?;
         write_binding(&self.binding_path, &binding)?;
@@ -564,11 +570,7 @@ impl Service {
             self.observe_lifecycle(event)?;
             return Ok(json!({"data":{"retiring":true}}));
         }
-        let opens_pane = !matches!(call.operation, Operation::Pending(_));
         let data = apply_operation(&mut self.store, &binding, call.operation)?;
-        if !opens_pane {
-            return Ok(json!({"data":data}));
-        }
         // Publication is already committed. Pane failure must not roll it back or replay it.
         let pane = match tmux.ensure_ui(&mut binding, &self.binding_path, &self.executable) {
             Ok(pane) => json!({"id":pane.pane_id}),

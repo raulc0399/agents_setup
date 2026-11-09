@@ -110,10 +110,12 @@ pub fn ensure_attached(agent: AgentKind, conversation: &str, owner_pid: u32) -> 
                     && binding.conversation.as_deref() == Some(conversation),
                 "This tmux pane is already attached to another live conversation"
             );
-            ensure!(
-                bridge::is_ready(&path),
-                "Prism bridge is not responding; close its connection before reopening Prism"
-            );
+            if !bridge::is_ready(&path) {
+                // The bridge ended without retiring this binding. Its lease lets only one
+                // bridge serve a binding, so starting another is safe if the old one hangs.
+                start_bridge(&path)
+                    .context("Prism bridge is not responding and could not be restarted")?;
+            }
             return Ok(path);
         }
         if binding.attached {
@@ -152,9 +154,10 @@ pub fn ensure_attached(agent: AgentKind, conversation: &str, owner_pid: u32) -> 
 }
 
 fn start_bridge(path: &Path) -> Result<()> {
+    // A restarted bridge appends to the log of the one that ended.
     let log = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+        .append(true)
+        .create(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path.with_file_name("bridge.log"))?;

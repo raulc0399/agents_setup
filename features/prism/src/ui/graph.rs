@@ -779,6 +779,19 @@ pub fn rasterize(
     pan: (f32, f32),
     fonts: &Arc<fontdb::Database>,
 ) -> Option<Vec<u8>> {
+    render_pixmap(svg, width, height, scale, pan, fonts)?
+        .encode_png()
+        .ok()
+}
+
+fn render_pixmap(
+    svg: &str,
+    width: u32,
+    height: u32,
+    scale: f32,
+    pan: (f32, f32),
+    fonts: &Arc<fontdb::Database>,
+) -> Option<tiny_skia::Pixmap> {
     let options = usvg::Options {
         fontdb: Arc::clone(fonts),
         font_family: "sans-serif".to_owned(),
@@ -790,7 +803,25 @@ pub fn rasterize(
     let transform = tiny_skia::Transform::from_scale(scale, scale)
         .post_translate(-pan.0 * scale, -pan.1 * scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
-    pixmap.encode_png().ok()
+    Some(pixmap)
+}
+
+/// Cuts the raster into one PNG per terminal row, top to bottom.
+fn row_strips(pixmap: &tiny_skia::Pixmap, rows: u16) -> Option<Vec<Vec<u8>>> {
+    let rows = u32::from(rows.max(1));
+    let strip_height = pixmap.height() / rows;
+    let size = tiny_skia::IntSize::from_wh(pixmap.width(), strip_height)?;
+    let strip_bytes = (pixmap.width() * strip_height * tiny_skia::BYTES_PER_PIXEL as u32) as usize;
+    pixmap
+        .data()
+        .chunks_exact(strip_bytes)
+        .take(rows as usize)
+        .map(|data| {
+            tiny_skia::Pixmap::from_vec(data.to_vec(), size)?
+                .encode_png()
+                .ok()
+        })
+        .collect()
 }
 
 const BASE64_ALPHABET: &[u8; 64] =
@@ -860,34 +891,40 @@ fn pane_origin(fields: &str) -> Option<(u16, u16)> {
     Some((left, top + offset))
 }
 
-/// iTerm2 inline image sized in cells and stretched to exactly that area, so placement and
-/// click mapping never depend on the terminal's real font size. The area is erased first so
-/// an earlier image cannot show through.
-fn inline_image(png: &[u8], cells: (u16, u16), placement: Placement) -> String {
+/// iTerm2 inline images sized in cells and stretched to exactly their area, so placement and
+/// click mapping never depend on the terminal's real font size.
+///
+/// The picture goes out as one image per terminal row. A taller image makes the terminal
+/// feed lines while it draws, and a line feed at the bottom of whatever scroll region tmux
+/// last set scrolls the screen. A one-row image with `doNotMoveCursor` moves nothing. Each
+/// row is erased first so an earlier image cannot show through.
+fn inline_image(strips: &[Vec<u8>], columns: u16, placement: Placement) -> String {
     let (start, escape, end) = match placement {
         Placement::TmuxScreen { .. } => ("\x1bPtmux;", "\x1b\x1b", "\x1b\\"),
         Placement::AtCursor => ("", "\x1b", ""),
     };
-    let (columns, rows) = cells;
-    let mut sequence = String::from(start);
-    if let Placement::TmuxScreen { column, row } = placement {
-        let _ = write!(sequence, "{escape}7{escape}[{row};{column}H");
+    let mut sequence = String::new();
+    for (index, png) in strips.iter().enumerate() {
+        sequence.push_str(start);
+        let _ = write!(sequence, "{escape}7");
+        match placement {
+            Placement::TmuxScreen { column, row } => {
+                let _ = write!(sequence, "{escape}[{};{column}H", usize::from(row) + index);
+            }
+            Placement::AtCursor if index > 0 => {
+                let _ = write!(sequence, "{escape}[{index}B");
+            }
+            Placement::AtCursor => {}
+        }
+        let _ = write!(
+            sequence,
+            "{escape}[{columns}X{escape}]1337;File=inline=1;size={};width={columns};height=1;preserveAspectRatio=0;doNotMoveCursor=1:",
+            png.len()
+        );
+        sequence.push_str(&base64(png));
+        let _ = write!(sequence, "\x07{escape}8");
+        sequence.push_str(end);
     }
-    for _ in 0..rows {
-        let _ = write!(sequence, "{escape}[{columns}X{escape}[1B");
-    }
-    let _ = write!(sequence, "{escape}[{rows}A");
-    let _ = write!(
-        sequence,
-        "{escape}]1337;File=inline=1;size={};width={columns};height={rows};preserveAspectRatio=0;doNotMoveCursor=1:",
-        png.len()
-    );
-    sequence.push_str(&base64(png));
-    sequence.push('\x07');
-    if let Placement::TmuxScreen { .. } = placement {
-        let _ = write!(sequence, "{escape}8");
-    }
-    sequence.push_str(end);
     sequence
 }
 
@@ -910,21 +947,36 @@ mod tests {
     }
 
     #[test]
-    fn inline_image_is_sized_in_cells_and_wrapped_for_tmux() {
-        let plain = inline_image(b"png", (78, 40), Placement::AtCursor);
-        assert!(
-            plain.contains("]1337;File=inline=1;size=3;width=78;height=40;preserveAspectRatio=0")
+    fn inline_image_sends_one_row_strips_that_never_move_the_cursor_down() {
+        let strips = vec![b"png".to_vec(), b"png".to_vec(), b"png".to_vec()];
+        let plain = inline_image(&strips, 78, Placement::AtCursor);
+        assert_eq!(plain.matches("height=1;").count(), 3);
+        assert_eq!(
+            plain
+                .matches("]1337;File=inline=1;size=3;width=78;height=1;preserveAspectRatio=0;doNotMoveCursor=1:cG5n\x07")
+                .count(),
+            3
         );
-        assert!(plain.ends_with("cG5n\x07"));
-        let wrapped = inline_image(
-            b"png",
-            (78, 40),
-            Placement::TmuxScreen { column: 99, row: 3 },
-        );
-        // Saved cursor, absolute position, image, restored cursor, all inside the passthrough.
-        assert!(wrapped.starts_with("\x1bPtmux;\x1b\x1b7\x1b\x1b[3;99H"));
+        // Every strip starts from the saved position and returns to it.
+        assert!(plain.starts_with("\x1b7\x1b[78X"));
+        assert!(plain.contains("\x1b7\x1b[2B\x1b[78X"));
+        assert!(plain.ends_with("\x07\x1b8"));
+
+        let wrapped = inline_image(&strips, 78, Placement::TmuxScreen { column: 99, row: 3 });
+        // Each strip is its own passthrough with an absolute row and a restored cursor.
+        assert_eq!(wrapped.matches("\x1bPtmux;").count(), 3);
+        assert!(wrapped.starts_with("\x1bPtmux;\x1b\x1b7\x1b\x1b[3;99H\x1b\x1b[78X\x1b\x1b]1337;"));
+        assert!(wrapped.contains("\x1b\x1b[5;99H"));
         assert!(wrapped.ends_with("\x07\x1b\x1b8\x1b\\"));
-        assert!(wrapped.contains("\x1b\x1b]1337;"));
+        assert!(!wrapped.contains("height=3"));
+    }
+
+    #[test]
+    fn row_strips_cut_the_raster_into_one_png_per_row() {
+        let pixmap = tiny_skia::Pixmap::new(20, 60).unwrap();
+        let strips = row_strips(&pixmap, 3).unwrap();
+        assert_eq!(strips.len(), 3);
+        assert!(strips.iter().all(|png| png.starts_with(b"\x89PNG")));
     }
 
     #[test]
@@ -1161,14 +1213,15 @@ impl GraphView {
         if self.cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
             let (width, height) = self.pixels();
             let svg = self.layout.svg(focus, selected);
-            let Some(png) = rasterize(
+            let Some(strips) = render_pixmap(
                 &svg,
                 width as u32,
                 height as u32,
                 self.scale,
                 self.pan,
                 &self.fonts,
-            ) else {
+            )
+            .and_then(|pixmap| row_strips(&pixmap, inner.height)) else {
                 return;
             };
             let placement = match (self.tmux, self.origin) {
@@ -1180,10 +1233,7 @@ impl GraphView {
                 // Without the pane position the image would land in the active pane.
                 (true, None) => return,
             };
-            self.cache = Some((
-                key,
-                inline_image(&png, (inner.width, inner.height), placement),
-            ));
+            self.cache = Some((key, inline_image(&strips, inner.width, placement)));
         }
         let Some((_, sequence)) = &self.cache else {
             return;

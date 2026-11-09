@@ -7,6 +7,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::time::Duration;
 use uuid::Uuid;
 
 const SOCKET_DIRECTORY_PREFIX: &str = "/tmp/prism-";
@@ -366,7 +367,7 @@ fn write_binding_locked(path: &Path, binding: &LiveBinding) -> io::Result<()> {
         ));
     }
     match fs::symlink_metadata(path) {
-        Ok(_) => validate_private(path, false)?,
+        Ok(_) => settled(|| validate_private(path, false))?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -394,25 +395,40 @@ fn write_binding_locked(path: &Path, binding: &LiveBinding) -> io::Result<()> {
     result
 }
 
-/// A writer replaces the binding by rename, so a reader can open the old file an instant
-/// before it is unlinked. That descriptor has no links left; open the path again.
-const REPLACED_BINDING_RETRIES: usize = 8;
+/// A writer replaces the binding by rename. A reader can catch the old file an instant
+/// before it is unlinked, and network or virtual mounts can serve its stale attributes for a
+/// moment afterwards. Both look like a file that fails validation, so a failed check is
+/// repeated briefly before it is believed.
+const SETTLE_RETRIES: usize = 10;
+const SETTLE_INTERVAL: Duration = Duration::from_millis(5);
+
+fn settled<T>(mut check: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut attempt = 0;
+    loop {
+        match check() {
+            Err(error)
+                if error.kind() == io::ErrorKind::InvalidData && attempt < SETTLE_RETRIES =>
+            {
+                attempt += 1;
+                std::thread::sleep(SETTLE_INTERVAL);
+            }
+            result => return result,
+        }
+    }
+}
 
 pub fn read_binding(path: &Path) -> io::Result<LiveBinding> {
+    settled(|| read_binding_once(path))
+}
+
+fn read_binding_once(path: &Path) -> io::Result<LiveBinding> {
     let project = validate_binding_location(path)?;
-    let mut attempts = 0;
-    let (file, metadata) = loop {
-        validate_private(path, false)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
-        let metadata = file.metadata()?;
-        attempts += 1;
-        if metadata.nlink() != 0 || attempts > REPLACED_BINDING_RETRIES {
-            break (file, metadata);
-        }
-    };
+    validate_private(path, false)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
     // Recheck the opened descriptor, not only the pre-open path.
     if metadata.len() > MAX_BINDING_BYTES
         || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE
