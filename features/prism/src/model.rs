@@ -71,6 +71,9 @@ pub struct Element {
     pub body: String,
     pub kind: ElementKind,
     pub source: Option<String>,
+    /// Publication position; display order is (order, id), not ID order.
+    #[serde(default)]
+    pub order: u64,
     pub semantic_revision: u64,
     pub accepted_revision: Option<u64>,
     pub archived: bool,

@@ -525,3 +525,52 @@ fn cleanup_does_not_require_the_native_server_to_remain_alive() {
     assert!(server.client.select(&binding).is_err());
     server.client.cleanup_cli(&binding).unwrap();
 }
+
+#[test]
+fn dead_or_zoomed_owned_ui_pane_is_recovered() {
+    let project = TempDir::new().unwrap();
+    let runtime = RuntimeDirectory::create(project.path()).unwrap();
+    let server = Server::new();
+    let mut binding = server.binding(project.path());
+    let ui = ui_executable(project.path());
+    runtime.write_binding(&binding).unwrap();
+    let pane = server
+        .client
+        .ensure_ui(&mut binding, &runtime.binding_path(), &ui)
+        .unwrap();
+    // Zooming the CLI pane changes geometry but not ownership; the pane is reused.
+    server.command(&["resize-pane", "-Z", "-t", &binding.cli.pane_id]);
+    assert_eq!(
+        pane,
+        server
+            .client
+            .ensure_ui(&mut binding, &runtime.binding_path(), &ui)
+            .unwrap()
+    );
+    server.command(&["resize-pane", "-Z", "-t", &binding.cli.pane_id]);
+    // With remain-on-exit the pane survives its process as a dead pane; it must be replaced.
+    server.command(&[
+        "set-option",
+        "-p",
+        "-t",
+        &pane.pane_id,
+        "remain-on-exit",
+        "on",
+    ]);
+    server.command(&["send-keys", "-t", &pane.pane_id, "C-d"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while server.command(&["display-message", "-p", "-t", &pane.pane_id, "#{pane_dead}"]) != "1" {
+        assert!(std::time::Instant::now() < deadline, "pane never died");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let replacement = server
+        .client
+        .ensure_ui(&mut binding, &runtime.binding_path(), &ui)
+        .unwrap();
+    assert_ne!(replacement.pane_id, pane.pane_id);
+    assert_eq!(binding.prism, Some(replacement.clone()));
+    assert_eq!(
+        read_binding(&runtime.binding_path()).unwrap().prism,
+        Some(replacement)
+    );
+}

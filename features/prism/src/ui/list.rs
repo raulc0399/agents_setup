@@ -21,25 +21,27 @@ fn row(id: Id, label: String, details: String, revision: u64, accepted: Option<u
 }
 
 pub fn rows(document: &Document, view: &ViewState) -> Vec<Row> {
-    let elements = document
+    let mut ordered: Vec<_> = document
         .elements
         .values()
         .filter(|item| !item.archived)
-        .map(|item| {
-            row(
+        .collect();
+    ordered.sort_by_key(|item| (item.order, item.id));
+    let elements = ordered.into_iter().map(|item| {
+        row(
+            item.id,
+            format!("{:?}: {}", item.kind, item.title),
+            format!(
+                "{}\n{}\n{}\nSource: {}",
+                item.title,
                 item.id,
-                format!("{:?}: {}", item.kind, item.title),
-                format!(
-                    "{}\n{}\n{}\nSource: {}",
-                    item.title,
-                    item.id,
-                    item.body,
-                    item.source.as_deref().unwrap_or("none")
-                ),
-                item.semantic_revision,
-                item.accepted_revision,
-            )
-        });
+                item.body,
+                item.source.as_deref().unwrap_or("none")
+            ),
+            item.semantic_revision,
+            item.accepted_revision,
+        )
+    });
     let relationships = document
         .relationships
         .values()

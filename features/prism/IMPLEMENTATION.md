@@ -109,3 +109,31 @@ Codex behavior is unchanged except that a native retirement observed through
 the Codex adapter now records the adapter's reason instead of the generic
 "bridge disconnected" when invalidating pending deliveries; Codex has no
 enabled native deliveries, so no stored outcome changes in practice.
+
+## Review fixes (2026-11-09, collaborative review `prism-impl-2026-11-09`)
+
+The two-team review of revision `667c23fe…` (reports under the repository's
+`.reviews/prism-impl-2026-11-09/exports/`) ended BLOCKED. The user approved
+fixing the agreed findings in shared code and the Claude path; Codex-specific
+findings are handed to the Codex agent in `docs/codex-handover.md`.
+
+- Element display order follows publication order (`Element.order`, serde
+  default 0 for existing rows); reordering is not a semantic edit.
+  (`r1-order`, `r2-plan-order`)
+- `Ctrl-\` is also accepted as `Ctrl-4`, its legacy terminal encoding; README and
+  help document `Ctrl-S` as the share key. (`r1-ctrl-backslash`)
+- Undo history comes from `Store::undo_records`, so it survives UI restarts and
+  covers agent-side archives; a conflicting record is discarded instead of
+  blocking later undo. (`r2-undo-restart`, `r1-undo-ui-only`)
+- `Ctrl-R` at the 32-view limit swaps with the active view and cycles the closed
+  stack. (`r2-closed-view-capacity`)
+- `ensure_ui` replaces an owned dead pane and ignores geometry while the window
+  is zoomed. (`r2-dead-pane`, `r1-pane-adjacency`)
+- The UI caches the bridge probe between refresh intervals and re-probes only
+  before control-key actions. (`r2-editor-health-latency`, `r1-status-probe`)
+- The bridge tolerates up to four consecutive `verify_binding` failures before
+  retiring. (`ch-verify-binding-teardown`)
+- Development docs and `scripts/check-development.sh` accept either CLI.
+  (`r1-docs-codex-only`)
+- Checks: 125 Rust tests, rustfmt, Clippy, 16 Python probe tests and the
+  development script pass; each fix has a regression test that failed first.

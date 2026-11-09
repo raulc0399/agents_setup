@@ -179,7 +179,7 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
         }
     }
     document.title = request.title.clone();
-    for input in &request.elements {
+    for (order, input) in request.elements.iter().enumerate() {
         let previous = document.elements.get(&input.id);
         reject_archived(previous.is_some_and(|item| item.archived))?;
         let mut item = Element {
@@ -188,6 +188,7 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
             body: input.body.clone(),
             kind: input.kind.clone(),
             source: input.source.clone(),
+            order: previous.map_or(0, |item| item.order),
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,
@@ -198,6 +199,8 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
                 item.semantic_revision = revision;
             }
         }
+        // Reordering is presentation, not a semantic edit; it never stales acceptance.
+        item.order = order as u64;
         document.elements.insert(item.id, item);
     }
     for input in &request.relationships {

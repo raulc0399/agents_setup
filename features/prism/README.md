@@ -108,7 +108,9 @@ Ask the CLI to publish a list or diagram. It supplies stable content IDs; revisi
 reuse those IDs. Accepting content records feedback on that content revision,
 not permission for implementation. Semantic edits make earlier acceptance stale.
 Archive affects every view; hide affects the current view. Undo rejects edits
-that conflict with later changes instead of overwriting them.
+that conflict with later changes instead of overwriting them. Elements appear
+in publication order; reordering them in a later publication is not a semantic
+edit.
 
 Select content, press `e`, write a question, then press `Ctrl-S` to **Share**.
 Return to the CLI and ask it to retrieve your shared Prism question. It can
@@ -130,12 +132,12 @@ exposure control; another process running as your user can read local files.
 | `/` | Edit current view's filter |
 | `v` | Switch list/diagram |
 | `Tab` / `Shift-Tab` | Change view tab |
-| `Ctrl-T` / `Ctrl-W` / `Ctrl-R` | Duplicate view / close tab / reopen closed tab |
-| `Ctrl-\` / `F6` | Toggle split / focus other split |
+| `Ctrl-T` / `Ctrl-W` / `Ctrl-R` | Duplicate view / close tab / reopen closed tab (at the view limit it swaps with the active tab) |
+| `Ctrl-\` (sent as `Ctrl-4` by most terminals) / `F6` | Toggle split / focus other split |
 | `Shift` + arrows / `Alt` + arrows | Pan diagram / move focused diagram card |
 | `e` / `Esc` | Edit question / leave editor |
 | `Enter` | Newline in question |
-| `Ctrl-S` / `Ctrl-Enter` | Explicitly share question |
+| `Ctrl-S` | Explicitly share question |
 | `Ctrl-N` | Cycle offered delivery modes (currently Share only) |
 | `[` / `]`, `PgUp` / `PgDn` | History pages / detail scrolling |
 | `?` / `q` / `Ctrl-C` | Help / exit UI |

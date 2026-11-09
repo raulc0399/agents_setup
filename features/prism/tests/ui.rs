@@ -927,3 +927,114 @@ fn rapid_typing_and_refresh_preserve_every_character_and_share_once() {
     assert_eq!(questions.len(), 1);
     assert_eq!(questions[0].text, text);
 }
+
+#[test]
+fn list_rows_follow_publication_order_not_id_order() {
+    let mut fixture = Fixture::new();
+    let mut request = fixture.request.clone();
+    request.request_id = Id::new_v4();
+    request.document_id = None;
+    request.relationships.clear();
+    request.groups.clear();
+    // The first step has the larger UUID, so ID order would show it last.
+    request.elements = vec![element(9, "First"), element(1, "Second")];
+    let document_id = fixture
+        .store
+        .publish(fixture.workspace.id, &request)
+        .unwrap()
+        .document_id;
+    let document = fixture
+        .store
+        .document(fixture.workspace.id, document_id)
+        .unwrap();
+    let view = ViewState {
+        id: Id::new_v4(),
+        document_id,
+        kind: ViewKind::List,
+        selection: None,
+        positions: Default::default(),
+        hidden: Default::default(),
+        filter: String::new(),
+        draft: String::new(),
+    };
+    let labels: Vec<String> = prism::ui::list::rows(&document, &view)
+        .into_iter()
+        .map(|row| row.label)
+        .collect();
+    assert_eq!(labels, vec!["Step: First", "Step: Second"]);
+}
+
+#[test]
+fn legacy_control_four_encoding_toggles_split() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    let first = state.layout.active.unwrap();
+    control(&mut state, &mut fixture.store, 't', &connection());
+    // Terminals without the kitty keyboard protocol deliver Ctrl-\ as 0x1C, which crossterm
+    // reports as Ctrl-4.
+    control(&mut state, &mut fixture.store, '4', &connection());
+    assert_eq!(state.layout.split, Some(first));
+}
+
+#[test]
+fn undo_reaches_persisted_records_after_ui_restart() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    key(&mut state, &mut fixture.store, KeyCode::Char(' '));
+    key(&mut state, &mut fixture.store, KeyCode::Char('x'));
+    assert_eq!(state.rows().len(), 2);
+    drop(state);
+    let mut restarted = fixture.state();
+    key(&mut restarted, &mut fixture.store, KeyCode::Char('u'));
+    assert_eq!(restarted.rows().len(), 4);
+    assert_eq!(restarted.message, "Action undone");
+}
+
+#[test]
+fn reopen_at_capacity_cycles_through_every_closed_view() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    let buried = state.layout.active.unwrap();
+    while state.layout.tabs.len() < prism::ui::views::MAX_OPEN_VIEWS {
+        control(&mut state, &mut fixture.store, 't', &connection());
+    }
+    // Close the first view, replace it, then close the replacement: the first view is buried.
+    key(&mut state, &mut fixture.store, KeyCode::Tab);
+    while state.layout.active != Some(buried) {
+        key(&mut state, &mut fixture.store, KeyCode::Tab);
+    }
+    control(&mut state, &mut fixture.store, 'w', &connection());
+    control(&mut state, &mut fixture.store, 't', &connection());
+    let replacement = state.layout.active.unwrap();
+    control(&mut state, &mut fixture.store, 'w', &connection());
+    control(&mut state, &mut fixture.store, 't', &connection());
+    assert_eq!(state.layout.tabs.len(), prism::ui::views::MAX_OPEN_VIEWS);
+    control(&mut state, &mut fixture.store, 'r', &connection());
+    assert_eq!(state.layout.active, Some(replacement));
+    control(&mut state, &mut fixture.store, 'r', &connection());
+    assert_eq!(state.layout.active, Some(buried));
+    assert_eq!(state.layout.tabs.len(), prism::ui::views::MAX_OPEN_VIEWS);
+}
+
+#[test]
+fn connection_probe_caches_between_refreshes_and_forces_before_explicit_sends() {
+    use std::cell::Cell;
+    let calls = Cell::new(0);
+    let mut probe = prism::ui::ConnectionProbe::new(|| {
+        calls.set(calls.get() + 1);
+        connection()
+    });
+    for _ in 0..3 {
+        assert!(probe.current(false).connected);
+    }
+    assert_eq!(calls.get(), 1);
+    probe.current(true);
+    assert_eq!(calls.get(), 2);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    probe.current(false);
+    assert_eq!(calls.get(), 3);
+    let share = Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert!(prism::ui::requires_verified_binding(&share));
+    let typing = Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+    assert!(!prism::ui::requires_verified_binding(&typing));
+}

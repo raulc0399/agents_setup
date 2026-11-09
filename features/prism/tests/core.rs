@@ -872,3 +872,70 @@ fn atomic_send_replay_preserves_a_newer_private_draft() {
         "New private draft"
     );
 }
+
+#[test]
+fn publication_order_is_stored_and_reordering_keeps_acceptance() {
+    let (mut store, workspace, request, result) = setup();
+    let [first, second] = [request.elements[0].id, request.elements[1].id];
+    let document = store.document(workspace, result.document_id).unwrap();
+    assert_eq!(document.elements[&first].order, 0);
+    assert_eq!(document.elements[&second].order, 1);
+    store
+        .apply(
+            workspace,
+            result.document_id,
+            document.revision,
+            &ContentAction::Accept { ids: vec![first] },
+        )
+        .unwrap();
+    // Republishing the same elements in reverse order moves them without a semantic change.
+    let mut reordered = edit(&request, &result, 2);
+    reordered.elements.swap(0, 1);
+    store.publish(workspace, &reordered).unwrap();
+    let document = store.document(workspace, result.document_id).unwrap();
+    assert_eq!(document.elements[&first].order, 1);
+    assert_eq!(document.elements[&second].order, 0);
+    assert_eq!(document.elements[&first].accepted_revision, Some(1));
+    assert_eq!(document.elements[&first].semantic_revision, 1);
+}
+
+#[test]
+fn undo_records_are_listed_in_order_and_conflicts_discard_them() {
+    let (mut store, workspace, request, result) = setup();
+    let id = request.elements[0].id;
+    let document = result.document_id;
+    let first = store
+        .apply(
+            workspace,
+            document,
+            1,
+            &ContentAction::Accept { ids: vec![id] },
+        )
+        .unwrap();
+    let second = store
+        .apply(
+            workspace,
+            document,
+            2,
+            &ContentAction::Archive { ids: vec![id] },
+        )
+        .unwrap();
+    assert_eq!(
+        store.undo_records(workspace, document).unwrap(),
+        vec![first.undo_id, second.undo_id]
+    );
+    store.undo(workspace, document, 3, second.undo_id).unwrap();
+    assert_eq!(
+        store.undo_records(workspace, document).unwrap(),
+        vec![first.undo_id]
+    );
+    let mut update = edit(&request, &result, 4);
+    update.elements[0].title = "Changed".into();
+    store.publish(workspace, &update).unwrap();
+    assert!(matches!(
+        store.undo(workspace, document, 5, first.undo_id),
+        Err(Error::UndoConflict)
+    ));
+    // A record that can never apply again is discarded so it cannot block later undo.
+    assert!(store.undo_records(workspace, document).unwrap().is_empty());
+}

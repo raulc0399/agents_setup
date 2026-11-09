@@ -24,7 +24,7 @@ supported-platform declaration.
 CLI version checks do not establish authentication, native plugin activation,
 conversation binding, transport capabilities, or successful question delivery.
 The terminal entry does not verify mouse input, resizing, or terminal cleanup.
-Claude Code is outside the current implementation scope and is not required.
+Either Codex CLI or Claude Code CLI is sufficient; the check script requires at least one.
 
 ## Install development tools
 
@@ -143,7 +143,7 @@ sh scripts/check-development.sh
 ```
 
 The script checks the exact Rust version, formatter, linter, compiler, archiver,
-tmux, and Codex CLI. It reports pkg-config separately because bundled
+tmux, and at least one of the Codex and Claude Code CLIs. It reports pkg-config separately because bundled
 SQLite does not require it. It exits nonzero when a required tool is missing.
 Once command checks pass, it compiles, archives, links and runs C/libc and
 Rust/linker probes in a temporary directory, then removes its own probe files.
@@ -161,6 +161,6 @@ this host. Reassess native discovery packages if crate dependencies change.
 
 Using a prebuilt Prism binary does not require Rust, Cargo, rustfmt, Clippy, or
 a compiler. It requires tmux, a compatible interactive terminal, and Codex CLI
-with its native Prism package activated. Dynamic library requirements
+or Claude Code CLI with its native Prism package activated. Dynamic library requirements
 must be checked against the released binary. Node/npm are tooling used for the
 observed CLI installation; they are not established Prism runtime requirements.

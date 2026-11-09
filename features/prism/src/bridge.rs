@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL_VERSION: u16 = 1;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const BINDING_VERIFY_RETRIES: u32 = 5;
 const RESPONSE_LIMIT: usize = 4 * MAX_PAYLOAD_BYTES;
 const LIST_LIMIT: usize = 100;
 const QUESTION_PREVIEW_CHARS: usize = 512;
@@ -664,6 +665,17 @@ impl Drop for Cleanup {
 }
 
 /// Returns the native retirement reason once the observer reports that the conversation ended.
+/// A transient tmux query failure must not retire a live binding and tear down the session;
+/// only consecutive failures count as a lost binding.
+pub fn binding_still_live(verified: bool, consecutive_failures: &mut u32) -> bool {
+    if verified {
+        *consecutive_failures = 0;
+        return true;
+    }
+    *consecutive_failures += 1;
+    *consecutive_failures < BINDING_VERIFY_RETRIES
+}
+
 fn poll_native(
     observer: &mut Option<NativeObserver>,
     binding: &LiveBinding,
@@ -739,14 +751,21 @@ pub fn run(binding_path: &Path) -> Result<()> {
                 .signals
                 .push(signal_hook::flag::register(signal, stopping.clone())?);
         }
+        let mut verify_failures = 0;
         while !stopping.load(Ordering::Relaxed) {
             let current = read_binding(binding_path)?;
-            if current.retired
-                || TmuxClient::socket(&current.tmux.socket_path)
-                    .verify_binding(&current)
-                    .is_err()
-            {
+            if current.retired {
                 break;
+            }
+            let verified = TmuxClient::socket(&current.tmux.socket_path)
+                .verify_binding(&current)
+                .is_ok();
+            if !binding_still_live(verified, &mut verify_failures) {
+                break;
+            }
+            if !verified {
+                std::thread::sleep(POLL_INTERVAL);
+                continue;
             }
             if let Some(reason) = poll_native(&mut service.observer, &current)? {
                 service.native_retirement = Some(reason.clone());

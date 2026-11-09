@@ -210,6 +210,19 @@ impl Store {
         })
     }
 
+    /// Unconsumed undo records for a document, oldest first.
+    pub fn undo_records(&mut self, workspace: Id, document: Id) -> Result<Vec<Id>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM undo_records WHERE workspace_id=?1 AND document_id=?2 AND consumed=0 ORDER BY rowid",
+        )?;
+        let rows = statement.query_map(
+            params![workspace.to_string(), document.to_string()],
+            |row| row.get::<_, String>(0),
+        )?;
+        rows.map(|row| Id::parse_str(&row?).map_err(|_| Error::Invalid("undo record ID".into())))
+            .collect()
+    }
+
     pub fn undo(
         &mut self,
         workspace: Id,
@@ -229,21 +242,36 @@ impl Store {
         let record: UndoRecord = serde_json::from_str(
             &record.ok_or_else(|| Error::NotFound("available undo record".into()))?,
         )?;
-        restore_changed(
+        let restored = restore_changed(
             &mut current.elements,
             &record.before.elements,
             &record.after.elements,
-        )?;
-        restore_changed(
-            &mut current.relationships,
-            &record.before.relationships,
-            &record.after.relationships,
-        )?;
-        restore_changed(
-            &mut current.groups,
-            &record.before.groups,
-            &record.after.groups,
-        )?;
+        )
+        .and_then(|()| {
+            restore_changed(
+                &mut current.relationships,
+                &record.before.relationships,
+                &record.after.relationships,
+            )
+        })
+        .and_then(|()| {
+            restore_changed(
+                &mut current.groups,
+                &record.before.groups,
+                &record.after.groups,
+            )
+        });
+        if let Err(Error::UndoConflict) = restored {
+            // Later changes overwrote this record's effect; it can never apply, so discard it
+            // instead of letting it block every later undo.
+            transaction.execute(
+                "UPDATE undo_records SET consumed=1 WHERE workspace_id=?1 AND id=?2",
+                params![workspace.to_string(), undo_id.to_string()],
+            )?;
+            transaction.commit()?;
+            return Err(Error::UndoConflict);
+        }
+        restored?;
         current.revision += 1;
         validate_document(&current)?;
         write_document(&transaction, workspace, &current)?;

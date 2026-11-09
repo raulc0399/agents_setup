@@ -564,3 +564,18 @@ fn listing_all_documents_and_shared_questions_supports_pagination() {
         }
     }
 }
+
+#[test]
+fn transient_binding_verification_failures_do_not_retire_the_bridge() {
+    let mut failures = 0;
+    for _ in 0..4 {
+        assert!(prism::bridge::binding_still_live(false, &mut failures));
+    }
+    assert!(prism::bridge::binding_still_live(true, &mut failures));
+    assert_eq!(failures, 0);
+    for _ in 0..4 {
+        assert!(prism::bridge::binding_still_live(false, &mut failures));
+    }
+    // The fifth consecutive failure is treated as a real loss of the tmux binding.
+    assert!(!prism::bridge::binding_still_live(false, &mut failures));
+}

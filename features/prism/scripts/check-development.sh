@@ -26,7 +26,15 @@ check_command cargo-clippy --version
 check_command "$prism_cc" --version
 check_command "$prism_ar" --version
 check_command tmux -V
-check_command codex --version
+
+# Either coding CLI can host Prism; require at least one.
+if command -v codex >/dev/null 2>&1 || command -v claude >/dev/null 2>&1; then
+    command -v codex >/dev/null 2>&1 && check_command codex --version
+    command -v claude >/dev/null 2>&1 && check_command claude --version
+else
+    printf 'FAIL: missing codex and claude on PATH; install at least one CLI\n' >&2
+    failed=1
+fi
 
 if command -v pkg-config >/dev/null 2>&1; then
     check_command pkg-config --version

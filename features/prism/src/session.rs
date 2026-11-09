@@ -12,7 +12,8 @@ use uuid::Uuid;
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const MAX_BINDING_BYTES: u64 = 64 * 1024;
-const PANE_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}\t#{pane_dead}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{@prism_binding}\t#{@prism_generation}\t#{@prism_role}";
+const PANE_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{window_id}\t#{session_id}\t#{pane_dead}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{@prism_binding}\t#{@prism_generation}\t#{@prism_role}\t#{window_zoomed_flag}";
+const PANE_FIELDS: usize = 13;
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -386,6 +387,7 @@ struct PaneState {
     binding: String,
     generation: String,
     role: String,
+    zoomed: bool,
 }
 
 impl TmuxClient {
@@ -449,7 +451,7 @@ impl TmuxClient {
             OsStr::new(PANE_FORMAT),
         ])?;
         let fields: Vec<_> = output.split('\t').collect();
-        if fields.len() != 12 || fields[0] != id || fields[4] != "0" {
+        if fields.len() != PANE_FIELDS || fields[0] != id || fields[4] != "0" {
             return Err(invalid("tmux pane is missing or dead"));
         }
         let number = |index: usize| {
@@ -473,7 +475,26 @@ impl TmuxClient {
             binding: fields[9].to_owned(),
             generation: fields[10].to_owned(),
             role: fields[11].to_owned(),
+            zoomed: fields[12] == "1",
         })
+    }
+
+    /// True only for a dead pane that still carries this binding's UI tags.
+    fn owned_dead_pane(&self, id: &str, binding: &LiveBinding) -> io::Result<bool> {
+        let output = self.output(&[
+            OsStr::new("display-message"),
+            OsStr::new("-p"),
+            OsStr::new("-t"),
+            OsStr::new(id),
+            OsStr::new(PANE_FORMAT),
+        ])?;
+        let fields: Vec<_> = output.split('\t').collect();
+        Ok(fields.len() == PANE_FIELDS
+            && fields[0] == id
+            && fields[4] == "1"
+            && fields[9] == binding.binding_id.to_string()
+            && fields[10] == binding.generation.to_string()
+            && fields[11] == "ui")
     }
 
     pub fn launch_cli(
@@ -661,10 +682,21 @@ impl TmuxClient {
                 OsStr::new("#{pane_id}"),
             ])?;
             if ids.lines().any(|id| id == expected.pane_id) {
-                let pane = self.verify_pane(expected, binding, "ui")?;
-                let cli = self.verify_pane(&binding.cli, binding, "cli")?;
-                verify_adjacent(&cli, &pane)?;
-                return Ok(pane.identity);
+                if self.owned_dead_pane(&expected.pane_id, binding)? {
+                    // remain-on-exit keeps the exited UI pane; only our own tagged dead pane is
+                    // removed so a fresh one can take its place.
+                    let condition = format!(
+                        "#{{&&:#{{==:#{{pane_dead}},1}},#{{&&:#{{==:#{{@prism_binding}},{}}},#{{==:#{{@prism_role}},ui}}}}}}",
+                        binding.binding_id
+                    );
+                    let command = format!("kill-pane -t {}", tmux_quote(&expected.pane_id));
+                    self.guarded_output(&expected.pane_id, &condition, &command)?;
+                } else {
+                    let pane = self.verify_pane(expected, binding, "ui")?;
+                    let cli = self.verify_pane(&binding.cli, binding, "cli")?;
+                    verify_adjacent(&cli, &pane)?;
+                    return Ok(pane.identity);
+                }
             }
             binding.prism = None;
         }
@@ -768,10 +800,14 @@ impl TmuxClient {
 fn verify_adjacent(cli: &PaneState, ui: &PaneState) -> io::Result<()> {
     if ui.identity.window_id != cli.identity.window_id
         || ui.identity.session_id != cli.identity.session_id
-        || ui.left != cli.left + cli.width + 1
-        || ui.top != cli.top
-        || ui.height != cli.height
     {
+        return Err(invalid("Prism pane is not in the bound CLI's window"));
+    }
+    // A zoomed window reports full-size geometry for the zoomed pane; ownership tags still hold.
+    if cli.zoomed {
+        return Ok(());
+    }
+    if ui.left != cli.left + cli.width + 1 || ui.top != cli.top || ui.height != cli.height {
         return Err(invalid(
             "Prism pane is not adjacent to the right of the bound CLI",
         ));

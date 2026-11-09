@@ -61,7 +61,6 @@ pub struct UiState {
     detail_page: usize,
     editor_cursor: usize,
     editor_generation: Option<u64>,
-    undo: BTreeMap<Id, Vec<Id>>,
     show_help: bool,
     pub layout: views::ViewLayout,
     saved_views: BTreeMap<Id, ViewState>,
@@ -88,7 +87,6 @@ impl UiState {
             detail_page: 0,
             editor_cursor: 0,
             editor_generation: None,
-            undo: BTreeMap::new(),
             show_help: false,
             layout: store
                 .ui_state(workspace.id)?
@@ -312,14 +310,22 @@ impl UiState {
     }
 
     fn reopen_view(&mut self) -> Result<()> {
-        if self.layout.tabs.len() >= views::MAX_OPEN_VIEWS {
-            bail!("Close a view before reopening another");
-        }
         let id = self
             .layout
             .closed
             .pop()
             .ok_or_else(|| anyhow::anyhow!("No closed view to reopen"))?;
+        if self.layout.tabs.len() >= views::MAX_OPEN_VIEWS {
+            // At capacity the reopened view takes the active slot. The active view goes to the
+            // bottom of the reopen stack so repeated Ctrl-R cycles through every closed view.
+            if let Some(active) = self.layout.active {
+                self.layout.tabs.retain(|tab| *tab != active);
+                self.layout.closed.insert(0, active);
+                if self.layout.split == Some(active) {
+                    self.layout.split = None;
+                }
+            }
+        }
         self.layout.tabs.push(id);
         self.activate_view(id)
     }
@@ -452,16 +458,12 @@ impl UiState {
         } else {
             ContentAction::Accept { ids: selection.ids }
         };
-        let result = store.apply(
+        store.apply(
             self.workspace.id,
             selection.document_id,
             selection.revision,
             &action,
         )?;
-        self.undo
-            .entry(selection.document_id)
-            .or_default()
-            .push(result.undo_id);
         // Clear the old revision only after the shared mutation has committed.
         self.save_view(store, |view| view.selection = None)?;
         self.refresh(store)?;
@@ -479,14 +481,12 @@ impl UiState {
             .document()
             .ok_or_else(|| anyhow::anyhow!("No document"))?;
         let (id, revision) = (document.id, document.revision);
-        let undo_id = self
-            .undo
-            .get(&id)
-            .and_then(|records| records.last())
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("No action to undo in this UI session"))?;
+        // Persisted records survive restarts and cover archives made through the agent tool.
+        let undo_id = store
+            .undo_records(self.workspace.id, id)?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("No action to undo for this document"))?;
         store.undo(self.workspace.id, id, revision, undo_id)?;
-        self.undo.get_mut(&id).expect("undo record exists").pop();
         self.refresh(store)?;
         self.message = "Action undone".into();
         Ok(())
@@ -679,7 +679,8 @@ impl UiState {
                 KeyCode::Char('t') => self.duplicate_view(store)?,
                 KeyCode::Char('w') => self.close_view()?,
                 KeyCode::Char('r') => self.reopen_view()?,
-                KeyCode::Char('\\') => self.toggle_split(store)?,
+                // Legacy terminal key mode encodes Ctrl-\ as 0x1C, which crossterm reports as Ctrl-4.
+                KeyCode::Char('\\') | KeyCode::Char('4') => self.toggle_split(store)?,
                 _ => return Ok(false),
             }
             return Ok(false);
@@ -987,7 +988,7 @@ impl UiState {
         if self.show_help {
             self.list_area = Rect::default();
             self.content_area = Rect::default();
-            let controls = "j/k or arrows: move focus\nSpace or click: toggle selection\nA: select all visible content\nr: clear stale/current selection\na: accept shared content\nx: archive shared content\nu: undo last content action\nh: hide selected in this view\nH: show all hidden content\n/: edit private filter\nTab / Shift-Tab: switch view\nCtrl-T: new independent view of this document\nCtrl-W: close view, preserve content/draft\nCtrl-R: reopen last closed view\nCtrl-\\: toggle split\nF6 or click other split: focus it\nv: switch list/diagram\nShift-arrows: pan diagram\nAlt-arrows: move focused diagram card\nPgUp/PgDn: scroll details/delivery\n[ / ]: previous/next details page\ne: edit private question draft\nEnter in editor: newline\nCtrl-S or Ctrl-Enter: explicit send\nCtrl-N in editor: delivery mode\nEsc: keep private draft / finish filter\nLeft/Right/Home/End: edit cursor\nBackspace/Delete: edit text\nq / Ctrl-C: quit\n\nAcceptance is feedback, never tool permission.\nShare creates a snapshot for explicit retrieval in the bound CLI; it does not start a turn.\nUnknown delivery is never automatically retried. Sending it again can duplicate the request.";
+            let controls = "j/k or arrows: move focus\nSpace or click: toggle selection\nA: select all visible content\nr: clear stale/current selection\na: accept shared content\nx: archive shared content\nu: undo last content action\nh: hide selected in this view\nH: show all hidden content\n/: edit private filter\nTab / Shift-Tab: switch view\nCtrl-T: new independent view of this document\nCtrl-W: close view, preserve content/draft\nCtrl-R: reopen last closed view\nCtrl-\\ (Ctrl-4 in most terminals): toggle split\nF6 or click other split: focus it\nv: switch list/diagram\nShift-arrows: pan diagram\nAlt-arrows: move focused diagram card\nPgUp/PgDn: scroll details/delivery\n[ / ]: previous/next details page\ne: edit private question draft\nEnter in editor: newline\nCtrl-S: explicit send\nCtrl-N in editor: delivery mode\nEsc: keep private draft / finish filter\nLeft/Right/Home/End: edit cursor\nBackspace/Delete: edit text\nq / Ctrl-C: quit\n\nAcceptance is feedback, never tool permission.\nShare creates a snapshot for explicit retrieval in the bound CLI; it does not start a turn.\nUnknown delivery is never automatically retried. Sending it again can duplicate the request.";
             frame.render_widget(
                 Paragraph::new(controls)
                     .block(Block::bordered().title("Controls · j/k scroll · Esc close"))
@@ -1328,10 +1329,43 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Caches the bridge probe: each probe spawns tmux checks and an HTTP health call, so idle
+/// redraws and ordinary keystrokes reuse the last result until the refresh interval passes.
+pub struct ConnectionProbe<F: FnMut() -> ConnectionInfo> {
+    status: F,
+    cached: Option<(Instant, ConnectionInfo)>,
+}
+
+impl<F: FnMut() -> ConnectionInfo> ConnectionProbe<F> {
+    pub fn new(status: F) -> Self {
+        Self {
+            status,
+            cached: None,
+        }
+    }
+
+    pub fn current(&mut self, force: bool) -> ConnectionInfo {
+        if let Some((probed, connection)) = &self.cached
+            && !force
+            && probed.elapsed() < REFRESH_INTERVAL
+        {
+            return connection.clone();
+        }
+        let connection = (self.status)();
+        self.cached = Some((Instant::now(), connection.clone()));
+        connection
+    }
+}
+
+/// Control-key presses carry the explicit actions (Share) that must see a current binding.
+pub fn requires_verified_binding(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 pub fn run(
     mut store: Store,
     workspace: Workspace,
-    mut status: impl FnMut() -> ConnectionInfo,
+    status: impl FnMut() -> ConnectionInfo,
 ) -> Result<()> {
     let mut state = UiState::new(&mut store, workspace)?;
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -1355,9 +1389,10 @@ pub fn run(
         previous_hook(information);
     }));
     execute!(io::stdout(), EnableMouseCapture)?;
+    let mut probe = ConnectionProbe::new(status);
     let mut refreshed = Instant::now();
     while !interrupted.load(Ordering::Relaxed) {
-        let connection = status();
+        let connection = probe.current(false);
         if refreshed.elapsed() >= REFRESH_INTERVAL {
             if let Err(error) = state.refresh(&mut store) {
                 state.message = format!("Refresh error: {error}");
@@ -1368,7 +1403,8 @@ pub fn run(
         if event::poll(EVENT_WAIT)? {
             let event = event::read()?;
             // Refresh the binding immediately before explicit actions, not just before drawing.
-            if state.handle_event(&mut store, event, &status()) {
+            let connection = probe.current(requires_verified_binding(&event));
+            if state.handle_event(&mut store, event, &connection) {
                 break;
             }
         }
