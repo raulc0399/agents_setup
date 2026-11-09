@@ -32,6 +32,7 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 | --- | --- | --- |
 | 1 Gates | **[done]** 1.1, 1.2, 1.3 (Claude half) passed | the Codex half of 1.3 is for the Codex agent to confirm |
 | 2 `prism-core` | **[done]** | protocol 1: `hello` → `welcome` → `auth` → `snapshot`; see `prism-core/src/protocol.rs` |
+| 3 Bridge app link | **[done]** | `src/applink.rs`; commits noticed by polling SQLite `data_version`; legacy bindings report `bound_at_ms = 1` |
 
 Gate results (2026-11-09, from the `d_claude` container):
 
@@ -104,7 +105,7 @@ the Linux container.
        prove it with an HMAC over the other side's nonce.
    2.4 SVG carries `data-id` and `data-kind` on boxes, arrows, pills and gates for clicks.
 
-3. **Bridge app link**
+3. **Bridge app link** **[done]**
    3.1 WebSocket client with reconnect and backoff, authenticated by the pairing token.
    3.2 Send `hello` and `snapshot` on connect, `update` after every committed change.
    3.3 Apply commands from the app through the existing shared actions (same checks as tools).
@@ -129,6 +130,8 @@ the Linux container.
    6.1 Native text selection inside cards and the side panel; `Ask` sends item + quote.
    6.2 Question state on the item: shared, in prompt box, answered, with the answer text.
    6.3 Drop and undo; filter and hide stay local to the tab.
+   6.4 Accept and multi-selection (Space), as the terminal list view has them today; needed
+       before batch 7 deletes it (found in the batch 4 review).
 
 7. **Remove the terminal UI, the tmux requirement and the old launcher** (Decisions 1 and 2)
    7.1 Delete `src/ui/`, `tests/ui.rs`, `tests/diagram.rs`, `tests/graph.rs` (moved to core),
