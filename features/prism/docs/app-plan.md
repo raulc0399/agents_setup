@@ -1,6 +1,6 @@
 # Prism desktop app: plan
 
-Status: plan only. Nothing here is implemented; saving this file authorizes no code change.
+Status: in progress on branch `prism-app` (go given 2026-11-09). Done batches are marked **[done]**; see Progress.
 Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 
 ## Start here (handover)
@@ -25,6 +25,29 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 - **Working rules**: plan and approval before code, one batch at a time, validation after
   each batch (see the repository's `AGENTS.md`).
 - **First step**: batch 1, the three gates. No product code before they pass.
+
+## Progress
+
+| Batch | State | Note |
+| --- | --- | --- |
+| 1 Gates | 1.1 passed, 1.3 Claude half passed, 1.2 open | 1.2 and the Codex half of 1.3 need the user's Mac / the Codex container |
+
+Gate results (2026-11-09, from the `d_claude` container):
+
+- **1.1 passed.** `host.docker.internal` resolves to `192.168.65.254` (IPv4) and to an IPv6
+  address that is unreachable. A TCP connect to the Mac's own AirPlay listener
+  (ports 5000 and 7000) succeeded and returned its HTTP banner; port 7717 answered
+  "connection refused" (host reached, nothing listening). Consequence: the bridge must try
+  every resolved address (or IPv4 first). Windows Docker Desktop provides the same name.
+  Plain Linux Docker needs `--add-host=host.docker.internal:host-gateway` and an app
+  listener that is not bound to loopback only.
+- **1.2 open.** Tauri cannot be built in the container (no WebKitGTK, no root). On the Mac:
+  `npm create tauri-app@latest prism-probe -- --template vanilla --manager npm --yes &&
+  cd prism-probe && npm install && npm run tauri dev`. Passed when the window opens.
+  Batches 2 and 3 do not depend on it; batch 4 does.
+- **1.3 Claude half passed.** `~/.claude` is a host mount (virtiofs); a file written to
+  `~/.claude/prism/` in the container is visible there. `~/.codex` is not mounted in the
+  Claude container (expected); the Codex half is for the Codex agent to confirm.
 
 ## Goal
 
