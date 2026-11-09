@@ -31,6 +31,7 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 | Batch | State | Note |
 | --- | --- | --- |
 | 1 Gates | **[done]** 1.1, 1.2, 1.3 (Claude half) passed | the Codex half of 1.3 is for the Codex agent to confirm |
+| 2 `prism-core` | **[done]** | protocol 1: `hello` → `welcome` → `auth` → `snapshot`; see `prism-core/src/protocol.rs` |
 
 Gate results (2026-11-09, from the `d_claude` container):
 
@@ -91,12 +92,16 @@ the Linux container.
    1.2 Probe: a minimal Tauri 2 app builds and opens on the user's Mac.
    1.3 Confirm the pairing file is visible in a Claude container and in a Codex container.
 
-2. **`prism-core` crate**
-   2.1 Cargo workspace: `prism-core` (portable), `prism` (bridge, Linux), `app/src-tauri`.
+2. **`prism-core` crate** **[done]**
+   2.1 Cargo workspace: `prism-core` (portable), `prism` (bridge, Linux). The app is its own
+       workspace in `app/` (own `Cargo.lock`), because Tauri cannot build in the container
+       and the bridge's `cargo test --workspace` must keep working there.
    2.2 Move `model.rs` types the app needs and the layout/SVG half of `src/ui/graph.rs`;
        drop the rasterizer and the terminal image code.
-   2.3 Define app protocol messages: `hello`, `snapshot`, `update`, `closed`, and the
-       commands `ask`, `action`, `undo`, `fetch`. Versioned, with a protocol number.
+   2.3 Define app protocol messages: `hello`, `welcome`, `auth`, `snapshot`, `update`,
+       `closed`, `reply`, `refused`, and the commands `ask`, `action`, `undo`, `fetch`.
+       Versioned, with a protocol number. The pairing token never crosses; both sides
+       prove it with an HMAC over the other side's nonce.
    2.4 SVG carries `data-id` and `data-kind` on boxes, arrows, pills and gates for clicks.
 
 3. **Bridge app link**
@@ -160,6 +165,7 @@ the Linux container.
 | Bridge link | `src/bridge.rs`, `src/applink.rs` (new), `tests/bridge.rs`, `tests/applink.rs` (new) |
 | App | `app/` |
 | Integrator | `Cargo.toml`, `Cargo.lock`, `src/lib.rs`, `src/main.rs`, README, docs |
+| App | `app/Cargo.toml`, `app/Cargo.lock` (the app's own workspace) |
 | Codex agent | `src/adapters/codex.rs`, `plugins/codex/`, Codex probes and docs |
 
 Batch 2 must land before 3, 4 and 5 start; 3 and 4 can then run in parallel.

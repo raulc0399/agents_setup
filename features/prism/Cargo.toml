@@ -9,6 +9,7 @@ publish = false
 [workspace]
 members = ["prism-core"]
 default-members = [".", "prism-core"]
+exclude = ["app"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
