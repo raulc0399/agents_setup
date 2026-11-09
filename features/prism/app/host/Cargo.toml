@@ -1,0 +1,22 @@
+[package]
+name = "prism-app-host"
+description = "Prism desktop app without its window shell: bridge listener, pairing file, sessions and window arrangement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+prism-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1.54", features = ["net", "rt", "sync", "time", "macros"] }
+tokio-tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[dev-dependencies]
+tempfile = "3"
+tungstenite = "0.30"
+tokio = { version = "1.54", features = ["rt-multi-thread"] }

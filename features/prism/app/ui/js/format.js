@@ -1,0 +1,22 @@
+/** Text helpers shared by the views. */
+
+const AGENT_LABELS = { claude: 'Claude', codex: 'Codex' };
+/** Enough of a conversation ID to tell two conversations of one project apart. */
+const SHORT_CONVERSATION_CHARS = 8;
+
+export function agentLabel(agent) {
+  return AGENT_LABELS[agent] ?? agent;
+}
+
+/** Last path component of a project directory. */
+export function projectName(project) {
+  return project.split(/[\\/]/).filter(Boolean).at(-1) ?? project;
+}
+
+export function shortConversation(conversation) {
+  return conversation.slice(0, SHORT_CONVERSATION_CHARS);
+}
+
+export function firstLine(text) {
+  return text.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? '';
+}

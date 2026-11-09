@@ -1,0 +1,18 @@
+[package]
+name = "prism-app"
+description = "Prism desktop app: native windows around prism-app-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+prism-app-host = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tauri = { version = "2.12", features = [] }
+tauri-plugin-window-state = "2.5"
