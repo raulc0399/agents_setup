@@ -86,7 +86,7 @@ fn tool_schemas_match_the_shared_mcp_definitions() {
 #[test]
 fn module_wires_every_tool_the_command_and_the_exact_instruction() {
     let module = fs::read_to_string(root().join("hooks/prism.js")).unwrap();
-    for name in ["publish", "inspect", "action", "questions"] {
+    for name in ["publish", "inspect", "action", "questions", "answer"] {
         assert!(
             module.contains(&format!("{{tool: 'mcp__prism__{name}'}}")),
             "{name} hook missing"
@@ -96,7 +96,7 @@ fn module_wires_every_tool_the_command_and_the_exact_instruction() {
     assert!(module.contains("'session.end'"));
     assert!(module.contains(&format!("'{UNREGISTERED_INSTRUCTION}'")));
     let skill = fs::read_to_string(root().join("skills/prism-workspace/SKILL.md")).unwrap();
-    for name in ["publish", "inspect", "action", "questions"] {
+    for name in ["publish", "inspect", "action", "questions", "answer"] {
         assert!(skill.contains(&format!("mcp__prism__{name}")));
     }
     assert!(skill.contains("/prism"));

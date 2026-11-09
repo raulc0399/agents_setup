@@ -128,7 +128,7 @@ fn authentication_precedes_binding_and_retirement() {
 #[test]
 fn operations_preserve_replay_and_expose_only_explicit_shares() {
     use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
-    use prism::bridge::{QuestionParams, apply_operation};
+    use prism::bridge::{AnswerParams, QuestionParams, apply_operation};
     use prism::model::{DeliveryMode, ElementKind, Id, Selection, ViewKind, ViewState};
     use prism::store::Store;
     use std::collections::{BTreeMap, BTreeSet};
@@ -264,6 +264,36 @@ fn operations_preserve_replay_and_expose_only_explicit_shares() {
         result["snapshot"]["elements"]
             .get(request.elements[0].id.to_string())
             .is_some()
+    );
+    // Only explicitly shared questions take an answer; it is stored beside the question.
+    assert!(
+        apply_operation(
+            &mut store,
+            &fixture.binding,
+            Operation::Answer(AnswerParams {
+                request_id: private.request_id,
+                text: "never".into(),
+            })
+        )
+        .is_err()
+    );
+    let answered = apply_operation(
+        &mut store,
+        &fixture.binding,
+        Operation::Answer(AnswerParams {
+            request_id: shared.request_id,
+            text: "Because ancestry is stable.".into(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(answered["answer"], "Because ancestry is stable.");
+    assert_eq!(
+        store
+            .question(workspace.id, shared.request_id)
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some("Because ancestry is stable.")
     );
     let mut other = fixture.binding.clone();
     other.conversation = Some(Uuid::new_v4().to_string());

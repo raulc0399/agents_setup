@@ -747,7 +747,7 @@ impl TmuxClient {
         let condition =
             self.pane_condition(binding, &binding.cli.pane_id, binding.cli.pid, Some("cli"));
         let command = format!(
-            "split-window -h -p 45 -P -F '#{{pane_id}}\t#{{pane_pid}}' -t {} -c {} {} ; {} ; select-pane -t {}",
+            "split-window -h -p 45 -P -F '#{{pane_id}}\t#{{pane_pid}}' -t {} -c {} {} ; {} ; set-option -p allow-passthrough on ; select-pane -t {}",
             tmux_quote(&binding.cli.pane_id),
             tmux_quote(
                 binding

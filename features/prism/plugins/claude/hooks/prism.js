@@ -6,11 +6,15 @@ const bindings = new Map();
 const SUBAGENT_REFUSAL = 'Prism tools are available only to the main conversation the user is watching, not to subagents.';
 const PROTOCOL_VERSION = 1;
 const COMMAND_NAME = 'prism';
+// Shared questions are polled and placed in the prompt box; the user sends them from there.
+const QUESTION_POLL_MS = 1000;
+const filledQuestions = new Set();
 const TOOL_FIELDS = {
   publish: ['request_id', 'document_id', 'expected_revision', 'title', 'elements', 'relationships', 'groups'],
   inspect: ['document_id', 'cursor'],
   action: ['document_id', 'expected_revision', 'action'],
   questions: ['request_id', 'cursor'],
+  answer: ['request_id', 'text'],
 };
 
 export function register(on, options) {
@@ -20,6 +24,7 @@ export function register(on, options) {
       await $.tool.register({name: tool.name, description: tool.description, inputSchema: tool.inputSchema, isDeferred: false});
     }
     await $.command.register({name: COMMAND_NAME, description: 'Open or refresh the Prism pane beside this conversation'});
+    $.clock.every(QUESTION_POLL_MS, () => deliverQuestions($));
     return next(e);
   });
 
@@ -28,6 +33,7 @@ export function register(on, options) {
   on('tool.call', {tool: 'mcp__prism__inspect'}, async ($, e) => callTool($, e, 'inspect')).catch(refuseTool);
   on('tool.call', {tool: 'mcp__prism__action'}, async ($, e) => callTool($, e, 'action')).catch(refuseTool);
   on('tool.call', {tool: 'mcp__prism__questions'}, async ($, e) => callTool($, e, 'questions')).catch(refuseTool);
+  on('tool.call', {tool: 'mcp__prism__answer'}, async ($, e) => callTool($, e, 'answer')).catch(refuseTool);
 
   on('command.run', {command: 'prism'}, async ($, e) => openPane($)).catch(($, e, next) => (next.called ? next(e) : {text: 'Prism failed to reach its bridge. ' + INSTRUCTION}));
 
@@ -76,6 +82,34 @@ async function openPane($) {
     return {text: `Prism lists ${documents} published documents in this conversation, but its pane could not open: ${pane.error}`};
   }
   return {text: `Prism pane ${pane.id} is open beside this conversation with ${documents} published documents.`};
+}
+
+// Places each newly shared Prism question in the prompt box once, then tells the bridge. Only an
+// already attached conversation is polled; polling never attaches or opens a pane.
+async function deliverQuestions($) {
+  const sessionId = await $.session.id();
+  if (!bindings.get(sessionId) && !await $.env.get('PRISM_BINDING_FILE')) {
+    return;
+  }
+  const listed = await callBridge($, sessionId, 'questions', {});
+  if (listed.error !== undefined) {
+    return;
+  }
+  for (const summary of listed.response.data.questions) {
+    if (summary.outcome.state !== 'pending' || filledQuestions.has(summary.request_id)) {
+      continue;
+    }
+    const fetched = await callBridge($, sessionId, 'questions', {request_id: summary.request_id});
+    if (fetched.error !== undefined) {
+      continue;
+    }
+    const filled = await $.prompt.fill({text: fetched.response.data.text + ' [prism:' + summary.request_id + ']\n', mode: 'append'});
+    if (!filled.isFilled) {
+      continue;
+    }
+    filledQuestions.add(summary.request_id);
+    await callBridge($, sessionId, 'lifecycle', {event: 'prompt_filled', request_id: summary.request_id});
+  }
 }
 
 // Resolves to {response} on HTTP 200 or {error} otherwise. Never includes the binding path or token.

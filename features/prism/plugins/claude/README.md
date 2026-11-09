@@ -18,9 +18,13 @@ the `skills/prism-workspace/SKILL.md` instructions. The skill directory and
 frontmatter name are `prism-workspace`: a skill named `prism` would claim
 `/prism:prism` and the CLI would then refuse the mod's `/prism` command. Prism
 tools refuse calls from subagents; only the main conversation publishes. The mod registers the tools
-`mcp__prism__publish`, `mcp__prism__inspect`, `mcp__prism__action` and
-`mcp__prism__questions` plus the `/prism` command, which opens or refreshes the
-Prism pane without a model turn.
+`mcp__prism__publish`, `mcp__prism__inspect`, `mcp__prism__action`,
+`mcp__prism__questions` and `mcp__prism__answer` plus the `/prism` command, which
+opens or refreshes the Prism pane without a model turn. Once a conversation is
+attached, the mod polls shared questions every second and appends each new one
+to the prompt box as `Item N: <title>`, quoted lines and a `[prism:<request id>]`
+marker; the user sends it. The skill tells Claude to answer in the conversation
+and record the reply with `mcp__prism__answer`.
 
 Start `claude` normally inside tmux and discuss your task. When needed, use
 `/prism` or ask Claude to show the plan in Prism. The mod reads the native session

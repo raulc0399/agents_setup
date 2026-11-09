@@ -465,6 +465,34 @@ impl Store {
         Ok(question)
     }
 
+    /// Records the agent's reply beside the shared question; a later answer replaces it.
+    pub fn answer_question(
+        &mut self,
+        workspace: Id,
+        request_id: Id,
+        answer: &str,
+    ) -> Result<Question> {
+        bounded(answer, MAX_TEXT_BYTES, "answer")?;
+        if answer.trim().is_empty() {
+            return Err(Error::Invalid("answer requires text".into()));
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut question = read_question(&transaction, workspace, request_id)?;
+        question.answer = Some(answer.to_owned());
+        transaction.execute(
+            "UPDATE questions SET content=?3 WHERE workspace_id=?1 AND request_id=?2",
+            params![
+                workspace.to_string(),
+                request_id.to_string(),
+                serialized(&question)?
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(question)
+    }
+
     /// Call when a live binding retires. Persisted in-flight work is never automatically resent.
     pub fn invalidate_generation(
         &mut self,
@@ -666,6 +694,7 @@ fn insert_question(
         text: request.text.clone(),
         mode: request.mode.clone(),
         outcome: DeliveryOutcome::Pending,
+        answer: None,
     };
     connection.execute(
             "INSERT INTO questions(workspace_id, request_id, payload_hash, content) VALUES(?1, ?2, ?3, ?4)",

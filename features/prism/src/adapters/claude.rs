@@ -146,6 +146,7 @@ mod contract {
             text: "Explain the selected step".into(),
             mode,
             outcome: DeliveryOutcome::Pending,
+            answer: None,
         }
     }
 

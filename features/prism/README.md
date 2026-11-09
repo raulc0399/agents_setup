@@ -61,8 +61,9 @@ claude plugin list
 
 The package bundles the native mod `hooks/prism.js` (tools
 `mcp__prism__publish`, `mcp__prism__inspect`, `mcp__prism__action`,
-`mcp__prism__questions` and the `/prism` command) and the `prism-workspace`
-skill. Installed mods activate in new sessions without `--plugin-dir`. See
+`mcp__prism__questions`, `mcp__prism__answer` and the `/prism` command) and the
+`prism-workspace` skill. The mod polls shared questions every second and places
+new ones in the prompt box. Installed mods activate in new sessions without `--plugin-dir`. See
 [plugins/claude/README.md](plugins/claude/README.md) and
 [Claude integration evidence](docs/claude-integration.md).
 
@@ -107,34 +108,64 @@ that conflict with later changes instead of overwriting them. Elements appear
 in publication order; reordering them in a later publication is not a semantic
 edit.
 
-Select content, press `e`, write a question, then press `Ctrl-S` to **Share**.
-Return to the CLI and ask it to retrieve your shared Prism question. It can
-read the frozen selection and question, answer in that conversation, and revise
-the visual content. If the content changed since you selected it, the editor
-reports a stale selection and keeps your draft; reselect and share again. Share does not start a model turn or prove an answer began.
+The list shows one card per item; the focused card expands with its text, its
+questions and the pills `[ask] [hide] [drop]`. **Ask** (`Enter` or the pill)
+shares the focused item as a quoted reference. With Claude Code, the native mod
+places it in the CLI prompt box within a second as
+`Item 2: <title>` plus `> quoted lines` and a `[prism:<request id>]` marker; you
+type your question after it and press Enter there. Drag inside the expanded card
+or the diagram panel first to quote only that text. Claude records its reply
+with `mcp__prism__answer`, and the card shows it. Codex has no prompt box
+access: ask it to retrieve the shared question with `prism_questions`. Share does
+not start a model turn or prove an answer began. **Drop** is the shared archive
+(`x`); **hide** (`h`) only affects this view.
+
+The older editor remains: select content, press `e`, write a question, then
+`Ctrl-S` to share it. If the content changed since you selected it, the editor
+reports a stale selection and keeps your draft; reselect and share again.
 Unsent selections and drafts are excluded from the Prism tools. This is tool
 exposure control; another process running as your user can read local files.
+
+## Diagrams
+
+`v` switches a view between list and diagram. In iTerm2, WezTerm, Kitty,
+Ghostty and other terminals with an image protocol, the diagram is drawn as an
+image: groups become lanes, elements boxes with a bold name and a short subtitle,
+relationships arrows with numbered label pills, `manual: true` relationships
+dashed, and a finding or question linked to exactly one box an amber gate badge
+on that box. Zoom 1 fits the whole diagram; `+`, `-` and `0` or Ctrl-wheel zoom,
+the wheel and Shift-arrows pan, and boxes show their full text when zoomed in.
+Clicking a box, arrow, pill or badge focuses it; the panel below shows its text
+with the same pills, and a drag there selects text for **ask**. `s` writes the
+diagram as `.prism/export/<title>.svg`.
+
+Inside tmux the image needs `allow-passthrough`, which Prism enables on the pane
+it creates; tmux 3.3a passes iTerm2 images but drops Sixel, so Windows Terminal
+needs a tmux 3.4 Sixel build. Without an image protocol, or with
+`PRISM_TEXT_DIAGRAM=1`, the text diagram (cards in three lanes) is used.
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
 | Arrows / `j`, `k` | Focus content |
+| `Enter` / `[ask]` | Ask about the focused item, or about the text dragged inside it |
 | Space / click | Toggle selection |
 | `A` / `r` | Select visible content / clear selection |
-| `a` / `x` / `u` | Accept / archive / undo |
-| `h` / `H` | Hide selected content / show hidden content |
+| `a` / `x` / `u` | Accept / drop (shared archive) / undo; without a selection they act on the focused item |
+| `h` / `H` | Hide focused or selected content in this view / show hidden content |
 | `/` | Edit current view's filter |
 | `v` | Switch list/diagram |
+| `+` / `-` / `0`, Ctrl-wheel | Zoom diagram in, out, fit |
+| Wheel, Shift-wheel, `Shift` + arrows | Pan diagram |
+| `s` | Export the diagram as SVG |
+| `Alt` + arrows | Move focused card (text diagram only) |
 | `Tab` / `Shift-Tab` | Change view tab |
 | `Ctrl-T` / `Ctrl-W` / `Ctrl-R` | Duplicate view / close tab / reopen closed tab (at the view limit it swaps with the active tab) |
 | `Ctrl-\` (sent as `Ctrl-4` by most terminals) / `F6` | Toggle split / focus other split |
-| `Shift` + arrows / `Alt` + arrows | Pan diagram / move focused diagram card |
-| `e` / `Esc` | Edit question / leave editor |
-| `Enter` | Newline in question |
-| `Ctrl-S` | Explicitly share question |
-| `Ctrl-N` | Cycle offered delivery modes (currently Share only) |
-| `[` / `]`, `PgUp` / `PgDn` | History pages / detail scrolling |
+| `e` / `Esc` | Edit a question in Prism / leave editor |
+| `Ctrl-S` / `Ctrl-N` | Share the edited question / cycle offered delivery modes (currently Share only) |
+| `[` / `]`, `PgUp` / `PgDn` | Detail pages / detail scrolling |
 | `?` / `q` / `Ctrl-C` | Help / exit UI |
 
 At most 32 tabs can be open in one UI. Views keep independent selections, drafts, filters and layout while sharing

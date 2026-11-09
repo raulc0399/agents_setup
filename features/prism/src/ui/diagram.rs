@@ -1,5 +1,5 @@
 use crate::model::{Direction, Document, Id, Position, ViewState, terminal_safe};
-use crate::ui::list;
+use crate::ui::{list, theme};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -67,8 +67,8 @@ impl DiagramLayout {
         let mut layout = Self::default();
         let mut lane_rows = [0; 3];
         for row in rows {
-            let (lane, caption, color) = if document.elements.contains_key(&row.id) {
-                (0, String::new(), Color::Cyan)
+            let (lane, caption) = if document.elements.contains_key(&row.id) {
+                (0, String::new())
             } else if let Some(relationship) = document.relationships.get(&row.id) {
                 if !elements.contains(&relationship.from) || !elements.contains(&relationship.to) {
                     continue;
@@ -84,13 +84,9 @@ impl DiagramLayout {
                     short_title(&document.elements[&relationship.from].title),
                     short_title(&document.elements[&relationship.to].title),
                 );
-                (1, caption, Color::Blue)
+                (1, caption)
             } else if let Some(group) = document.groups.get(&row.id) {
-                (
-                    2,
-                    format!("{} members · details", group.members.len()),
-                    Color::Yellow,
-                )
+                (2, format!("{} members · details", group.members.len()))
             } else {
                 continue;
             };
@@ -113,7 +109,7 @@ impl DiagramLayout {
                 caption,
                 accepted: row.accepted,
                 stale_acceptance: row.stale_acceptance,
-                color,
+                color: row.color,
             });
         }
         let positions: BTreeMap<_, _> = layout
@@ -280,12 +276,7 @@ impl DiagramState {
         selected: &BTreeSet<Id>,
     ) {
         self.clamp(layout, area);
-        let block = Block::bordered().title(format!(
-            "Diagram · {} records · pan {},{}",
-            layout.cards.len(),
-            self.pan_x,
-            self.pan_y
-        ));
+        let block = Block::bordered().title(format!("Diagram · {} records", layout.cards.len()));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.is_empty() {
@@ -300,9 +291,9 @@ impl DiagramState {
         let buffer = frame.buffer_mut();
         for connection in &layout.connections {
             let style = if focus == Some(connection.id) || selected.contains(&connection.id) {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(theme::PRIMARY)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme::HINT)
             };
             let start = (connection.from.x + CARD_WIDTH, connection.from.y + 1);
             let end = (connection.to.x + CARD_WIDTH, connection.to.y + 3);
@@ -336,7 +327,7 @@ impl DiagramState {
             }
             let mut style = Style::default().fg(card.color);
             if focus == Some(card.id) {
-                style = style.bg(Color::DarkGray);
+                style = style.bg(theme::FOCUS_BACKGROUND);
             }
             let acceptance = if card.stale_acceptance {
                 "accepted stale"
@@ -348,9 +339,9 @@ impl DiagramState {
             let text = format!(
                 "{} {}\n{}\n{acceptance}",
                 if selected.contains(&card.id) {
-                    "[x]"
+                    "●"
                 } else {
-                    "[ ]"
+                    "○"
                 },
                 card.label,
                 card.caption

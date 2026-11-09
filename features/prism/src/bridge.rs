@@ -5,7 +5,7 @@ use crate::adapters::{
     claude::ClaudeAdapter,
     codex::{CodexAdapter, RpcError as CodexRpcError},
 };
-use crate::model::{AgentKind, DeliveryMode, Id, MAX_PAYLOAD_BYTES};
+use crate::model::{AgentKind, DeliveryMode, DeliveryOutcome, Id, MAX_PAYLOAD_BYTES};
 use crate::session::{LiveBinding, TmuxClient, process_start_time, read_binding, write_binding};
 use crate::store::Store;
 use crate::ui::ConnectionInfo;
@@ -55,7 +55,15 @@ pub enum Operation {
     Inspect(InspectParams),
     Action(ActionParams),
     Questions(QuestionParams),
+    Answer(AnswerParams),
     Lifecycle(LifecycleEvent),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerParams {
+    pub request_id: Id,
+    pub text: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -84,7 +92,13 @@ pub struct QuestionParams {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LifecycleEvent {
-    SessionEnd { reason: String },
+    SessionEnd {
+        reason: String,
+    },
+    /// The mod placed a shared question in the CLI prompt box; the user sends it from there.
+    PromptFilled {
+        request_id: Id,
+    },
 }
 
 pub fn socket_path(binding_path: &Path) -> Result<PathBuf> {
@@ -249,6 +263,18 @@ pub fn apply_operation(
         }
         Operation::Inspect(_) | Operation::Questions(_) => {
             bail!("cursor is only valid when listing summaries")
+        }
+        Operation::Answer(params) => {
+            let question = store.question(workspace.id, params.request_id)?;
+            ensure!(
+                question.mode == DeliveryMode::Share,
+                "question was not explicitly shared for CLI retrieval"
+            );
+            Ok(serde_json::to_value(store.answer_question(
+                workspace.id,
+                params.request_id,
+                &params.text,
+            )?)?)
         }
         Operation::Lifecycle(_) => bail!("lifecycle events are not content operations"),
     }
@@ -500,6 +526,17 @@ impl Service {
         write_binding(&self.binding_path, &binding)?;
         binding = read_binding(&self.binding_path)?;
         authorize(&mut binding, token, &call)?;
+        if let Operation::Lifecycle(LifecycleEvent::PromptFilled { request_id }) = &call.operation {
+            let workspace = self.store.workspace(&binding.workspace_key()?)?;
+            self.store.update_delivery(
+                workspace.id,
+                *request_id,
+                binding.generation,
+                &DeliveryOutcome::Pending,
+                DeliveryOutcome::Submitted,
+            )?;
+            return Ok(json!({"data":{"filled":true}}));
+        }
         if let Operation::Lifecycle(event) = &call.operation {
             // The bridge loop retires the binding once the observer reports the event.
             self.observe_lifecycle(event)?;
@@ -516,7 +553,9 @@ impl Service {
 
     /// Only Claude reports lifecycle over the bridge; Codex lifecycle is observed natively.
     fn observe_lifecycle(&mut self, event: &LifecycleEvent) -> Result<()> {
-        let LifecycleEvent::SessionEnd { reason } = event;
+        let LifecycleEvent::SessionEnd { reason } = event else {
+            bail!("only session end is a native lifecycle observation");
+        };
         // The reason is rendered and persisted verbatim, so only identifier characters pass.
         ensure!(
             reason.len() <= MAX_LIFECYCLE_REASON_BYTES
@@ -1449,6 +1488,20 @@ mod tests {
                 .unwrap()
                 .outcome,
             DeliveryOutcome::Pending
+        ));
+    }
+
+    #[test]
+    fn prompt_filled_lifecycle_carries_the_request_id() {
+        let operation: Operation = serde_json::from_value(json!({
+            "method":"lifecycle",
+            "params":{"event":"prompt_filled","request_id":"00000000-0000-0000-0000-000000000001"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            operation,
+            Operation::Lifecycle(LifecycleEvent::PromptFilled { request_id })
+                if request_id == crate::model::Id::from_u128(1)
         ));
     }
 

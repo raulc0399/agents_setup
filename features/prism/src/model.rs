@@ -86,6 +86,9 @@ pub struct Relationship {
     pub to: Id,
     pub label: String,
     pub direction: Direction,
+    /// A manual or review step; diagrams draw it dashed.
+    #[serde(default)]
+    pub manual: bool,
     pub semantic_revision: u64,
     pub accepted_revision: Option<u64>,
     pub archived: bool,
@@ -184,6 +187,9 @@ pub struct Question {
     pub text: String,
     pub mode: DeliveryMode,
     pub outcome: DeliveryOutcome,
+    /// Recorded by the agent through the answer tool after replying in its conversation.
+    #[serde(default)]
+    pub answer: Option<String>,
 }
 
 /// Escape terminal controls at rendering boundaries, including persisted content.

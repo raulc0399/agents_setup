@@ -101,6 +101,10 @@
                   "undirected",
                   "bidirectional"
                 ]
+              },
+              "manual": {
+                "type": "boolean",
+                "description": "A manual or review step; diagrams draw it dashed."
               }
             },
             "required": [
@@ -270,6 +274,28 @@
         }
       },
       "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "answer",
+    "description": "Record the reply you gave in this conversation to a Prism question, so Prism shows it beside the item. Use the request ID from the [prism:<id>] marker in the prompt. Record only after answering; a later call replaces the recorded text.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      },
+      "required": [
+        "request_id",
+        "text"
+      ],
       "additionalProperties": false
     }
   }

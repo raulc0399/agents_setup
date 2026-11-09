@@ -39,6 +39,8 @@ pub struct RelationshipInput {
     pub to: Id,
     pub label: String,
     pub direction: Direction,
+    #[serde(default)]
+    pub manual: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +214,7 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
             to: input.to,
             label: input.label.clone(),
             direction: input.direction.clone(),
+            manual: input.manual,
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,

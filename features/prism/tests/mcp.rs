@@ -75,7 +75,7 @@ fn protocol_negotiation_and_notifications_are_compatible() {
         )
         .is_none()
     );
-    assert_eq!(tools()["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(tools()["tools"].as_array().unwrap().len(), 5);
     for name in ["prism_inspect", "prism_questions"] {
         assert!(operation(name, json!({})).is_ok());
     }

@@ -41,6 +41,7 @@ fn publication() -> PublishRequest {
             to: b,
             label: "flows".into(),
             direction: Direction::Directed,
+            manual: false,
         }],
         groups: vec![GroupInput {
             id: Id::new_v4(),

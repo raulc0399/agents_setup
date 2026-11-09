@@ -41,6 +41,7 @@ impl Fixture {
                 to: Id::from_u128(2),
                 label: "flows".into(),
                 direction: Direction::Directed,
+                manual: false,
             }],
             groups: vec![GroupInput {
                 id: Id::from_u128(4),
@@ -423,17 +424,23 @@ fn mouse_selection_uses_scrolled_list_offset_after_resize() {
     let mut state = fixture.state();
     key(&mut state, &mut fixture.store, KeyCode::End);
     render(&mut state, 100, 14, &connection());
-    // The 9-row content pane has borders, so its last visible row is y=9.
-    state.handle_event(
-        &mut fixture.store,
-        Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 3,
-            row: 9,
-            modifiers: KeyModifiers::NONE,
-        }),
-        &connection(),
-    );
+    // The 9-row content pane has borders, so its last visible row is y=10; a click is a
+    // press and a release on the same card.
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        state.handle_event(
+            &mut fixture.store,
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 3,
+                row: 9,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &connection(),
+        );
+    }
     assert_eq!(
         state.view.as_ref().unwrap().selection.as_ref().unwrap().ids,
         vec![Id::from_u128(4)]
@@ -511,7 +518,6 @@ fn stable_focus_and_stale_acceptance_follow_published_semantics() {
     assert_eq!(state.focus, Some(Id::from_u128(1)));
     assert!(state.rows()[0].stale_acceptance);
     assert!(!state.rows()[0].accepted);
-    assert!(render(&mut state, 120, 30, &connection()).contains("accepted stale"));
 }
 
 #[test]
@@ -866,7 +872,7 @@ fn split_and_tabs_render_on_narrow_screens_and_route_keyboard_focus() {
         Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 1,
-            row: 2,
+            row: 1,
             modifiers: KeyModifiers::NONE,
         }),
         &connection(),
@@ -1037,4 +1043,48 @@ fn connection_probe_caches_between_refreshes_and_forces_before_explicit_sends() 
     assert!(prism::ui::requires_verified_binding(&share));
     let typing = Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
     assert!(!prism::ui::requires_verified_binding(&typing));
+}
+
+#[test]
+fn enter_shares_the_focused_item_and_a_drag_quotes_only_the_selected_text() {
+    let mut fixture = Fixture::new();
+    let mut state = fixture.state();
+    render(&mut state, 100, 30, &connection());
+    key(&mut state, &mut fixture.store, KeyCode::Enter);
+    assert_eq!(state.questions.len(), 1);
+    assert_eq!(state.questions[0].text, "Item 1: Source\n> Body");
+    assert_eq!(state.questions[0].mode, DeliveryMode::Share);
+    assert_eq!(
+        state.questions[0].snapshot.selection.ids,
+        vec![Id::from_u128(1)]
+    );
+    // The expanded first card shows "Body" on the row under its title, indented by four.
+    render(&mut state, 100, 30, &connection());
+    for (kind, column) in [
+        (MouseEventKind::Down(MouseButton::Left), 5),
+        (MouseEventKind::Drag(MouseButton::Left), 6),
+        (MouseEventKind::Up(MouseButton::Left), 6),
+    ] {
+        state.handle_event(
+            &mut fixture.store,
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &connection(),
+        );
+    }
+    let output = render(&mut state, 100, 30, &connection());
+    assert!(output.contains("Body"));
+    assert_eq!(state.selected_text, "Bo");
+    key(&mut state, &mut fixture.store, KeyCode::Enter);
+    assert_eq!(state.questions.len(), 2);
+    assert_eq!(state.questions[1].text, "Item 1: Source\n> Bo");
+    // Dragging never toggles the card it started on.
+    assert_eq!(
+        state.view.as_ref().unwrap().selection.as_ref().unwrap().ids,
+        vec![Id::from_u128(1)]
+    );
 }

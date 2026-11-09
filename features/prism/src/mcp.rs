@@ -1,5 +1,7 @@
 //! Native stdio MCP tools. Routing identity comes exclusively from Codex metadata.
-use crate::bridge::{ActionParams, BridgeClient, InspectParams, Operation, QuestionParams};
+use crate::bridge::{
+    ActionParams, AnswerParams, BridgeClient, InspectParams, Operation, QuestionParams,
+};
 use crate::model::{Id, MAX_PAYLOAD_BYTES};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -26,7 +28,7 @@ pub fn tools() -> Value {
         &["id", "title", "body", "kind", "source"],
     );
     let relation = object(
-        json!({"id":id_schema(),"from":id_schema(),"to":id_schema(),"label":{"type":"string","maxLength":512},"direction":{"enum":["directed","undirected","bidirectional"]}}),
+        json!({"id":id_schema(),"from":id_schema(),"to":id_schema(),"label":{"type":"string","maxLength":512},"direction":{"enum":["directed","undirected","bidirectional"]},"manual":{"type":"boolean","description":"A manual or review step; diagrams draw it dashed."}}),
         &["id", "from", "to", "label", "direction"],
     );
     let group = object(
@@ -37,7 +39,8 @@ pub fn tools() -> Value {
         {"name":"prism_publish","description":"Publish or revise requested visual content and open Prism beside this registered Codex conversation. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Retrying the same request ID requires the identical payload.","inputSchema":object(json!({"request_id":id_schema(),"document_id":optional_id(),"expected_revision":{"type":["integer","null"],"minimum":0},"title":{"type":"string","maxLength":512},"elements":{"type":"array","items":element,"maxItems":2000},"relationships":{"type":"array","items":relation,"maxItems":4000},"groups":{"type":"array","items":group,"maxItems":500}}), &["request_id","document_id","expected_revision","title","elements","relationships","groups"])},
         {"name":"prism_inspect","description":"Inspect published Prism content in this exact conversation. Omit document_id to list at most 100 document summaries; repeat with returned next_cursor until null. Private view selections and drafts are never returned.","inputSchema":object(json!({"document_id":optional_id(),"cursor":optional_id()}), &[])},
         {"name":"prism_action","description":"Apply explicitly requested acceptance or archive to shared content IDs at the expected revision. Acceptance is content feedback, never permission to implement or run tools.","inputSchema":object(json!({"document_id":id_schema(),"expected_revision":{"type":"integer","minimum":0},"action":object(json!({"action":{"enum":["accept","archive"]},"ids":{"type":"array","items":id_schema(),"minItems":1,"maxItems":6500,"uniqueItems":true}}), &["action","ids"])}), &["document_id","expected_revision","action"])},
-        {"name":"prism_questions","description":"Retrieve questions the user explicitly shared from Prism into this conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this CLI, then publish requested visual revisions. This never reads private drafts.","inputSchema":object(json!({"request_id":optional_id(),"cursor":optional_id()}), &[])}
+        {"name":"prism_questions","description":"Retrieve questions the user explicitly shared from Prism into this conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this CLI, then publish requested visual revisions. This never reads private drafts.","inputSchema":object(json!({"request_id":optional_id(),"cursor":optional_id()}), &[])},
+        {"name":"prism_answer","description":"Record the reply you gave in this conversation to a Prism question, so Prism shows it beside the item. Use the request ID from the [prism:<id>] marker in the prompt. Record only after answering; a later call replaces the recorded text.","inputSchema":object(json!({"request_id":id_schema(),"text":{"type":"string","maxLength":65536}}), &["request_id","text"])}
     ]})
 }
 
@@ -78,6 +81,7 @@ pub fn operation(name: &str, arguments: Value) -> Result<Operation> {
         "prism_inspect" => &["document_id", "cursor"],
         "prism_action" => &["document_id", "expected_revision", "action"],
         "prism_questions" => &["request_id", "cursor"],
+        "prism_answer" => &["request_id", "text"],
         _ => bail!("unknown Prism tool"),
     };
     let arguments = if arguments.is_null() {
@@ -99,6 +103,7 @@ pub fn operation(name: &str, arguments: Value) -> Result<Operation> {
         "prism_questions" => {
             Operation::Questions(serde_json::from_value::<QuestionParams>(arguments)?)
         }
+        "prism_answer" => Operation::Answer(serde_json::from_value::<AnswerParams>(arguments)?),
         _ => unreachable!("tool name validated"),
     })
 }
