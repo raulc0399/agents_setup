@@ -96,6 +96,11 @@ pub struct UiState {
     /// Image-protocol diagram; None keeps the text diagram.
     graph: Option<graph::GraphView>,
     graph_area: Rect,
+    /// Where this frame and the previous one drew an image; a change needs a full repaint
+    /// because the terminal keeps image pixels under cells the diff leaves untouched.
+    image_area: Option<Rect>,
+    previous_image_area: Option<Rect>,
+    force_redraw: bool,
 }
 
 impl UiState {
@@ -139,6 +144,9 @@ impl UiState {
             selected_text: String::new(),
             graph: None,
             graph_area: Rect::default(),
+            image_area: None,
+            previous_image_area: None,
+            force_redraw: false,
         };
         state.refresh(store)?;
         Ok(state)
@@ -388,6 +396,15 @@ impl UiState {
 
     pub fn set_graph(&mut self, graph: Option<graph::GraphView>) {
         self.graph = graph;
+    }
+
+    /// True once after a frame whose image area differs from the previous frame's, or after
+    /// Ctrl-L: the caller clears the terminal and draws again.
+    pub fn take_redraw(&mut self) -> bool {
+        let moved =
+            self.previous_image_area.is_some() && self.previous_image_area != self.image_area;
+        self.previous_image_area = self.image_area;
+        std::mem::take(&mut self.force_redraw) || moved
     }
 
     fn graph_active(&self) -> bool {
@@ -956,6 +973,12 @@ impl UiState {
                 KeyCode::Char('t') => self.duplicate_view(store)?,
                 KeyCode::Char('w') => self.close_view()?,
                 KeyCode::Char('r') => self.reopen_view()?,
+                KeyCode::Char('l') => {
+                    self.force_redraw = true;
+                    if let Some(graph) = self.graph.as_mut() {
+                        graph.invalidate();
+                    }
+                }
                 // Legacy terminal key mode encodes Ctrl-\ as 0x1C, which crossterm reports as Ctrl-4.
                 KeyCode::Char('\\') | KeyCode::Char('4') => self.toggle_split(store)?,
                 _ => return Ok(false),
@@ -1201,6 +1224,7 @@ impl UiState {
     }
 
     pub fn render(&mut self, frame: &mut Frame, connection: &ConnectionInfo) {
+        self.image_area = None;
         let area = frame.area();
         let tabs_height = u16::from(self.layout.tabs.len() > 1);
         let editor_height = match self.input_mode {
@@ -1431,10 +1455,9 @@ impl UiState {
             .unwrap_or_default();
         graph.prepare(document, view, (inner.width, inner.height));
         let title = format!(
-            "Diagram · {} boxes · zoom {:.1}x · {} · + - 0 · s export",
+            "Diagram · {} boxes · zoom {:.1}x · + - 0 · s export",
             graph.layout().node_count(),
-            graph.zoom,
-            graph.protocol_name()
+            graph.zoom
         );
         frame.render_widget(block.title(title), chunks[0]);
         if graph.layout().is_empty() {
@@ -1448,6 +1471,7 @@ impl UiState {
             );
         } else {
             graph.render(frame, inner, document, view, focus, &selected);
+            self.image_area = Some(inner);
         }
         if let Some(row) = focused
             && panel_height > 0
@@ -2253,6 +2277,7 @@ const HELP_SECTIONS: &[(&str, &[&str])] = &[
             "Wheel: pan · Shift-wheel: sideways · Ctrl-wheel: zoom",
             "Shift-arrows: pan",
             "s: export SVG to .prism/export",
+            "Ctrl-L: repaint (after tmux redraws over the image)",
             "Alt-arrows: move card (text diagram only)",
         ],
     ),
@@ -2309,18 +2334,81 @@ impl<F: FnMut() -> ConnectionInfo> ConnectionProbe<F> {
     }
 }
 
-/// Graphic diagrams need an image protocol; half-block rendering stays on the text diagram.
-/// `PRISM_TEXT_DIAGRAM` forces the text diagram.
+/// How long the event loop gets to leave on its own after a termination signal.
+const EXIT_GRACE: Duration = Duration::from_millis(500);
+const EXIT_WATCH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// When the pane closes, reading the dead terminal can spin inside the input library and
+/// never return to the loop that checks the signal flag. The watchdog ends the process so a
+/// closed pane never leaves a UI running.
+fn spawn_exit_watchdog(interrupted: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while !interrupted.load(Ordering::Relaxed) {
+            std::thread::sleep(EXIT_WATCH_INTERVAL);
+        }
+        std::thread::sleep(EXIT_GRACE);
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        ratatui::restore();
+        std::process::exit(0);
+    });
+}
+
+/// Terminals known to draw iTerm2 inline images, matched against the outer terminal name.
+const IMAGE_TERMINALS: [&str; 2] = ["iTerm", "WezTerm"];
+/// Raster resolution per cell when the terminal reports no pixel size (common inside tmux).
+const DEFAULT_CELL_PIXELS: (u16, u16) = (10, 20);
+
+/// The terminal Prism is ultimately drawn by: tmux knows its client's type; otherwise the
+/// terminal announces itself through the environment. Nothing is queried over stdio.
+fn outer_terminal(tmux: bool) -> String {
+    if tmux {
+        return std::process::Command::new("tmux")
+            .args(["display-message", "-p", "#{client_termtype}"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+            .unwrap_or_default();
+    }
+    ["TERM_PROGRAM", "LC_TERMINAL"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `PRISM_CELL_PIXELS=WxH` wins, then the terminal's reported pixel size, then a default.
+fn cell_pixels() -> (u16, u16) {
+    let configured = std::env::var("PRISM_CELL_PIXELS").ok().and_then(|value| {
+        let (width, height) = value.split_once('x')?;
+        Some((width.parse().ok()?, height.parse().ok()?))
+    });
+    let reported = crossterm::terminal::window_size().ok().and_then(|size| {
+        (size.width > 0 && size.height > 0 && size.columns > 0 && size.rows > 0)
+            .then(|| (size.width / size.columns, size.height / size.rows))
+    });
+    configured
+        .or(reported)
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .unwrap_or(DEFAULT_CELL_PIXELS)
+}
+
+/// Graphic diagrams need a terminal that draws inline images; `PRISM_TEXT_DIAGRAM` forces
+/// the text diagram.
 fn graph_view() -> Option<graph::GraphView> {
-    use ratatui_image::picker::{Picker, ProtocolType};
     if std::env::var_os("PRISM_TEXT_DIAGRAM").is_some() {
         return None;
     }
-    let picker = Picker::from_query_stdio().ok()?;
-    if picker.protocol_type() == ProtocolType::Halfblocks {
+    let tmux = std::env::var_os("TMUX").is_some_and(|value| !value.is_empty());
+    let terminal = outer_terminal(tmux);
+    if !IMAGE_TERMINALS.iter().any(|name| terminal.contains(name)) {
         return None;
     }
-    Some(graph::GraphView::new(picker, graph::load_fonts()?))
+    Some(graph::GraphView::new(
+        tmux,
+        cell_pixels(),
+        graph::load_fonts()?,
+    ))
 }
 
 /// Control-key presses carry the explicit actions (Share) that must see a current binding.
@@ -2334,7 +2422,6 @@ pub fn run(
     status: impl FnMut() -> ConnectionInfo,
 ) -> Result<()> {
     let mut state = UiState::new(&mut store, workspace)?;
-    // The terminal query must run before raw mode and the alternate screen take over stdio.
     state.set_graph(graph_view());
     let interrupted = Arc::new(AtomicBool::new(false));
     let mut guard = TerminalGuard {
@@ -2357,6 +2444,7 @@ pub fn run(
         previous_hook(information);
     }));
     execute!(io::stdout(), EnableMouseCapture)?;
+    spawn_exit_watchdog(Arc::clone(&interrupted));
     let mut probe = ConnectionProbe::new(status);
     let mut refreshed = Instant::now();
     while !interrupted.load(Ordering::Relaxed) {
@@ -2368,6 +2456,10 @@ pub fn run(
             refreshed = Instant::now();
         }
         terminal.draw(|frame| state.render(frame, &connection))?;
+        if state.take_redraw() {
+            terminal.clear()?;
+            terminal.draw(|frame| state.render(frame, &connection))?;
+        }
         if event::poll(EVENT_WAIT)? {
             let event = event::read()?;
             // Refresh the binding immediately before explicit actions, not just before drawing.

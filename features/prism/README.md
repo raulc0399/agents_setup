@@ -128,21 +128,25 @@ exposure control; another process running as your user can read local files.
 
 ## Diagrams
 
-`v` switches a view between list and diagram. In iTerm2, WezTerm, Kitty,
-Ghostty and other terminals with an image protocol, the diagram is drawn as an
-image: groups become lanes, elements boxes with a bold name and a short subtitle,
-relationships arrows with numbered label pills, `manual: true` relationships
-dashed, and a finding or question linked to exactly one box an amber gate badge
-on that box. Zoom 1 fits the whole diagram; `+`, `-` and `0` or Ctrl-wheel zoom,
-the wheel and Shift-arrows pan, and boxes show their full text when zoomed in.
-Clicking a box, arrow, pill or badge focuses it; the panel below shows its text
-with the same pills, and a drag there selects text for **ask**. `s` writes the
-diagram as `.prism/export/<title>.svg`.
+`v` switches a view between list and diagram. In iTerm2 and WezTerm the diagram
+is drawn as an image (iTerm2 inline image protocol): groups become lanes,
+elements boxes with a bold name and a short subtitle, relationships arrows with
+numbered label pills, `manual: true` relationships dashed, and a finding or
+question linked to exactly one box an amber gate badge on that box. Zoom 1 fits
+the whole diagram; `+`, `-` and `0` or Ctrl-wheel zoom, the wheel and
+Shift-arrows pan, and boxes show their full text when zoomed in. Clicking a box,
+arrow, pill or badge focuses it; the panel below shows its text with the same
+pills, and a drag there selects text for **ask**. `s` writes the diagram as
+`.prism/export/<title>.svg`.
 
-Inside tmux the image needs `allow-passthrough`, which Prism enables on the pane
-it creates; tmux 3.3a passes iTerm2 images but drops Sixel, so Windows Terminal
-needs a tmux 3.4 Sixel build. Without an image protocol, or with
-`PRISM_TEXT_DIAGRAM=1`, the text diagram (cards in three lanes) is used.
+Prism detects the terminal from tmux's client type or `TERM_PROGRAM`; it never
+queries the terminal over stdio. The image is sized in cells, so the real font
+size is not needed; `PRISM_CELL_PIXELS=WxH` changes the raster resolution per
+cell (default 10x20 when the terminal reports no pixel size). Inside tmux the
+image needs `allow-passthrough`, which Prism enables on the pane it creates.
+tmux does not know about the image: after tmux repaints the pane, press `Ctrl-L`.
+In other terminals, or with `PRISM_TEXT_DIAGRAM=1`, the text diagram (cards in
+three lanes) is used; Kitty and Sixel output are not implemented.
 
 ## Controls
 
@@ -158,7 +162,7 @@ needs a tmux 3.4 Sixel build. Without an image protocol, or with
 | `v` | Switch list/diagram |
 | `+` / `-` / `0`, Ctrl-wheel | Zoom diagram in, out, fit |
 | Wheel, Shift-wheel, `Shift` + arrows | Pan diagram |
-| `s` | Export the diagram as SVG |
+| `s` / `Ctrl-L` | Export the diagram as SVG / repaint the screen |
 | `Alt` + arrows | Move focused card (text diagram only) |
 | `Tab` / `Shift-Tab` | Change view tab |
 | `Ctrl-T` / `Ctrl-W` / `Ctrl-R` | Duplicate view / close tab / reopen closed tab (at the view limit it swaps with the active tab) |
@@ -185,8 +189,9 @@ content. Do not share binding files or runtime logs as public diagnostics.
 Schema 2 adds private UI arrangement with an in-place transactional migration
 from schema 1; content, questions and views are preserved. Unknown newer schemas
 are refused. Stop live Prism processes before copying `.prism/` for a backup;
-include SQLite's WAL/SHM files if copying a live database. Keep `.prism/` out of
-version control.
+include SQLite's WAL/SHM files if copying a live database. Prism writes
+`.prism/.gitignore` containing `*`, so the directory stays out of version
+control in every project; an existing file there is never overwritten.
 
 Closing the native connection retires the binding and releases the Prism pane;
 the attached CLI is never terminated. Codex attachment follows its MCP process

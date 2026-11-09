@@ -106,6 +106,17 @@ fn credentials_are_private_atomic_and_bound_to_the_canonical_project() {
 }
 
 #[test]
+fn runtime_directory_ignores_itself_in_git_and_keeps_a_user_file() {
+    let project = TempDir::new().unwrap();
+    RuntimeDirectory::create(project.path()).unwrap();
+    let ignore = project.path().join(".prism/.gitignore");
+    assert_eq!(fs::read_to_string(&ignore).unwrap(), "*\n");
+    fs::write(&ignore, "*\n!export/\n").unwrap();
+    RuntimeDirectory::create(project.path()).unwrap();
+    assert_eq!(fs::read_to_string(&ignore).unwrap(), "*\n!export/\n");
+}
+
+#[test]
 fn runtime_rejects_symlinks_and_shared_permissions() {
     let project = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();

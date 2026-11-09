@@ -91,30 +91,27 @@ async function deliverQuestions($) {
   if (!bindings.get(sessionId) && !await $.env.get('PRISM_BINDING_FILE')) {
     return;
   }
-  const listed = await callBridge($, sessionId, 'questions', {});
-  if (listed.error !== undefined) {
+  // The poll never re-attaches: only an explicit tool call or /prism does.
+  const pending = await callBridge($, sessionId, 'pending', {}, true);
+  if (pending.error !== undefined) {
     return;
   }
-  for (const summary of listed.response.data.questions) {
-    if (summary.outcome.state !== 'pending' || filledQuestions.has(summary.request_id)) {
+  for (const question of pending.response.data.questions) {
+    if (filledQuestions.has(question.request_id)) {
       continue;
     }
-    const fetched = await callBridge($, sessionId, 'questions', {request_id: summary.request_id});
-    if (fetched.error !== undefined) {
-      continue;
-    }
-    const filled = await $.prompt.fill({text: fetched.response.data.text + ' [prism:' + summary.request_id + ']\n', mode: 'append'});
+    const filled = await $.prompt.fill({text: question.text + ' [prism:' + question.request_id + ']\n', mode: 'append'});
     if (!filled.isFilled) {
       continue;
     }
-    filledQuestions.add(summary.request_id);
-    await callBridge($, sessionId, 'lifecycle', {event: 'prompt_filled', request_id: summary.request_id});
+    filledQuestions.add(question.request_id);
+    await callBridge($, sessionId, 'lifecycle', {event: 'prompt_filled', request_id: question.request_id}, true);
   }
 }
 
 // Resolves to {response} on HTTP 200 or {error} otherwise. Never includes the binding path or token.
 // The bridge bounds its own response size and answers 413 with an {error} body.
-async function callBridge($, sessionId, method, params) {
+async function callBridge($, sessionId, method, params, isRetry = false) {
   const instruction = INSTRUCTION.replace('<sessionId>', sessionId);
   let bindingPath = await $.env.get('PRISM_BINDING_FILE') || bindings.get(sessionId);
   if (!bindingPath && method !== 'lifecycle') {
@@ -136,6 +133,11 @@ async function callBridge($, sessionId, method, params) {
     binding = JSON.parse(await $.fs.read(bindingPath));
   } catch {
     return {error: instruction};
+  }
+  if (binding.retired && bindings.get(sessionId) === bindingPath && method !== 'lifecycle' && !isRetry) {
+    // The bridge of this conversation ended; forget its binding and attach once more.
+    bindings.delete(sessionId);
+    return callBridge($, sessionId, method, params, true);
   }
   if (binding.retired || binding.agent !== 'claude' || typeof binding.token !== 'string') {
     return {error: instruction};

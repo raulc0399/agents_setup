@@ -128,7 +128,7 @@ fn authentication_precedes_binding_and_retirement() {
 #[test]
 fn operations_preserve_replay_and_expose_only_explicit_shares() {
     use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
-    use prism::bridge::{AnswerParams, QuestionParams, apply_operation};
+    use prism::bridge::{AnswerParams, PendingParams, QuestionParams, apply_operation};
     use prism::model::{DeliveryMode, ElementKind, Id, Selection, ViewKind, ViewState};
     use prism::store::Store;
     use std::collections::{BTreeMap, BTreeSet};
@@ -264,6 +264,19 @@ fn operations_preserve_replay_and_expose_only_explicit_shares() {
         result["snapshot"]["elements"]
             .get(request.elements[0].id.to_string())
             .is_some()
+    );
+    // The mod's poll sees only shared questions still waiting for the prompt box.
+    let pending = apply_operation(
+        &mut store,
+        &fixture.binding,
+        Operation::Pending(PendingParams {}),
+    )
+    .unwrap();
+    assert_eq!(pending["questions"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["questions"][0]["text"], "explicitly-shared");
+    assert_eq!(
+        pending["questions"][0]["request_id"],
+        shared.request_id.to_string()
     );
     // Only explicitly shared questions take an answer; it is stored beside the question.
     assert!(

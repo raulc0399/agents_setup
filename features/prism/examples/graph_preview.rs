@@ -153,8 +153,8 @@ fn main() {
         let scale = if name == "fit" { fit } else { 1.2 };
         let svg = layout.svg(Some(Id::from_u128(6)), &BTreeSet::from([Id::from_u128(4)]));
         std::fs::write(format!("{out}/{name}.svg"), &svg).unwrap();
-        let image = rasterize(&svg, w, h, scale, (0.0, 0.0), &fonts).unwrap();
-        image.save(format!("{out}/{name}.png")).unwrap();
+        let png = rasterize(&svg, w, h, scale, (0.0, 0.0), &fonts).unwrap();
+        std::fs::write(format!("{out}/{name}.png"), png).unwrap();
         println!(
             "{name}: bounds {}x{} scale {scale:.2} detail {:?} zoom {zoom}",
             b.width, b.height, layout.detail

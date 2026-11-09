@@ -2,8 +2,10 @@
 //! and rasterized for terminals with an image protocol. The same geometry answers clicks.
 use crate::model::{Direction, Document, ElementKind, Id, ViewState};
 use crate::ui::list;
+use ratatui::buffer::CellDiffOption;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
 pub const BOX_WIDTH: f32 = 220.0;
@@ -768,7 +770,7 @@ pub fn load_fonts() -> Option<Arc<fontdb::Database>> {
     Some(Arc::new(database))
 }
 
-/// Rasterizes the world-unit SVG at `scale` with the top-left corner at `pan`.
+/// Rasterizes the world-unit SVG at `scale` with the top-left corner at `pan`, as PNG.
 pub fn rasterize(
     svg: &str,
     width: u32,
@@ -776,7 +778,7 @@ pub fn rasterize(
     scale: f32,
     pan: (f32, f32),
     fonts: &Arc<fontdb::Database>,
-) -> Option<image::DynamicImage> {
+) -> Option<Vec<u8>> {
     let options = usvg::Options {
         fontdb: Arc::clone(fonts),
         font_family: "sans-serif".to_owned(),
@@ -788,9 +790,105 @@ pub fn rasterize(
     let transform = tiny_skia::Transform::from_scale(scale, scale)
         .post_translate(-pan.0 * scale, -pan.1 * scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
-    let (width, height) = (pixmap.width(), pixmap.height());
-    image::RgbaImage::from_raw(width, height, pixmap.take_demultiplied())
-        .map(image::DynamicImage::ImageRgba8)
+    pixmap.encode_png().ok()
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let group = u32::from(chunk[0]) << 16
+            | u32::from(*chunk.get(1).unwrap_or(&0)) << 8
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let sextet = (group >> (18 - 6 * index)) & 0x3f;
+                encoded.push(BASE64_ALPHABET[sextet as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
+}
+
+/// Where the image escape draws. A tmux passthrough reaches the terminal at its real cursor,
+/// which follows the active pane rather than the pane that wrote it, so inside tmux the
+/// escape carries the absolute screen cell (1-based) and restores the cursor afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    AtCursor,
+    TmuxScreen { column: u16, row: u16 },
+}
+
+/// The pane's top-left cell on the terminal screen (0-based), from tmux's own layout.
+fn tmux_pane_origin() -> Option<(u16, u16)> {
+    let pane = std::env::var("TMUX_PANE").ok()?;
+    let output = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &pane,
+            "#{pane_left} #{pane_top} #{status} #{status-position}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    pane_origin(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A status line at the top pushes every pane down by its height.
+fn pane_origin(fields: &str) -> Option<(u16, u16)> {
+    let mut fields = fields.split_whitespace();
+    let left: u16 = fields.next()?.parse().ok()?;
+    let top: u16 = fields.next()?.parse().ok()?;
+    let status = fields.next()?;
+    let status_lines = match status {
+        "off" => 0,
+        "on" => 1,
+        lines => lines.parse().ok()?,
+    };
+    let offset = if fields.next()? == "top" {
+        status_lines
+    } else {
+        0
+    };
+    Some((left, top + offset))
+}
+
+/// iTerm2 inline image sized in cells and stretched to exactly that area, so placement and
+/// click mapping never depend on the terminal's real font size. The area is erased first so
+/// an earlier image cannot show through.
+fn inline_image(png: &[u8], cells: (u16, u16), placement: Placement) -> String {
+    let (start, escape, end) = match placement {
+        Placement::TmuxScreen { .. } => ("\x1bPtmux;", "\x1b\x1b", "\x1b\\"),
+        Placement::AtCursor => ("", "\x1b", ""),
+    };
+    let (columns, rows) = cells;
+    let mut sequence = String::from(start);
+    if let Placement::TmuxScreen { column, row } = placement {
+        let _ = write!(sequence, "{escape}7{escape}[{row};{column}H");
+    }
+    for _ in 0..rows {
+        let _ = write!(sequence, "{escape}[{columns}X{escape}[1B");
+    }
+    let _ = write!(sequence, "{escape}[{rows}A");
+    let _ = write!(
+        sequence,
+        "{escape}]1337;File=inline=1;size={};width={columns};height={rows};preserveAspectRatio=0;doNotMoveCursor=1:",
+        png.len()
+    );
+    sequence.push_str(&base64(png));
+    sequence.push('\x07');
+    if let Placement::TmuxScreen { .. } = placement {
+        let _ = write!(sequence, "{escape}8");
+    }
+    sequence.push_str(end);
+    sequence
 }
 
 #[cfg(test)]
@@ -804,6 +902,41 @@ mod tests {
     }
 
     #[test]
+    fn base64_pads_short_groups() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn inline_image_is_sized_in_cells_and_wrapped_for_tmux() {
+        let plain = inline_image(b"png", (78, 40), Placement::AtCursor);
+        assert!(
+            plain.contains("]1337;File=inline=1;size=3;width=78;height=40;preserveAspectRatio=0")
+        );
+        assert!(plain.ends_with("cG5n\x07"));
+        let wrapped = inline_image(
+            b"png",
+            (78, 40),
+            Placement::TmuxScreen { column: 99, row: 3 },
+        );
+        // Saved cursor, absolute position, image, restored cursor, all inside the passthrough.
+        assert!(wrapped.starts_with("\x1bPtmux;\x1b\x1b7\x1b\x1b[3;99H"));
+        assert!(wrapped.ends_with("\x07\x1b\x1b8\x1b\\"));
+        assert!(wrapped.contains("\x1b\x1b]1337;"));
+    }
+
+    #[test]
+    fn pane_origin_accounts_for_a_top_status_line() {
+        assert_eq!(pane_origin("97 0 on bottom"), Some((97, 0)));
+        assert_eq!(pane_origin("97 0 on top"), Some((97, 1)));
+        assert_eq!(pane_origin("0 5 2 top"), Some((0, 7)));
+        assert_eq!(pane_origin("0 5 off top"), Some((0, 5)));
+        assert_eq!(pane_origin("garbage"), None);
+    }
+
+    #[test]
     fn segment_distance_measures_to_the_closest_point() {
         assert_eq!(segment_distance((0.0, 0.0), (10.0, 0.0), (5.0, 3.0)), 3.0);
         assert_eq!(segment_distance((0.0, 0.0), (10.0, 0.0), (14.0, 0.0)), 4.0);
@@ -812,14 +945,20 @@ mod tests {
 
 /// Viewport state and image cache for one diagram pane. Zoom 1 fits the whole diagram.
 pub struct GraphView {
-    picker: ratatui_image::picker::Picker,
+    /// Inside tmux the image escape travels in a passthrough wrapper.
+    tmux: bool,
+    /// Pixels rasterized per terminal cell. The image is sized in cells, so this only sets
+    /// resolution and aspect; it need not match the real font.
+    cell: (u16, u16),
+    /// The pane's screen position, read from tmux when the pane size changes or on repaint.
+    origin: Option<(u16, u16)>,
     fonts: Arc<fontdb::Database>,
     pub zoom: f32,
     pub pan: (f32, f32),
     cells: (u16, u16),
     scale: f32,
     layout: GraphLayout,
-    cache: Option<(CacheKey, ratatui_image::protocol::Protocol)>,
+    cache: Option<(CacheKey, String)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -834,6 +973,8 @@ struct CacheKey {
     selected: Vec<Id>,
     nodes: usize,
     edges: usize,
+    origin: Option<(u16, u16)>,
+    area: (u16, u16),
 }
 
 /// A tiny diagram is not blown up beyond this many pixels per world unit when fitting.
@@ -841,9 +982,11 @@ const MAX_FIT_SCALE: f32 = 1.5;
 const WHEEL_ZOOM_STEP: f32 = 1.25;
 
 impl GraphView {
-    pub fn new(picker: ratatui_image::picker::Picker, fonts: Arc<fontdb::Database>) -> Self {
+    pub fn new(tmux: bool, cell: (u16, u16), fonts: Arc<fontdb::Database>) -> Self {
         Self {
-            picker,
+            tmux,
+            cell: (cell.0.max(1), cell.1.max(1)),
+            origin: None,
             fonts,
             zoom: 1.0,
             pan: (0.0, 0.0),
@@ -851,16 +994,6 @@ impl GraphView {
             scale: 1.0,
             layout: GraphLayout::default(),
             cache: None,
-        }
-    }
-
-    pub fn protocol_name(&self) -> &'static str {
-        use ratatui_image::picker::ProtocolType;
-        match self.picker.protocol_type() {
-            ProtocolType::Halfblocks => "halfblocks",
-            ProtocolType::Sixel => "sixel",
-            ProtocolType::Kitty => "kitty",
-            ProtocolType::Iterm2 => "iterm2",
         }
     }
 
@@ -873,10 +1006,9 @@ impl GraphView {
     }
 
     fn pixels(&self) -> (f32, f32) {
-        let font = self.picker.font_size();
         (
-            f32::from(self.cells.0) * f32::from(font.width),
-            f32::from(self.cells.1) * f32::from(font.height),
+            f32::from(self.cells.0) * f32::from(self.cell.0),
+            f32::from(self.cells.1) * f32::from(self.cell.1),
         )
     }
 
@@ -893,7 +1025,11 @@ impl GraphView {
     /// Lays the diagram out for the current pane size and zoom: fitting uses the richest
     /// detail that still fits, zooming in adds detail as boxes grow.
     pub fn prepare(&mut self, document: &Document, view: &ViewState, cells: (u16, u16)) {
-        self.cells = (cells.0.max(1), cells.1.max(1));
+        let cells = (cells.0.max(1), cells.1.max(1));
+        if self.tmux && (self.origin.is_none() || cells != self.cells) {
+            self.origin = tmux_pane_origin();
+        }
+        self.cells = cells;
         let mut chosen = GraphLayout::new(document, view, Detail::Names);
         let mut fit = self.fit_scale(chosen.bounds);
         for detail in [Detail::Full, Detail::Subtitles] {
@@ -948,15 +1084,20 @@ impl GraphView {
         );
     }
 
+    /// Forgets the cached image and pane position; the next frame reads both again.
+    pub fn invalidate(&mut self) {
+        self.cache = None;
+        self.origin = None;
+    }
+
     pub fn reset_zoom(&mut self) {
         self.zoom = 1.0;
         self.pan = (0.0, 0.0);
     }
 
     pub fn pan_by_cells(&mut self, dx: i32, dy: i32) {
-        let font = self.picker.font_size();
-        self.pan.0 += dx as f32 * f32::from(font.width) / self.scale;
-        self.pan.1 += dy as f32 * f32::from(font.height) / self.scale;
+        self.pan.0 += dx as f32 * f32::from(self.cell.0) / self.scale;
+        self.pan.1 += dy as f32 * f32::from(self.cell.1) / self.scale;
         self.clamp_pan();
     }
 
@@ -982,10 +1123,9 @@ impl GraphView {
         if !inner.contains(ratatui::layout::Position::new(column, row)) {
             return None;
         }
-        let font = self.picker.font_size();
         let x =
-            (f32::from(column - inner.x) + 0.5) * f32::from(font.width) / self.scale + self.pan.0;
-        let y = (f32::from(row - inner.y) + 0.5) * f32::from(font.height) / self.scale + self.pan.1;
+            (f32::from(column - inner.x) + 0.5) * f32::from(self.cell.0) / self.scale + self.pan.0;
+        let y = (f32::from(row - inner.y) + 0.5) * f32::from(self.cell.1) / self.scale + self.pan.1;
         self.layout.hit(x, y)
     }
 
@@ -1015,11 +1155,13 @@ impl GraphView {
             selected: selected.iter().copied().collect(),
             nodes: self.layout.nodes.len(),
             edges: self.layout.edges.len(),
+            origin: self.origin,
+            area: (inner.x, inner.y),
         };
         if self.cache.as_ref().is_none_or(|(cached, _)| *cached != key) {
             let (width, height) = self.pixels();
             let svg = self.layout.svg(focus, selected);
-            let Some(image) = rasterize(
+            let Some(png) = rasterize(
                 &svg,
                 width as u32,
                 height as u32,
@@ -1029,17 +1171,36 @@ impl GraphView {
             ) else {
                 return;
             };
-            let Ok(protocol) = self.picker.new_protocol(
-                image,
-                ratatui::layout::Size::new(inner.width, inner.height),
-                ratatui_image::Resize::Fit(None),
-            ) else {
-                return;
+            let placement = match (self.tmux, self.origin) {
+                (false, _) => Placement::AtCursor,
+                (true, Some((left, top))) => Placement::TmuxScreen {
+                    column: left + inner.x + 1,
+                    row: top + inner.y + 1,
+                },
+                // Without the pane position the image would land in the active pane.
+                (true, None) => return,
             };
-            self.cache = Some((key, protocol));
+            self.cache = Some((
+                key,
+                inline_image(&png, (inner.width, inner.height), placement),
+            ));
         }
-        if let Some((_, protocol)) = &self.cache {
-            frame.render_widget(ratatui_image::Image::new(protocol), inner);
+        let Some((_, sequence)) = &self.cache else {
+            return;
+        };
+        // The first cell carries the whole escape; the rest are left alone so the diff
+        // never prints over the image.
+        let buffer = frame.buffer_mut();
+        for y in inner.top()..inner.bottom() {
+            for x in inner.left()..inner.right() {
+                let cell = &mut buffer[(x, y)];
+                if (x, y) == (inner.x, inner.y) {
+                    cell.set_symbol(sequence)
+                        .set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
+                } else {
+                    cell.set_diff_option(CellDiffOption::Skip);
+                }
+            }
         }
     }
 

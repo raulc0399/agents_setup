@@ -159,6 +159,7 @@ impl RuntimeDirectory {
         let project = project.canonicalize()?;
         let prism = project.join(".prism");
         create_private_directory(&prism)?;
+        ignore_in_git(&prism)?;
         let run = prism.join("run");
         create_private_directory(&run)?;
         let path = run.join(Uuid::new_v4().to_string());
@@ -208,6 +209,25 @@ pub fn remove_socket_directory(binding_path: &Path) -> io::Result<()> {
     }
     validate_private(&directory, true)?;
     fs::remove_dir_all(directory)
+}
+
+const GIT_IGNORE_FILE: &str = ".gitignore";
+const GIT_IGNORE_EVERYTHING: &[u8] = b"*\n";
+
+/// Keeps `.prism/` out of version control in every project without per-project setup. A
+/// file that already exists is left as the user wrote it.
+fn ignore_in_git(prism: &Path) -> io::Result<()> {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(prism.join(GIT_IGNORE_FILE))
+    {
+        Ok(mut file) => file.write_all(GIT_IGNORE_EVERYTHING),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
@@ -374,14 +394,25 @@ fn write_binding_locked(path: &Path, binding: &LiveBinding) -> io::Result<()> {
     result
 }
 
+/// A writer replaces the binding by rename, so a reader can open the old file an instant
+/// before it is unlinked. That descriptor has no links left; open the path again.
+const REPLACED_BINDING_RETRIES: usize = 8;
+
 pub fn read_binding(path: &Path) -> io::Result<LiveBinding> {
     let project = validate_binding_location(path)?;
-    validate_private(path, false)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    let metadata = file.metadata()?;
+    let mut attempts = 0;
+    let (file, metadata) = loop {
+        validate_private(path, false)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        attempts += 1;
+        if metadata.nlink() != 0 || attempts > REPLACED_BINDING_RETRIES {
+            break (file, metadata);
+        }
+    };
     // Recheck the opened descriptor, not only the pre-open path.
     if metadata.len() > MAX_BINDING_BYTES
         || metadata.mode() & 0o7777 != PRIVATE_FILE_MODE

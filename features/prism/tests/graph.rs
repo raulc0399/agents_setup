@@ -3,7 +3,6 @@ use prism::model::*;
 use prism::store::Store;
 use prism::ui::graph::{Detail, GraphLayout, GraphView, load_fonts};
 use ratatui::layout::Rect;
-use ratatui_image::picker::Picker;
 use std::collections::BTreeSet;
 
 const STEP_A: u128 = 1;
@@ -145,12 +144,11 @@ fn viewport_maps_cells_to_shapes_and_exports_svg() {
         return;
     };
     let (document, view) = fixture();
-    let mut graph = GraphView::new(Picker::halfblocks(), fonts);
+    let mut graph = GraphView::new(false, (10, 20), fonts);
     let inner = Rect::new(1, 1, 76, 38);
     graph.prepare(&document, &view, (inner.width, inner.height));
     // Zoom 1 fits the whole diagram, so a shape's center maps back to itself.
     let rect = graph.layout().rect_of(Id::from_u128(STEP_B)).unwrap();
-    let font = Picker::halfblocks().font_size();
     let mut found = None;
     for row in inner.y..inner.bottom() {
         for column in inner.x..inner.right() {
@@ -159,10 +157,7 @@ fn viewport_maps_cells_to_shapes_and_exports_svg() {
             }
         }
     }
-    assert!(
-        found.is_some(),
-        "box {rect:?} not reachable with font {font:?}"
-    );
+    assert!(found.is_some(), "box {rect:?} not reachable");
     assert_eq!(graph.hit(inner, 0, 0), None);
     graph.zoom_by(prism::ui::graph::ZOOM_STEP, Some(rect));
     assert!(graph.zoom > 1.0);

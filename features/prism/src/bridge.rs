@@ -56,8 +56,17 @@ pub enum Operation {
     Action(ActionParams),
     Questions(QuestionParams),
     Answer(AnswerParams),
+    /// Shared questions not yet placed in the CLI prompt box. The native mod polls this, so
+    /// unlike the tools it never opens the Prism pane.
+    Pending(PendingParams),
     Lifecycle(LifecycleEvent),
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingParams {}
+
+const PENDING_LIMIT: usize = 16;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -263,6 +272,19 @@ pub fn apply_operation(
         }
         Operation::Inspect(_) | Operation::Questions(_) => {
             bail!("cursor is only valid when listing summaries")
+        }
+        Operation::Pending(_) => {
+            let questions = store
+                .questions(workspace.id)?
+                .into_iter()
+                .filter(|question| {
+                    question.mode == DeliveryMode::Share
+                        && question.outcome == DeliveryOutcome::Pending
+                })
+                .take(PENDING_LIMIT)
+                .map(|question| json!({"request_id":question.request_id,"text":question.text}))
+                .collect::<Vec<_>>();
+            Ok(json!({"questions":questions}))
         }
         Operation::Answer(params) => {
             let question = store.question(workspace.id, params.request_id)?;
@@ -542,7 +564,11 @@ impl Service {
             self.observe_lifecycle(event)?;
             return Ok(json!({"data":{"retiring":true}}));
         }
+        let opens_pane = !matches!(call.operation, Operation::Pending(_));
         let data = apply_operation(&mut self.store, &binding, call.operation)?;
+        if !opens_pane {
+            return Ok(json!({"data":data}));
+        }
         // Publication is already committed. Pane failure must not roll it back or replay it.
         let pane = match tmux.ensure_ui(&mut binding, &self.binding_path, &self.executable) {
             Ok(pane) => json!({"id":pane.pane_id}),
