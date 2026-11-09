@@ -71,12 +71,7 @@ pub struct PublishResult {
     pub group_ids: Vec<Id>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum ContentAction {
-    Accept { ids: Vec<Id> },
-    Archive { ids: Vec<Id> },
-}
+pub use crate::model::ContentAction;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationResult {

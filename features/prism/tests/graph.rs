@@ -1,7 +1,7 @@
 use prism::actions::*;
 use prism::model::*;
 use prism::store::Store;
-use prism::ui::graph::{Detail, GraphLayout, GraphView, load_fonts};
+use prism::ui::graph::{Detail, GraphView, load_fonts, visible_layout};
 use ratatui::layout::Rect;
 use std::collections::BTreeSet;
 
@@ -78,63 +78,55 @@ fn fixture() -> (Document, ViewState) {
 }
 
 #[test]
-fn a_finding_attached_to_one_box_becomes_its_gate_badge() {
-    let (document, view) = fixture();
-    let layout = GraphLayout::new(&document, &view, Detail::Subtitles);
-    assert_eq!(layout.node_count(), 2);
+fn visible_layout_follows_the_list_filter() {
+    let (document, mut view) = fixture();
+    view.filter = "store".into();
+    let layout = visible_layout(&document, &view, Detail::Names);
+    assert!(layout.rect_of(Id::from_u128(STEP_B)).is_some());
+    assert_eq!(layout.rect_of(Id::from_u128(STEP_A)), None);
     assert_eq!(
-        layout.ids(),
-        vec![
-            Id::from_u128(STEP_A),
-            Id::from_u128(FINDING),
-            Id::from_u128(STEP_B),
-            Id::from_u128(FLOW)
-        ]
-    );
-    let node = layout.rect_of(Id::from_u128(STEP_A)).unwrap();
-    let gate = layout.rect_of(Id::from_u128(FINDING)).unwrap();
-    assert!(gate.y < node.y && gate.x + gate.width <= node.x + node.width + 8.0);
-    assert_eq!(
-        layout.hit(gate.x + gate.width / 2.0, gate.y + gate.height / 2.0),
-        Some(Id::from_u128(FINDING))
-    );
-    assert_eq!(
-        layout.hit(node.x + node.width / 2.0, node.y + node.height - 2.0),
-        Some(Id::from_u128(STEP_A))
-    );
-    assert_eq!(layout.hit(-50.0, -50.0), None);
-}
-
-#[test]
-fn arrows_are_numbered_dashed_when_manual_and_clickable_on_their_pill() {
-    let (document, view) = fixture();
-    let layout = GraphLayout::new(&document, &view, Detail::Names);
-    let svg = layout.svg(Some(Id::from_u128(FLOW)), &BTreeSet::new());
-    assert!(svg.contains("stroke-dasharray"));
-    assert!(svg.contains(">1 hands over<"));
-    assert!(svg.contains(">DEVICE<"));
-    assert!(
-        !svg.contains("blocks"),
-        "a gate link is drawn as a badge, not an arrow"
-    );
-    let pill = layout.rect_of(Id::from_u128(FLOW)).unwrap();
-    assert_eq!(
-        layout.hit(pill.x + pill.width / 2.0, pill.y + pill.height / 2.0),
-        Some(Id::from_u128(FLOW))
+        layout.rect_of(Id::from_u128(FLOW)),
+        None,
+        "the arrow matches the filter but one of its ends does not"
     );
 }
 
 #[test]
-fn full_detail_grows_boxes_with_their_text() {
-    let (document, view) = fixture();
-    let names = GraphLayout::new(&document, &view, Detail::Names);
-    let full = GraphLayout::new(&document, &view, Detail::Full);
-    assert!(full.bounds.height > names.bounds.height);
-    assert!(
-        full.svg(None, &BTreeSet::new())
-            .contains("Body text for the box")
-    );
-    assert!(!names.svg(None, &BTreeSet::new()).contains("Body text"));
+fn visible_layout_leaves_out_archived_content() {
+    let (mut document, view) = fixture();
+    document
+        .elements
+        .get_mut(&Id::from_u128(FINDING))
+        .unwrap()
+        .archived = true;
+    document
+        .relationships
+        .get_mut(&Id::from_u128(GATE_LINK))
+        .unwrap()
+        .archived = true;
+    let layout = visible_layout(&document, &view, Detail::Names);
+    assert_eq!(layout.rect_of(Id::from_u128(FINDING)), None);
+    assert!(layout.rect_of(Id::from_u128(STEP_A)).is_some());
+}
+
+#[test]
+fn visible_layout_drops_a_hidden_group_but_keeps_its_boxes() {
+    let (document, mut view) = fixture();
+    view.hidden.insert(Id::from_u128(LANE));
+    let layout = visible_layout(&document, &view, Detail::Names);
+    let svg = layout.svg(None, &BTreeSet::new());
+    assert!(!svg.contains(r#"data-kind="lane""#) && !svg.contains(">DEVICE<"));
+    assert!(layout.rect_of(Id::from_u128(STEP_A)).is_some());
+    assert!(layout.rect_of(Id::from_u128(STEP_B)).is_some());
+}
+
+#[test]
+fn visible_layout_drops_arrows_to_hidden_ends() {
+    let (document, mut view) = fixture();
+    view.hidden.insert(Id::from_u128(STEP_B));
+    let layout = visible_layout(&document, &view, Detail::Names);
+    assert_eq!(layout.rect_of(Id::from_u128(STEP_B)), None);
+    assert_eq!(layout.rect_of(Id::from_u128(FLOW)), None);
 }
 
 #[test]

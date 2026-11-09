@@ -2,7 +2,7 @@
 use prism::actions::*;
 use prism::model::*;
 use prism::store::Store;
-use prism::ui::graph::{Detail, GraphLayout, load_fonts, rasterize};
+use prism::ui::graph::{Detail, load_fonts, rasterize, visible_layout};
 use std::collections::BTreeSet;
 
 fn element(id: u128, title: &str, body: &str, kind: ElementKind) -> ElementInput {
@@ -147,7 +147,7 @@ fn main() {
     // A 78x40 cell pane at 8x17 px per cell.
     let (w, h) = (78 * 8, 40 * 17);
     for (name, detail, zoom) in [("fit", Detail::Names, 1.0f32), ("zoom", Detail::Full, 1.0)] {
-        let layout = GraphLayout::new(&document, &view, detail);
+        let layout = visible_layout(&document, &view, detail);
         let b = layout.bounds;
         let fit = (w as f32 / b.width).min(h as f32 / b.height).min(1.5);
         let scale = if name == "fit" { fit } else { 1.2 };

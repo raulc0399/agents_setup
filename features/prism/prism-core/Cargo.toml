@@ -1,0 +1,15 @@
+[package]
+name = "prism-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Portable Prism model, app protocol and diagram layout shared by the bridge and the desktop app"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hmac = "0.12"

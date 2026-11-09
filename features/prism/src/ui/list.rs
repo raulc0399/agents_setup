@@ -1,3 +1,4 @@
+pub use crate::model::single_line;
 use crate::model::{Direction, Document, ElementKind, Id, ViewState, terminal_safe};
 use crate::ui::theme;
 use ratatui::style::Color;
@@ -29,10 +30,6 @@ struct Record {
     details: String,
     revision: u64,
     accepted: Option<u64>,
-}
-
-pub fn single_line(text: &str) -> String {
-    terminal_safe(text).replace(['\n', '\t'], " ")
 }
 
 fn kind_label(kind: &ElementKind) -> (&'static str, Color) {

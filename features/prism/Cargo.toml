@@ -6,13 +6,25 @@ rust-version = "1.99"
 description = "A shared visual conversation workspace for coding CLIs"
 publish = false
 
-[dependencies]
+[workspace]
+members = ["prism-core"]
+default-members = [".", "prism-core"]
+
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 sha2 = "0.10"
+
+[dependencies]
+prism-core = { path = "prism-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
 libc = "0.2.191"
 ratatui = "0.30.2"
 crossterm = "0.29"
