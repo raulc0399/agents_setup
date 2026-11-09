@@ -30,7 +30,7 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 
 | Batch | State | Note |
 | --- | --- | --- |
-| 1 Gates | 1.1 passed, 1.3 Claude half passed, 1.2 open | 1.2 and the Codex half of 1.3 need the user's Mac / the Codex container |
+| 1 Gates | **[done]** 1.1, 1.2, 1.3 (Claude half) passed | the Codex half of 1.3 is for the Codex agent to confirm |
 
 Gate results (2026-11-09, from the `d_claude` container):
 
@@ -41,10 +41,10 @@ Gate results (2026-11-09, from the `d_claude` container):
   every resolved address (or IPv4 first). Windows Docker Desktop provides the same name.
   Plain Linux Docker needs `--add-host=host.docker.internal:host-gateway` and an app
   listener that is not bound to loopback only.
-- **1.2 open.** Tauri cannot be built in the container (no WebKitGTK, no root). On the Mac:
-  `npm create tauri-app@latest prism-probe -- --template vanilla --manager npm --yes &&
-  cd prism-probe && npm install && npm run tauri dev`. Passed when the window opens.
-  Batches 2 and 3 do not depend on it; batch 4 does.
+- **1.2 passed** (user's Mac, 2026-11-09). The Mac had neither Node nor Rust; after
+  installing rustup, `cargo install create-tauri-app tauri-cli --locked`,
+  `cargo create-tauri-app prism-probe --template vanilla --manager cargo --yes` and
+  `cargo tauri dev` opened the window. Consequence: Decision 7.
 - **1.3 Claude half passed.** `~/.claude` is a host mount (virtiofs); a file written to
   `~/.claude/prism/` in the container is visible there. `~/.codex` is not mounted in the
   Claude container (expected); the Codex half is for the Codex agent to confirm.
@@ -177,6 +177,8 @@ Batch 2 must land before 3, 4 and 5 start; 3 and 4 can then run in parallel.
 5. **Pairing file**: written to both `~/.claude/prism/app.json` and
    `~/.codex/prism/app.json`; `d_claude` mounts the first, `d_codex` the second.
 6. **Port**: 7717.
+7. **No Node** (2026-11-09): the frontend is plain HTML, CSS and JavaScript without a
+   bundler; the app is built with `cargo tauri build` only.
 
 ## Risks
 
