@@ -428,11 +428,13 @@ impl Link {
     }
 }
 
-/// Content last sent to the app: document revisions and question digests by ID.
+/// Content last sent to the app: document revisions and question digests by ID, and the
+/// closed documents.
 #[derive(Default)]
 struct Sent {
     documents: BTreeMap<Id, u64>,
     questions: BTreeMap<Id, Vec<u8>>,
+    closed: Vec<Id>,
 }
 
 struct Connection {
@@ -659,16 +661,21 @@ impl Connection {
         Ok(std::mem::replace(&mut self.data_version, version) != version)
     }
 
-    /// Documents and the questions shared for the CLI prompt box; other questions never cross.
-    fn content(&self) -> Result<(Vec<Document>, Vec<Question>)> {
+    /// Documents, the questions shared for the CLI prompt box (other questions never cross),
+    /// and the closed documents.
+    fn content(&self) -> Result<(Vec<Document>, Vec<Question>, Vec<Id>)> {
         let documents = self.store.documents(self.workspace)?;
         let questions = self.store.shared_questions(self.workspace)?;
-        Ok((documents, questions))
+        let closed = self.store.closed_documents(self.workspace)?;
+        Ok((documents, questions, closed))
     }
 
     fn send_snapshot(&mut self) -> Result<()> {
-        let (documents, questions) = self.content()?;
-        self.sent = Sent::default();
+        let (documents, questions, closed) = self.content()?;
+        self.sent = Sent {
+            closed: closed.clone(),
+            ..Sent::default()
+        };
         for document in &documents {
             self.sent.documents.insert(document.id, document.revision);
         }
@@ -677,14 +684,14 @@ impl Connection {
                 .questions
                 .insert(question.request_id, digest(question)?);
         }
-        for frame in protocol::snapshot_frames(documents, questions)? {
+        for frame in protocol::snapshot_frames(documents, questions, closed)? {
             send(&mut self.socket, &frame)?;
         }
         Ok(())
     }
 
     fn send_update(&mut self) -> Result<()> {
-        let (documents, questions) = self.content()?;
+        let (documents, questions, closed) = self.content()?;
         let mut changed_documents = Vec::new();
         for document in documents {
             if self.sent.documents.insert(document.id, document.revision) != Some(document.revision)
@@ -700,12 +707,15 @@ impl Connection {
                 changed_questions.push(question);
             }
         }
-        if changed_documents.is_empty() && changed_questions.is_empty() {
+        let closed_changed = self.sent.closed != closed;
+        if changed_documents.is_empty() && changed_questions.is_empty() && !closed_changed {
             return Ok(());
         }
+        self.sent.closed = closed.clone();
         // Snapshot framing packs the records under the message limit; each frame becomes one
-        // `update`, which the app applies by ID like any other.
-        for frame in protocol::snapshot_frames(changed_documents, changed_questions)? {
+        // `update`, which the app applies by ID like any other, and each carries the whole
+        // closed set.
+        for frame in protocol::snapshot_frames(changed_documents, changed_questions, Vec::new())? {
             if let BridgeMessage::Snapshot {
                 documents,
                 questions,
@@ -717,6 +727,7 @@ impl Connection {
                     &BridgeMessage::Update {
                         documents,
                         questions,
+                        closed: closed.clone(),
                     },
                 )?;
             }

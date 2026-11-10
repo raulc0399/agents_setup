@@ -189,12 +189,17 @@ pub fn apply_operation(
         Operation::Inspect(InspectParams {
             document_id: Some(id),
             cursor: None,
-        }) => Ok(serde_json::to_value(store.document(workspace.id, id)?)?),
+        }) => {
+            let mut document = serde_json::to_value(store.document(workspace.id, id)?)?;
+            document["closed"] = json!(store.is_closed(workspace.id, id)?);
+            Ok(document)
+        }
         Operation::Inspect(InspectParams {
             document_id: None,
             cursor,
         }) => {
             let documents = store.documents(workspace.id)?;
+            let closed = store.closed_documents(workspace.id)?;
             let total = documents.len();
             let mut page = documents
                 .into_iter()
@@ -208,7 +213,7 @@ pub fn apply_operation(
                 None
             };
             Ok(
-                json!({"documents":page.into_iter().map(|d| json!({"id":d.id,"title":d.title,"revision":d.revision})).collect::<Vec<_>>(), "total": total, "next_cursor":next_cursor}),
+                json!({"documents":page.into_iter().map(|d| json!({"id":d.id,"title":d.title,"revision":d.revision,"closed":closed.contains(&d.id)})).collect::<Vec<_>>(), "total": total, "next_cursor":next_cursor}),
             )
         }
         Operation::Action(params) => Ok(serde_json::to_value(store.apply(

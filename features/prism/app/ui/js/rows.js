@@ -161,3 +161,12 @@ export function typedQuestion(question) {
 export function sortedDocuments(documents) {
   return [...documents].sort((left, right) => left.title.localeCompare(right.title) || byId(left, right));
 }
+
+/**
+ * The open or the closed documents of a tab's content, in a stable order. Whether a document
+ * is closed is shared state from the store (`content.closed`), the same in every window.
+ */
+export function documentsOf(content, closed) {
+  const closedIds = new Set(content?.closed ?? []);
+  return sortedDocuments((content?.documents ?? []).filter((document) => closedIds.has(document.id) === closed));
+}

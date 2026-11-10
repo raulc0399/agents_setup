@@ -211,7 +211,7 @@ function status(overrides = {}) {
     problem: null,
     settings_file: '/Users/me/Library/Application Support/local.prism.desktop/settings.json',
     version: '0.1.0',
-    protocol: 1,
+    protocol: 2,
     ...overrides,
   };
 }
@@ -262,7 +262,7 @@ function arrangement(active, views = {}) {
 }
 
 export const VERSION_PROBLEM =
-  'A bridge speaks Prism protocol 2, this app protocol 1. This app is older: build and install the newer Prism app.';
+  'A bridge speaks Prism protocol 3, this app protocol 2. This app is older: build and install the newer Prism app.';
 
 export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW, NOTES, RELEASE, SYNC_ITEM, TABS_ITEM };
 export const RELEASE_IDS = { item: releaseItem, link: releaseLink, group: releaseGroup };
@@ -293,6 +293,8 @@ const LIST_VIEWS = {
   // A document without arrows or groups: a list without a view switch.
   plain: { document: REVIEW },
 };
+/** Scenarios whose live tab has two documents closed: the strip with its Closed (N) control. */
+const CLOSED_SCENARIOS = ['documents', 'closed-menu'];
 /** Scenarios whose live tab has no saved view state: each document opens as its content says. */
 const FRESH_VIEWS = ['view-checks'];
 
@@ -324,6 +326,10 @@ export function fixture(scenario) {
     state.arrangement.windows[1].tabs = [LIVE];
     state.arrangement.windows[1].active = LIVE;
     return { state, contents: CONTENTS };
+  }
+  if (CLOSED_SCENARIOS.includes(scenario)) {
+    const contents = { ...CONTENTS, [LIVE]: { ...CONTENTS[LIVE], closed: [NOTES, REVIEW] } };
+    return { state: { status: status(), sessions: SESSIONS, arrangement: arrangement(LIVE, { [LIVE]: { modes: LIST_MODES } }) }, contents };
   }
   const active = { ended: ENDED, disconnected: CODEX }[scenario] ?? LIVE;
   const views = FRESH_VIEWS.includes(scenario) ? {} : { [LIVE]: { modes: LIST_MODES, ...LIST_VIEWS[scenario] } };

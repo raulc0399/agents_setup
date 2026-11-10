@@ -19,6 +19,12 @@ pub struct Store {
 struct UndoRecord {
     before: Document,
     after: Document,
+    /// Closed state of the document before and after; records written before documents could
+    /// close have neither and change nothing here.
+    #[serde(default)]
+    before_closed: bool,
+    #[serde(default)]
+    after_closed: bool,
 }
 
 impl Store {
@@ -73,6 +79,18 @@ impl Store {
             )?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        // Added within schema 2: an older binary reads and writes `documents` only by explicit
+        // columns, so it neither sees nor clears `closed`, and its upsert keeps the value.
+        let has_closed: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('documents') WHERE name='closed')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_closed {
+            transaction.execute_batch(
+                "ALTER TABLE documents ADD COLUMN closed INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         transaction.commit()?;
         Ok(Self { connection })
     }
@@ -125,6 +143,23 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// IDs of the closed documents, in ID order.
+    pub fn closed_documents(&self, workspace: Id) -> Result<Vec<Id>> {
+        require_workspace(&self.connection, workspace)?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM documents WHERE workspace_id=?1 AND closed=1 ORDER BY id")?;
+        let rows = statement.query_map([workspace.to_string()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            Id::parse_str(&row?).map_err(|_| Error::Invalid("stored document ID is invalid".into()))
+        })
+        .collect()
+    }
+
+    pub fn is_closed(&self, workspace: Id, document: Id) -> Result<bool> {
+        read_closed(&self.connection, workspace, document)
+    }
+
     pub fn publish(&mut self, workspace: Id, request: &PublishRequest) -> Result<PublishResult> {
         let payload = serialized(request)?;
         let payload_hash = hash(&payload);
@@ -166,8 +201,17 @@ impl Store {
                         .into(),
                 )),
             };
+        let reopens = match request.document_id {
+            Some(id) => read_closed(&transaction, workspace, id)?,
+            None => false,
+        };
         let document = publish_into(document, request)?;
         write_document(&transaction, workspace, &document)?;
+        // The agent revising a closed document brings it back for everyone.
+        if reopens {
+            write_closed(&transaction, workspace, document.id, false)?;
+            consume_close_records(&transaction, workspace, document.id)?;
+        }
         let result = PublishResult {
             document_id: document.id,
             revision: document.revision,
@@ -195,13 +239,22 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let before = read_document(&transaction, workspace, document)?;
         check_revision(&before, expected_revision)?;
+        let before_closed = read_closed(&transaction, workspace, document)?;
+        let after_closed = closed_by(action).unwrap_or(before_closed);
+        if closed_by(action) == Some(before_closed) {
+            let state = if before_closed { "closed" } else { "open" };
+            return Err(Error::Invalid(format!("document is already {state}")));
+        }
         let mut after = before.clone();
         apply_action(&mut after, action)?;
         let undo_id = Id::new_v4();
         write_document(&transaction, workspace, &after)?;
+        write_closed(&transaction, workspace, document, after_closed)?;
         let record = serde_json::to_string(&UndoRecord {
             before,
             after: after.clone(),
+            before_closed,
+            after_closed,
         })?;
         transaction.execute(
             "INSERT INTO undo_records(workspace_id, document_id, id, content) VALUES(?1, ?2, ?3, ?4)",
@@ -262,6 +315,7 @@ impl Store {
         let record: UndoRecord = serde_json::from_str(
             &record.ok_or_else(|| Error::NotFound("available undo record".into()))?,
         )?;
+        let mut closed = read_closed(&transaction, workspace, document)?;
         let restored = restore_changed(
             &mut current.elements,
             &record.before.elements,
@@ -280,7 +334,8 @@ impl Store {
                 &record.before.groups,
                 &record.after.groups,
             )
-        });
+        })
+        .and_then(|()| restore_closed(&mut closed, &record));
         if let Err(Error::UndoConflict) = restored {
             // Later changes overwrote this record's effect; it can never apply, so discard it
             // instead of letting it block every later undo.
@@ -295,6 +350,7 @@ impl Store {
         current.revision += 1;
         validate_document(&current)?;
         write_document(&transaction, workspace, &current)?;
+        write_closed(&transaction, workspace, document, closed)?;
         transaction.execute(
             "UPDATE undo_records SET consumed=1 WHERE workspace_id=?1 AND id=?2",
             params![workspace.to_string(), undo_id.to_string()],
@@ -491,6 +547,25 @@ fn write_document(connection: &Connection, workspace: Id, document: &Document) -
     Ok(())
 }
 
+fn read_closed(connection: &Connection, workspace: Id, document: Id) -> Result<bool> {
+    let closed: Option<bool> = connection
+        .query_row(
+            "SELECT closed FROM documents WHERE workspace_id=?1 AND id=?2",
+            params![workspace.to_string(), document.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    closed.ok_or_else(|| Error::NotFound("document".into()))
+}
+
+fn write_closed(connection: &Connection, workspace: Id, document: Id, closed: bool) -> Result<()> {
+    connection.execute(
+        "UPDATE documents SET closed=?3 WHERE workspace_id=?1 AND id=?2",
+        params![workspace.to_string(), document.to_string(), closed],
+    )?;
+    Ok(())
+}
+
 fn read_question(connection: &Connection, workspace: Id, request: Id) -> Result<Question> {
     let content: Option<String> = connection
         .query_row(
@@ -502,6 +577,44 @@ fn read_question(connection: &Connection, workspace: Id, request: Id) -> Result<
     Ok(serde_json::from_str(
         &content.ok_or_else(|| Error::NotFound("question".into()))?,
     )?)
+}
+
+/// Publishing reopened the document, so no close can be undone any more: its records are
+/// consumed, and the next undo reaches the action before them.
+fn consume_close_records(connection: &Connection, workspace: Id, document: Id) -> Result<()> {
+    let records = {
+        let mut statement = connection.prepare(
+            "SELECT id, content FROM undo_records WHERE workspace_id=?1 AND document_id=?2 AND consumed=0",
+        )?;
+        let rows = statement.query_map(
+            params![workspace.to_string(), document.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, content) in records {
+        let record: UndoRecord = serde_json::from_str(&content)?;
+        if record.before_closed || !record.after_closed {
+            continue;
+        }
+        connection.execute(
+            "UPDATE undo_records SET consumed=1 WHERE workspace_id=?1 AND id=?2",
+            params![workspace.to_string(), id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Undoes a close or reopen, unless something since changed the closed state again.
+fn restore_closed(closed: &mut bool, record: &UndoRecord) -> Result<()> {
+    if record.before_closed == record.after_closed {
+        return Ok(());
+    }
+    if *closed != record.after_closed {
+        return Err(Error::UndoConflict);
+    }
+    *closed = record.before_closed;
+    Ok(())
 }
 
 fn restore_changed<T: Clone + PartialEq>(

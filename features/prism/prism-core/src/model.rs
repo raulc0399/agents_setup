@@ -114,12 +114,22 @@ pub struct Document {
     pub groups: BTreeMap<Id, Group>,
 }
 
-/// The shared content actions; drop is archive under the name users see.
+/// The shared content actions; drop is archive under the name users see. Unknown fields are
+/// refused, so `ids` on a document action is an error instead of being ignored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentAction {
-    Accept { ids: Vec<Id> },
-    Archive { ids: Vec<Id> },
+    Accept {
+        ids: Vec<Id>,
+    },
+    Archive {
+        ids: Vec<Id>,
+    },
+    /// Takes the whole document out of the app's document strip, for the agent and every app
+    /// view; its content, questions and answers stay in the store.
+    Close {},
+    /// Brings a closed document back.
+    Reopen {},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

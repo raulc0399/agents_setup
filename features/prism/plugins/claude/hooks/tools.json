@@ -164,7 +164,7 @@
   },
   {
     "name": "inspect",
-    "description": "Inspect published Prism content in this exact Claude conversation. Omit document_id to list at most 100 document summaries; repeat with returned next_cursor until null. Private view state such as selections, hidden items and filters is never returned.",
+    "description": "Inspect published Prism content in this exact Claude conversation. Omit document_id to list at most 100 document summaries, each with its closed flag; repeat with returned next_cursor until null. Private view state such as selections, hidden items and filters is never returned.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -197,7 +197,7 @@
   },
   {
     "name": "action",
-    "description": "Apply explicitly requested acceptance or archive to shared content IDs at the expected revision. Acceptance is content feedback, never permission to implement or run tools.",
+    "description": "Apply explicitly requested acceptance or archive to shared content IDs, or close or reopen the whole document (without ids), at the expected revision. A closed document leaves the document strip for everyone and stays listed under Closed until it is reopened or published to again. Acceptance is content feedback, never permission to implement or run tools.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -215,7 +215,9 @@
             "action": {
               "enum": [
                 "accept",
-                "archive"
+                "archive",
+                "close",
+                "reopen"
               ]
             },
             "ids": {
@@ -226,12 +228,12 @@
               },
               "minItems": 1,
               "maxItems": 6500,
-              "uniqueItems": true
+              "uniqueItems": true,
+              "description": "Required for accept and archive; omitted for close and reopen."
             }
           },
           "required": [
-            "action",
-            "ids"
+            "action"
           ],
           "additionalProperties": false
         }

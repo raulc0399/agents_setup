@@ -261,11 +261,13 @@ fn a_complete_snapshot_replaces_content_and_updates_replace_by_id() {
     bridge.send(&BridgeMessage::Snapshot {
         documents: vec![document(1, 1, &["First"])],
         questions: Vec::new(),
+        closed: Vec::new(),
         more: true,
     });
     bridge.send(&BridgeMessage::Snapshot {
         documents: vec![document(2, 1, &["Second"])],
         questions: vec![shared_question(50)],
+        closed: Vec::new(),
         more: false,
     });
     app.wait_for("loaded", |state| {
@@ -279,6 +281,7 @@ fn a_complete_snapshot_replaces_content_and_updates_replace_by_id() {
     bridge.send(&BridgeMessage::Update {
         documents: vec![revised, document(3, 1, &["Third"])],
         questions: Vec::new(),
+        closed: Vec::new(),
     });
     app.wait_for("the update", |_| titles(&app).len() == 3);
     assert_eq!(titles(&app), vec!["Revised", "Document 2", "Document 3"]);
@@ -287,10 +290,49 @@ fn a_complete_snapshot_replaces_content_and_updates_replace_by_id() {
     bridge.send(&BridgeMessage::Snapshot {
         documents: vec![document(1, 2, &["First"]), document(3, 1, &["Third"])],
         questions: Vec::new(),
+        closed: Vec::new(),
         more: false,
     });
     app.wait_for("the second snapshot", |_| titles(&app).len() == 2);
     assert!(app.host.content(&key()).unwrap().questions.is_empty());
+}
+
+#[test]
+fn the_closed_set_comes_from_the_snapshot_frames_and_each_update_replaces_it() {
+    let app = start_app();
+    let mut bridge = app.connect(session(1, 1));
+    let closed = |app: &TestApp| app.host.content(&key()).unwrap().closed;
+    bridge.send(&BridgeMessage::Snapshot {
+        documents: vec![document(1, 1, &["First"])],
+        questions: Vec::new(),
+        closed: vec![Id::from_u128(1)],
+        more: true,
+    });
+    bridge.send(&BridgeMessage::Snapshot {
+        documents: vec![document(2, 1, &["Second"])],
+        questions: Vec::new(),
+        closed: vec![Id::from_u128(2)],
+        more: false,
+    });
+    app.wait_for("loaded", |state| {
+        state.sessions.iter().any(|session| session.loaded)
+    });
+    // Closed documents stay in the content; the set names them.
+    assert_eq!(titles(&app), vec!["Document 1", "Document 2"]);
+    assert_eq!(closed(&app), vec![Id::from_u128(1), Id::from_u128(2)]);
+
+    bridge.send(&BridgeMessage::Update {
+        documents: vec![document(1, 2, &["First"])],
+        questions: Vec::new(),
+        closed: vec![Id::from_u128(2)],
+    });
+    app.wait_for("the reopen", |_| closed(&app) == vec![Id::from_u128(2)]);
+
+    bridge.snapshot(
+        vec![document(1, 2, &["First"]), document(2, 1, &["Second"])],
+        Vec::new(),
+    );
+    app.wait_for("the snapshot without closed", |_| closed(&app).is_empty());
 }
 
 #[test]
@@ -305,6 +347,7 @@ fn a_snapshot_shows_only_when_its_last_frame_arrived() {
     bridge.send(&BridgeMessage::Snapshot {
         documents: vec![document(2, 1, &["Second"])],
         questions: Vec::new(),
+        closed: Vec::new(),
         more: true,
     });
     std::thread::sleep(Duration::from_millis(100));
@@ -433,6 +476,35 @@ fn an_ask_about_several_items_names_each_of_them() {
             },
             text: "Item 2: Second\n> Second body\nItem 1: First\n> First\n\nHow do they relate?"
                 .into(),
+        }
+    );
+}
+
+#[test]
+fn a_close_from_the_ui_reaches_the_bridge_as_an_action() {
+    let app = start_app();
+    let mut bridge = app.connect(session(1, 1));
+    bridge.snapshot(vec![document(1, 1, &["First"])], Vec::new());
+    app.wait_for("loaded", |state| {
+        state.sessions.iter().any(|session| session.loaded)
+    });
+
+    // As the UI sends it.
+    let close: Command = serde_json::from_value(json!({
+        "type": "action",
+        "document_id": Id::from_u128(1),
+        "expected_revision": 1,
+        "action": {"action": "close"},
+    }))
+    .unwrap();
+    let id = app.host.send(&key(), close).unwrap();
+    assert_eq!(
+        bridge.receive(),
+        AppMessage::Action {
+            id,
+            document_id: Id::from_u128(1),
+            expected_revision: 1,
+            action: ContentAction::Close {},
         }
     );
 }
@@ -597,7 +669,7 @@ fn snapshot_frames_from_the_core_are_applied_whole() {
     large.title = "L".repeat(MAX_PAYLOAD_BYTES * 2 / 3);
     let mut second = document(2, 1, &["Second"]);
     second.title = "S".repeat(MAX_PAYLOAD_BYTES * 2 / 3);
-    let frames = snapshot_frames(vec![large, second], Vec::new()).unwrap();
+    let frames = snapshot_frames(vec![large, second], Vec::new(), Vec::new()).unwrap();
     assert_eq!(frames.len(), 2);
     for frame in &frames {
         bridge.send(frame);
@@ -637,6 +709,7 @@ fn a_partial_snapshot_is_dropped_with_its_connection() {
     bridge.send(&BridgeMessage::Snapshot {
         documents: vec![document(2, 1, &["Partial"])],
         questions: Vec::new(),
+        closed: Vec::new(),
         more: true,
     });
     drop(bridge);

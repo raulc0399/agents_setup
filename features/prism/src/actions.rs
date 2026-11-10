@@ -298,10 +298,24 @@ fn validate_ids(document: &Document, ids: &[Id]) -> Result<()> {
     Ok(())
 }
 
+/// The closed state a document action sets; `None` for the item actions.
+pub(crate) fn closed_by(action: &ContentAction) -> Option<bool> {
+    match action {
+        ContentAction::Close {} => Some(true),
+        ContentAction::Reopen {} => Some(false),
+        ContentAction::Accept { .. } | ContentAction::Archive { .. } => None,
+    }
+}
+
 pub(crate) fn apply_action(document: &mut Document, action: &ContentAction) -> Result<()> {
     let (ids, archive) = match action {
         ContentAction::Accept { ids } => (ids, false),
         ContentAction::Archive { ids } => (ids, true),
+        // No item changes; the store keeps the closed state beside the document.
+        ContentAction::Close {} | ContentAction::Reopen {} => {
+            document.revision += 1;
+            return Ok(());
+        }
     };
     validate_ids(document, ids)?;
     for id in ids {

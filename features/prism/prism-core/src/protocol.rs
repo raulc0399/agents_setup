@@ -23,6 +23,12 @@
 //! replaces by ID. The app keeps view state (hidden, filter, zoom, pan, and which items are
 //! selected); a selection crosses only inside `ask`, as the content it asks about.
 //!
+//! Closed documents: whether a document is closed is shared state in the store, never app
+//! state. Closed documents still cross with the rest, so the app can list and reopen them;
+//! `closed` names those that are closed. In a snapshot the IDs of all its frames together are
+//! the whole closed set; an `update` always carries the whole set after its change, which
+//! replaces the previous one. Questions and answers on a closed document cross as before.
+//!
 //! Commands: the app sends commands with a fresh `id`; the bridge answers each one it
 //! receives with a `reply` carrying that `id`, after the `update` (or, for `fetch`, the
 //! `snapshot`) it caused. A command sent just before a connection dropped may have committed
@@ -41,7 +47,7 @@ use uuid::Uuid;
 /// Versioning rule: a new optional field does not change this number, and an older peer
 /// ignores it. A new message type, a new required field or a changed meaning increases it.
 /// Peers with different numbers refuse each other with `refused`.
-pub const APP_PROTOCOL: u32 = 1;
+pub const APP_PROTOCOL: u32 = 2;
 
 /// Largest WebSocket message either side sends or accepts. Snapshot frames pack records up
 /// to `MAX_PAYLOAD_BYTES`, and the store refuses any single record larger than that, so a
@@ -67,13 +73,16 @@ pub enum BridgeMessage {
     Snapshot {
         documents: Vec<Document>,
         questions: Vec<Question>,
+        /// Closed documents; see the module doc.
+        closed: Vec<Id>,
         more: bool,
     },
     /// Documents and questions changed by one committed change; the app adds or replaces
-    /// them by ID.
+    /// them by ID. `closed` is the whole closed set after the change.
     Update {
         documents: Vec<Document>,
         questions: Vec<Question>,
+        closed: Vec<Id>,
     },
     /// The conversation ended; the app keeps the tab and marks it ended.
     Closed {
@@ -229,18 +238,21 @@ pub fn check_protocol(message: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// Splits a snapshot into frames under `MAX_MESSAGE_BYTES`: documents first, then
-/// questions, each frame packed up to `MAX_PAYLOAD_BYTES` of records. Always at least one
-/// frame, so an empty conversation still ends with `more: false`. A record larger than
-/// `MAX_PAYLOAD_BYTES` on its own is an error, never an oversized frame.
+/// Splits a snapshot into frames under `MAX_MESSAGE_BYTES`: the closed set in the first
+/// frame, documents first, then questions, each frame packed up to `MAX_PAYLOAD_BYTES` of
+/// records. Always at least one frame, so an empty conversation still ends with `more: false`.
+/// A record (or the closed set) larger than `MAX_PAYLOAD_BYTES` on its own is an error, never
+/// an oversized frame.
 pub fn snapshot_frames(
     documents: Vec<Document>,
     questions: Vec<Question>,
+    closed: Vec<Id>,
 ) -> Result<Vec<BridgeMessage>, FrameError> {
     #[derive(Default)]
     struct Frame {
         documents: Vec<Document>,
         questions: Vec<Question>,
+        closed: Vec<Id>,
         bytes: usize,
     }
 
@@ -261,6 +273,8 @@ pub fn snapshot_frames(
     }
 
     let mut frames = vec![Frame::default()];
+    let bytes = serde_json::to_vec(&closed)?.len();
+    frame_for(&mut frames, bytes)?.closed = closed;
     for document in documents {
         let bytes = serde_json::to_vec(&document)?.len();
         frame_for(&mut frames, bytes)?.documents.push(document);
@@ -277,6 +291,7 @@ pub fn snapshot_frames(
         .map(|(index, frame)| BridgeMessage::Snapshot {
             documents: frame.documents,
             questions: frame.questions,
+            closed: frame.closed,
             more: index + 1 < count,
         })
         .collect())

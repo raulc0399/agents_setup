@@ -4,7 +4,8 @@
  *
  *   windowId                      label of this native window
  *   state()                       -> AppState {status, sessions, arrangement}
- *   content(key)                  -> {documents, questions} or null
+ *   content(key)                  -> {documents, questions, closed} or null; `closed`: IDs
+ *                                    of the documents closed for everyone
  *   send(key, command)            -> command ID; rejects with a message
  *   activateTab(key), closeTab(key), reopenTab(key), moveTab(key, target | null),
  *   showWindow(windowId), setView(key, view)

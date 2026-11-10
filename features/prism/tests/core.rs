@@ -779,3 +779,185 @@ fn undo_records_are_listed_in_order_and_conflicts_discard_them() {
     // A record that can never apply again is discarded so it cannot block later undo.
     assert!(store.undo_records(workspace, document).unwrap().is_empty());
 }
+
+#[test]
+fn close_and_reopen_check_the_revision_and_undo_reopens() {
+    let (mut store, workspace, _, result) = setup();
+    let document = result.document_id;
+    assert!(matches!(
+        store.apply(workspace, document, 0, &ContentAction::Close {}),
+        Err(Error::Conflict { current: 1 })
+    ));
+    let closed = store
+        .apply(workspace, document, 1, &ContentAction::Close {})
+        .unwrap();
+    assert_eq!(closed.revision, 2);
+    assert!(store.is_closed(workspace, document).unwrap());
+    assert_eq!(store.closed_documents(workspace).unwrap(), vec![document]);
+    // The content stays in the store and in the listing.
+    assert_eq!(store.documents(workspace).unwrap().len(), 1);
+    assert!(matches!(
+        store.apply(workspace, document, 2, &ContentAction::Close {}),
+        Err(Error::Invalid(message)) if message == "document is already closed"
+    ));
+
+    let undone = store.undo_latest(workspace, document, 2).unwrap();
+    assert_eq!(undone.revision, 3);
+    assert!(!store.is_closed(workspace, document).unwrap());
+    assert!(store.closed_documents(workspace).unwrap().is_empty());
+    assert!(matches!(
+        store.apply(workspace, document, 3, &ContentAction::Reopen {}),
+        Err(Error::Invalid(message)) if message == "document is already open"
+    ));
+
+    store
+        .apply(workspace, document, 3, &ContentAction::Close {})
+        .unwrap();
+    store
+        .apply(workspace, document, 4, &ContentAction::Reopen {})
+        .unwrap();
+    assert!(!store.is_closed(workspace, document).unwrap());
+    // Undoing the reopen closes the document again.
+    store.undo_latest(workspace, document, 5).unwrap();
+    assert!(store.is_closed(workspace, document).unwrap());
+}
+
+#[test]
+fn publishing_to_a_closed_document_reopens_it_and_consumes_the_close_undo() {
+    let (mut store, workspace, request, result) = setup();
+    let document = result.document_id;
+    let element = request.elements[0].id;
+    store
+        .apply(
+            workspace,
+            document,
+            1,
+            &ContentAction::Accept { ids: vec![element] },
+        )
+        .unwrap();
+    store
+        .apply(workspace, document, 2, &ContentAction::Close {})
+        .unwrap();
+    let revised = store
+        .publish(workspace, &edit(&request, &result, 3))
+        .unwrap();
+    assert_eq!(revised.revision, 4);
+    assert!(!store.is_closed(workspace, document).unwrap());
+    // The close can no longer be undone: one undo reaches the acceptance before it.
+    assert_eq!(store.undo_records(workspace, document).unwrap().len(), 1);
+    let undone = store.undo_latest(workspace, document, 4).unwrap();
+    assert_eq!(undone.elements[&element].accepted_revision, None);
+    assert!(!store.is_closed(workspace, document).unwrap());
+}
+
+#[test]
+fn undo_records_written_before_documents_could_close_still_undo() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let request = publication();
+    let result = store.publish(workspace, &request).unwrap();
+    let element = request.elements[0].id;
+    store
+        .apply(
+            workspace,
+            result.document_id,
+            1,
+            &ContentAction::Archive { ids: vec![element] },
+        )
+        .unwrap();
+    drop(store);
+    // The record as an older binary wrote it: no closed state before and after.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "UPDATE undo_records SET content=json_remove(content, '$.before_closed', '$.after_closed');",
+        )
+        .unwrap();
+    let content: String = connection
+        .query_row("SELECT content FROM undo_records", [], |row| row.get(0))
+        .unwrap();
+    assert!(!content.contains("closed"), "{content}");
+    drop(connection);
+    let mut store = Store::open(&path).unwrap();
+    let undone = store.undo_latest(workspace, result.document_id, 2).unwrap();
+    assert!(!undone.elements[&element].archived);
+    assert!(!store.is_closed(workspace, result.document_id).unwrap());
+}
+
+#[test]
+fn questions_and_answers_on_a_closed_document_stay_and_return_on_reopen() {
+    let (mut store, workspace, request, result) = setup();
+    let document = result.document_id;
+    let question = PrepareQuestion {
+        request_id: Id::new_v4(),
+        generation: 1,
+        selection: Selection {
+            document_id: document,
+            revision: 1,
+            ids: vec![request.elements[0].id],
+        },
+        text: "Why this source?".into(),
+        mode: DeliveryMode::Share,
+    };
+    store.prepare_question(workspace, &question).unwrap();
+    store
+        .apply(workspace, document, 1, &ContentAction::Close {})
+        .unwrap();
+    store
+        .answer_question(workspace, question.request_id, "It is stable.")
+        .unwrap();
+    store
+        .apply(workspace, document, 2, &ContentAction::Reopen {})
+        .unwrap();
+    let shared = store.shared_questions(workspace).unwrap();
+    assert_eq!(shared.len(), 1);
+    assert_eq!(shared[0].answer.as_deref(), Some("It is stable."));
+}
+
+#[test]
+fn closed_column_is_added_to_an_older_store_and_kept_by_older_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let published = store.publish(workspace, &publication()).unwrap();
+    drop(store);
+    // A schema-2 store an older binary created has no `closed` column.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE documents DROP COLUMN closed;")
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(&path).unwrap();
+    assert!(!store.is_closed(workspace, published.document_id).unwrap());
+    store
+        .apply(
+            workspace,
+            published.document_id,
+            1,
+            &ContentAction::Close {},
+        )
+        .unwrap();
+    drop(store);
+    // An older binary's write: its upsert names only the columns it knows.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO documents(workspace_id, id, revision, content)
+             SELECT workspace_id, id, revision + 1, content FROM documents WHERE true
+             ON CONFLICT(workspace_id, id) DO UPDATE SET revision=excluded.revision, content=excluded.content",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(connection);
+    let store = Store::open(&path).unwrap();
+    assert!(store.is_closed(workspace, published.document_id).unwrap());
+}

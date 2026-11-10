@@ -58,6 +58,7 @@
   --gate: #e8a020;
   --gate-text: #1b1b1b;
   --pill-text: #ffffff;
+  --pill-hover: rgba(255, 255, 255, 0.22);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -106,6 +107,7 @@
     --arrow-5: #a3e635;
     --gate: #f0b44c;
     --pill-text: #0d1117;
+    --pill-hover: rgba(13, 17, 23, 0.16);
   }
 }
 
@@ -416,10 +418,18 @@ button {
   scrollbar-width: none;
 }
 
-.documents button {
+.documents .document {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.documents [role="tab"] {
   max-width: 220px;
   height: 26px;
-  padding: 0 12px;
+  /* Room for the close control, so it never covers the title. */
+  padding: 0 26px 0 12px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: var(--surface-muted);
@@ -429,15 +439,66 @@ button {
   white-space: nowrap;
 }
 
-.documents button:hover {
+.documents [role="tab"]:hover {
   color: var(--text);
 }
 
-.documents button[aria-selected="true"] {
+.documents [role="tab"][aria-selected="true"] {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--pill-text);
   font-weight: 550;
+}
+
+.documents .close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  visibility: hidden;
+}
+
+.documents .document:hover .close,
+.documents .document:focus-within .close,
+.documents .document.selected .close {
+  visibility: visible;
+}
+
+.documents .close:hover {
+  background: var(--chrome-hover);
+  color: var(--text);
+}
+
+.documents .document.selected .close {
+  color: var(--pill-text);
+}
+
+.documents .document.selected .close:hover {
+  background: var(--pill-hover);
+  color: var(--pill-text);
+}
+
+.toolbar .closed-documents {
+  flex: none;
+}
+
+.menu.closed-menu {
+  max-width: 360px;
+}
+
+.menu.closed-menu button {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pane-row .spacer {

@@ -121,11 +121,13 @@ fn bridge_messages_round_trip() {
         BridgeMessage::Snapshot {
             documents: vec![document()],
             questions: vec![question()],
+            closed: vec![Id::from_u128(DOCUMENT)],
             more: true,
         },
         BridgeMessage::Update {
             documents: vec![document()],
             questions: vec![question()],
+            closed: Vec::new(),
         },
         BridgeMessage::Closed {
             reason: "session end".into(),
@@ -188,7 +190,7 @@ fn app_messages_round_trip() {
 fn hello_has_a_fixed_wire_format() {
     fixed(
         &hello(),
-        r#"{"type":"hello","protocol":1,"nonce":"bridge-nonce"}"#,
+        r#"{"type":"hello","protocol":2,"nonce":"bridge-nonce"}"#,
     );
 }
 
@@ -208,13 +210,13 @@ fn welcome_has_a_fixed_wire_format() {
             nonce: "app-nonce".into(),
             proof: "00ff".into(),
         },
-        r#"{"type":"welcome","protocol":1,"nonce":"app-nonce","proof":"00ff"}"#,
+        r#"{"type":"welcome","protocol":2,"nonce":"app-nonce","proof":"00ff"}"#,
     );
 }
 
 #[test]
 fn refused_has_a_fixed_wire_format_in_both_directions() {
-    let literal = r#"{"type":"refused","protocol":1,"reason":"superseded"}"#;
+    let literal = r#"{"type":"refused","protocol":2,"reason":"superseded"}"#;
     fixed(
         &AppMessage::Refused {
             protocol: APP_PROTOCOL,
@@ -259,9 +261,22 @@ fn snapshot_has_a_fixed_wire_format() {
         &BridgeMessage::Snapshot {
             documents: Vec::new(),
             questions: Vec::new(),
+            closed: vec![Id::from_u128(DOCUMENT)],
             more: false,
         },
-        r#"{"type":"snapshot","documents":[],"questions":[],"more":false}"#,
+        r#"{"type":"snapshot","documents":[],"questions":[],"closed":["00000000-0000-0000-0000-000000000001"],"more":false}"#,
+    );
+}
+
+#[test]
+fn update_has_a_fixed_wire_format_with_the_whole_closed_set() {
+    fixed(
+        &BridgeMessage::Update {
+            documents: Vec::new(),
+            questions: Vec::new(),
+            closed: vec![Id::from_u128(DOCUMENT)],
+        },
+        r#"{"type":"update","documents":[],"questions":[],"closed":["00000000-0000-0000-0000-000000000001"]}"#,
     );
 }
 
@@ -278,6 +293,22 @@ fn action_carries_the_content_action_and_expected_revision() {
         },
         r#"{"type":"action","id":"00000000-0000-0000-0000-000000000006","document_id":"00000000-0000-0000-0000-000000000001","expected_revision":3,"action":{"action":"accept","ids":["00000000-0000-0000-0000-000000000002"]}}"#,
     );
+    fixed(
+        &AppMessage::Action {
+            id: Id::from_u128(COMMAND),
+            document_id: Id::from_u128(DOCUMENT),
+            expected_revision: 3,
+            action: ContentAction::Close {},
+        },
+        r#"{"type":"action","id":"00000000-0000-0000-0000-000000000006","document_id":"00000000-0000-0000-0000-000000000001","expected_revision":3,"action":{"action":"close"}}"#,
+    );
+    fixed(&ContentAction::Reopen {}, r#"{"action":"reopen"}"#);
+    // A document action takes no item IDs.
+    let error = serde_json::from_str::<ContentAction>(
+        r#"{"action":"close","ids":["00000000-0000-0000-0000-000000000002"]}"#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown field `ids`"), "{error}");
 }
 
 #[test]
@@ -432,17 +463,20 @@ fn snapshot_frames_stay_under_the_message_limit_and_end_with_the_last_one() {
         document
     };
     let documents = vec![large(101), large(102), large(103)];
-    let frames = snapshot_frames(documents.clone(), vec![question()]).unwrap();
+    let closed = vec![Id::from_u128(102)];
+    let frames = snapshot_frames(documents.clone(), vec![question()], closed.clone()).unwrap();
     assert_eq!(frames.len(), 3);
 
     let mut sent_documents = Vec::new();
     let mut sent_questions = Vec::new();
+    let mut sent_closed = Vec::new();
     let mut markers = Vec::new();
     for frame in frames {
         assert!(serde_json::to_vec(&frame).unwrap().len() <= MAX_MESSAGE_BYTES);
         let BridgeMessage::Snapshot {
             documents,
             questions,
+            closed,
             more,
         } = frame
         else {
@@ -450,17 +484,21 @@ fn snapshot_frames_stay_under_the_message_limit_and_end_with_the_last_one() {
         };
         sent_documents.extend(documents);
         sent_questions.extend(questions);
+        sent_closed.push(closed);
         markers.push(more);
     }
     assert_eq!(markers, vec![true, true, false]);
     assert_eq!(sent_documents, documents);
     assert_eq!(sent_questions, vec![question()]);
+    // The closed set goes once, in the first frame.
+    assert_eq!(sent_closed, vec![closed, Vec::new(), Vec::new()]);
 
     assert_eq!(
-        snapshot_frames(Vec::new(), Vec::new()).unwrap(),
+        snapshot_frames(Vec::new(), Vec::new(), Vec::new()).unwrap(),
         vec![BridgeMessage::Snapshot {
             documents: Vec::new(),
             questions: Vec::new(),
+            closed: Vec::new(),
             more: false,
         }]
     );
@@ -472,7 +510,7 @@ fn a_record_too_large_for_one_frame_is_an_error() {
     for element in document.elements.values_mut() {
         element.body = "x".repeat(MAX_PAYLOAD_BYTES);
     }
-    let error = snapshot_frames(vec![document], Vec::new()).unwrap_err();
+    let error = snapshot_frames(vec![document], Vec::new(), Vec::new()).unwrap_err();
     assert!(
         matches!(error, FrameError::TooLarge { bytes } if bytes > MAX_PAYLOAD_BYTES),
         "{error}"

@@ -227,6 +227,7 @@ impl FakeBridge {
         self.send(&BridgeMessage::Snapshot {
             documents,
             questions,
+            closed: Vec::new(),
             more: false,
         });
     }

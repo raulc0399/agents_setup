@@ -14,6 +14,12 @@ automatically extract conversation content or open another agent conversation.
 - Publish semantic content and relationships; the Prism UI owns local layout,
   selection and unsent drafts. Never request private drafts or private selections.
 - Treat acceptance as content feedback, never permission to implement changes.
+- All Prism content and document state is shared through the bridge store: a
+  close, drop, accept, question or answer is seen by you and every app view;
+  there is no app-local document state.
+- Close or reopen a whole document with `prism_action` (`close` or `reopen`, no
+  `ids`) only when asked; `prism_inspect` marks closed documents, and publishing
+  to a closed document reopens it.
 - Retrieve questions only when the user explicitly asks, using `prism_questions`;
   answer in this exact conversation, then revise the referenced content if asked.
 - Native caller identity comes from the CLI transport. Never supply conversation,

@@ -2,15 +2,15 @@
 // fixture and the user input to replay; `?scenario=checks`, `?scenario=diagram-checks`,
 // `?scenario=view-checks` and `?scenario=action-checks` run the behaviour checks of the list,
 // the diagram, the view per document with its side pane, and the item actions,
-// `?scenario=status-checks` those of the connection status; each writes PASS or the failures
-// into #result.
+// `?scenario=status-checks` those of the connection status, `?scenario=document-checks`
+// closing and reopening documents; each writes PASS or the failures into #result.
 import { start } from '../ui/js/app.js';
 import { questionBlock } from '../ui/js/panel.js';
 import { fakeBackend } from './fake-backend.js';
 import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, VERSION_PROBLEM, fixture } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 const key = (name, options = {}) =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...options }));
@@ -121,6 +121,8 @@ async function replay(backend) {
     await settle();
     const { key: session, id } = backend.sent.at(-1);
     backend.reply(session, id, { code: 'stale_revision', current: 4 });
+  } else if (scenario === 'closed-menu') {
+    document.querySelector('.closed-documents').click();
   } else if (scenario.startsWith('diagram')) {
     await waitFor(() => document.querySelector('.diagram-svg [data-id]'));
   }
@@ -1106,7 +1108,7 @@ async function statusChecks(backend) {
 
   expect(text('.empty h2') === 'No conversations connected yet', `the empty state: ${text('.empty h2')}`);
   expect(problemShown('.empty'), 'the empty state names both protocols and the older side');
-  expect(text('.empty .facts .about') === 'Prism 0.1.0 · app protocol 1', `the version line: ${text('.empty .facts .about')}`);
+  expect(text('.empty .facts .about') === 'Prism 0.1.0 · app protocol 2', `the version line: ${text('.empty .facts .about')}`);
   expect(document.querySelector('.strip-actions .button .dot.disconnected')?.title === VERSION_PROBLEM, 'the sessions button is marked');
 
   // Another conversation is connected, but not in this window.
@@ -1122,7 +1124,7 @@ async function statusChecks(backend) {
   document.querySelector('.strip-actions .button').click();
   await settle();
   expect(problemShown('.popover .status'), 'the sessions panel shows the problem');
-  expect(text('.popover .status .about') === 'Prism 0.1.0 · app protocol 1', 'and the version line');
+  expect(text('.popover .status .about') === 'Prism 0.1.0 · app protocol 2', 'and the version line');
 
   // A bridge connected: the host cleared the problem.
   backend.change((state) => {
@@ -1136,6 +1138,175 @@ async function statusChecks(backend) {
 }
 
 /** At a narrow window: the side pane goes below the canvas or the list and nothing scrolls the page. */
+/** Closing and reopening documents: shared state from the store, shown the same in every window. */
+async function documentChecks(backend) {
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const strip = () => [...document.querySelectorAll('.documents [role="tab"]')].map((node) => node.textContent);
+  const shown = () => document.querySelector('.documents [aria-selected="true"]')?.textContent;
+  const closedControl = () => document.querySelector('.closed-documents');
+  const message = () => document.querySelector('.statusbar .message').textContent;
+  const original = structuredClone(CONTENTS_FOR_TESTS[KEYS.LIVE]);
+  const revisions = Object.fromEntries(original.documents.map((document) => [document.id, document.revision]));
+  // The bridge's update after a commit: the revised document and the whole closed set.
+  const published = (closed, revised = []) => {
+    for (const id of revised) {
+      revisions[id] += 1;
+    }
+    const next = structuredClone(original);
+    for (const document of next.documents) {
+      document.revision = revisions[document.id];
+    }
+    next.closed = closed;
+    backend.update(KEYS.LIVE, next);
+  };
+  const lastCommand = () => backend.sent.at(-1)?.command;
+  const commits = (closed, revised) => {
+    const { key: session, id } = backend.sent.at(-1);
+    published(closed, revised);
+    backend.reply(session, id);
+  };
+  await settle();
+  expect(JSON.stringify(strip()) === JSON.stringify(['App plan', 'Notes', 'Release flow', 'Review findings']), `four documents: ${strip()}`);
+  expect(!closedControl(), 'no Closed control while nothing is closed');
+  const selectedClose = document.querySelector('.document.selected .close');
+  expect(selectedClose && getComputedStyle(selectedClose).visibility === 'visible', 'the shown document has its close control');
+  const otherClose = document.querySelector('.document:not(.selected) .close');
+  expect(otherClose && getComputedStyle(otherClose).visibility === 'hidden', 'the others only on hover or focus');
+  const tab = document.querySelector('.document.selected [role="tab"]').getBoundingClientRect();
+  const control = selectedClose.getBoundingClientRect();
+  expect(control.right <= tab.right && control.left >= tab.left && control.top >= tab.top && control.bottom <= tab.bottom, 'the close control sits inside its tab');
+
+  // Close via ×: one `close` action at the document's revision; the strip follows the store.
+  const reviewClose = [...document.querySelectorAll('.document')].find((node) => node.textContent.startsWith('Review findings')).querySelector('.close');
+  reviewClose.click();
+  await settle();
+  expect(JSON.stringify(lastCommand()) === JSON.stringify({ type: 'action', document_id: KEYS.REVIEW, expected_revision: 1, action: { action: 'close' } }), `× sends close: ${JSON.stringify(lastCommand())}`);
+  expect(strip().includes('Review findings'), 'nothing changes before the store says so');
+  commits([KEYS.REVIEW], [KEYS.REVIEW]);
+  expect(await waitFor(() => !strip().includes('Review findings')), 'the closed document leaves the strip');
+  expect(closedControl()?.textContent === 'Closed (1)', `Closed (1) at the end of the strip: ${closedControl()?.textContent}`);
+  expect(message() === 'Closed “Review findings” for everyone. U reopens it.', `the reply is shown: ${message()}`);
+
+  // U right after the close undoes it, on the closed document.
+  key('u');
+  await settle();
+  expect(JSON.stringify(lastCommand()) === JSON.stringify({ type: 'undo', document_id: KEYS.REVIEW, expected_revision: 2 }), `U undoes the close: ${JSON.stringify(lastCommand())}`);
+  commits([], [KEYS.REVIEW]);
+  expect(await waitFor(() => strip().includes('Review findings') && !closedControl()), 'undo reopens it');
+  expect(await waitFor(() => shown() === 'Review findings'), `and shows it: ${shown()}`);
+  // The next U is an ordinary undo of the document shown.
+  key('u');
+  await settle();
+  expect(JSON.stringify(lastCommand()) === JSON.stringify({ type: 'undo', document_id: KEYS.REVIEW, expected_revision: 3 }), `then U undoes on the shown document: ${JSON.stringify(lastCommand())}`);
+  backend.reply(backend.sent.at(-1).key, backend.sent.at(-1).id, { code: 'not_found', message: 'action to undo for this document' });
+  await settle();
+
+  // Close via W: the document shown; the next one takes its place.
+  document.querySelector('.documents [role="tab"]').click();
+  await settle();
+  key('w');
+  await settle();
+  expect(JSON.stringify(lastCommand()) === JSON.stringify({ type: 'action', document_id: KEYS.PLAN, expected_revision: 3, action: { action: 'close' } }), `W closes the shown document: ${JSON.stringify(lastCommand())}`);
+  commits([KEYS.PLAN], [KEYS.PLAN]);
+  expect(await waitFor(() => !strip().includes('App plan') && shown() === 'Notes'), `the next document is shown: ${shown()}`);
+
+  // Closed (N) lists the closed documents; picking one reopens and shows it.
+  closedControl().click();
+  await settle();
+  const items = () => [...document.querySelectorAll('.menu:not([hidden]) [role="menuitem"]')].map((node) => node.textContent);
+  expect(JSON.stringify(items()) === JSON.stringify(['App plan']), `the menu lists the closed documents: ${items()}`);
+  const menu = document.querySelector('.menu').getBoundingClientRect();
+  expect(menu.top >= closedControl().getBoundingClientRect().bottom && menu.right <= window.innerWidth, 'the menu opens below its control, inside the window');
+  document.querySelector('.menu [role="menuitem"]').click();
+  await settle();
+  expect(document.querySelector('.menu').hidden, 'the menu closes');
+  expect(JSON.stringify(lastCommand()) === JSON.stringify({ type: 'action', document_id: KEYS.PLAN, expected_revision: 4, action: { action: 'reopen' } }), `the item sends reopen: ${JSON.stringify(lastCommand())}`);
+  commits([], [KEYS.PLAN]);
+  expect(await waitFor(() => strip().includes('App plan') && shown() === 'App plan'), `the reopened document is shown: ${shown()}`);
+
+  // Closed elsewhere (the agent, or another window's command): it disappears here too.
+  published([KEYS.RELEASE, KEYS.NOTES], [KEYS.RELEASE, KEYS.NOTES]);
+  expect(await waitFor(() => !strip().includes('Release flow') && !strip().includes('Notes')), `documents closed by the bridge leave the strip: ${strip()}`);
+  expect(closedControl()?.textContent === 'Closed (2)', 'and are counted');
+  // U after a close from elsewhere is an ordinary undo of the shown document.
+  key('u');
+  await settle();
+  expect(lastCommand().type === 'undo' && lastCommand().document_id === KEYS.PLAN, 'U does not reopen what another view closed');
+
+  // The shown document closed elsewhere: the next one takes over with its own focus and
+  // selection, and the closed one gets its own back when it reopens.
+  const selectedCards = () => [...document.querySelectorAll('.card.selected')].map((node) => node.dataset.id);
+  const focusedCard = () => document.querySelector('.card.focused')?.dataset.id;
+  const showTab = (title) => [...document.querySelectorAll('.documents [role="tab"]')].find((node) => node.textContent === title).click();
+  key('j');
+  key(' ');
+  await settle();
+  const planState = [focusedCard(), selectedCards()];
+  showTab('Review findings');
+  await settle();
+  key('j');
+  key(' ');
+  await settle();
+  const reviewState = [focusedCard(), selectedCards()];
+  expect(reviewState[1].length === 1 && planState[1].length === 1, `one item selected in each: ${planState} / ${reviewState}`);
+  published([KEYS.RELEASE, KEYS.NOTES, KEYS.REVIEW], [KEYS.REVIEW]);
+  expect(await waitFor(() => shown() === 'App plan'), `the next open document is shown: ${shown()}`);
+  expect(JSON.stringify([focusedCard(), selectedCards()]) === JSON.stringify(planState), `with its own focus and selection: ${focusedCard()} ${selectedCards()}`);
+  closedControl().click();
+  await settle();
+  [...document.querySelectorAll('.menu [role="menuitem"]')].find((node) => node.textContent === 'Review findings').click();
+  await settle();
+  commits([KEYS.RELEASE, KEYS.NOTES], [KEYS.REVIEW]);
+  expect(await waitFor(() => shown() === 'Review findings'), `reopened: ${shown()}`);
+  expect(JSON.stringify([focusedCard(), selectedCards()]) === JSON.stringify(reviewState), `the reopened document has its focus and selection back: ${focusedCard()} ${selectedCards()}`);
+
+  // A close that something changed since (here the agent revised the closed document): U is an ordinary undo.
+  key('w');
+  await settle();
+  commits([KEYS.RELEASE, KEYS.NOTES, KEYS.REVIEW], [KEYS.REVIEW]);
+  expect(await waitFor(() => shown() === 'App plan'), 'W closed the shown document');
+  published([KEYS.RELEASE, KEYS.NOTES, KEYS.REVIEW], [KEYS.REVIEW]);
+  await settle();
+  key('u');
+  await settle();
+  expect(lastCommand().type === 'undo' && lastCommand().document_id === KEYS.PLAN, `U undoes on the shown document once the closed one changed: ${JSON.stringify(lastCommand())}`);
+
+  // Another command before the close's reply: U is an ordinary undo too.
+  published([KEYS.RELEASE, KEYS.NOTES], [KEYS.REVIEW]);
+  await settle();
+  key('w');
+  await settle();
+  const closing = backend.sent.at(-1);
+  key('a');
+  await settle();
+  expect(lastCommand().action?.action === 'accept', `the second command went out: ${JSON.stringify(lastCommand())}`);
+  published([KEYS.RELEASE, KEYS.NOTES, KEYS.PLAN], [KEYS.PLAN]);
+  backend.reply(closing.key, closing.id);
+  await settle();
+  key('u');
+  await settle();
+  expect(lastCommand().type === 'undo' && lastCommand().document_id !== KEYS.PLAN, `U does not reopen after another command: ${JSON.stringify(lastCommand())}`);
+  published([KEYS.RELEASE, KEYS.NOTES], [KEYS.PLAN]);
+  await settle();
+
+  // Every document closed: the tab says so and keeps the control.
+  published([KEYS.PLAN, KEYS.REVIEW, KEYS.RELEASE, KEYS.NOTES], [KEYS.PLAN, KEYS.REVIEW]);
+  expect(await waitFor(() => document.querySelector('.empty h2')?.textContent === 'All documents are closed'), 'all closed is explained');
+  expect(closedControl()?.textContent === 'Closed (4)' && strip().length === 0, 'with Closed (4) and no strip');
+  // A disconnected tab cannot close: W says why.
+  key('Tab', { ctrlKey: true });
+  await settle();
+  key('w');
+  await settle();
+  expect(message() === 'Read-only until the bridge reconnects', `W is blocked while disconnected: ${message()}`);
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
 async function narrowChecks() {
   const failures = [];
   const expect = (condition, message) => {

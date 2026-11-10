@@ -2,7 +2,8 @@
 use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
 use prism::applink::{AppLink, LinkConfig, LinkState};
 use prism::bridge::{
-    AnswerParams, BridgeClient, LifecycleEvent, Operation, PendingParams, StatusParams, store_path,
+    ActionParams, AnswerParams, BridgeClient, LifecycleEvent, Operation, PendingParams,
+    StatusParams, store_path,
 };
 use prism::model::{
     AgentKind, ContentAction, DeliveryMode, DeliveryOutcome, Document, ElementKind, Id, Question,
@@ -342,12 +343,20 @@ fn welcome(socket: &mut AppSocket, token: &str, protocol_number: u32) -> String 
 }
 
 fn snapshot(socket: &mut AppSocket) -> (Vec<Document>, Vec<Question>) {
+    let (documents, questions, _) = snapshot_with_closed(socket);
+    (documents, questions)
+}
+
+/// The whole snapshot with the closed documents of all its frames.
+fn snapshot_with_closed(socket: &mut AppSocket) -> (Vec<Document>, Vec<Question>, Vec<Id>) {
     let mut documents = Vec::new();
     let mut questions = Vec::new();
+    let mut closed = Vec::new();
     loop {
         let BridgeMessage::Snapshot {
             documents: frame_documents,
             questions: frame_questions,
+            closed: frame_closed,
             more,
         } = recv(socket)
         else {
@@ -355,21 +364,28 @@ fn snapshot(socket: &mut AppSocket) -> (Vec<Document>, Vec<Question>) {
         };
         documents.extend(frame_documents);
         questions.extend(frame_questions);
+        closed.extend(frame_closed);
         if !more {
-            return (documents, questions);
+            return (documents, questions, closed);
         }
     }
 }
 
 fn update(socket: &mut AppSocket) -> (Vec<Document>, Vec<Question>) {
+    let (documents, questions, _) = update_with_closed(socket);
+    (documents, questions)
+}
+
+fn update_with_closed(socket: &mut AppSocket) -> (Vec<Document>, Vec<Question>, Vec<Id>) {
     let BridgeMessage::Update {
         documents,
         questions,
+        closed,
     } = recv(socket)
     else {
         panic!("expected update");
     };
-    (documents, questions)
+    (documents, questions, closed)
 }
 
 fn reply(socket: &mut AppSocket, id: Id) -> Option<CommandError> {
@@ -770,6 +786,85 @@ fn commands_apply_through_the_shared_actions() {
     assert_eq!((documents[0].id, documents[0].revision), (document, 3));
     assert_eq!(questions[0].request_id, ask);
     assert_eq!(reply(&mut socket, fetch), None);
+    fixture.stop(bridge, socket);
+}
+
+#[test]
+fn closing_from_the_app_or_the_tools_crosses_as_the_closed_set() {
+    let fixture = Fixture::new();
+    let bridge = fixture.start_bridge();
+    let (document, element) = fixture.publish("Closing");
+    let (mut socket, ..) = fixture.connect();
+    let action = |id, expected_revision, action| AppMessage::Action {
+        id,
+        document_id: document,
+        expected_revision,
+        action,
+    };
+
+    // Close from the app: the document stays in the content and the closed set names it.
+    let close = Id::new_v4();
+    send(&mut socket, &action(close, 1, ContentAction::Close {}));
+    let (documents, _, closed) = update_with_closed(&mut socket);
+    assert_eq!((documents[0].id, documents[0].revision), (document, 2));
+    assert_eq!(closed, vec![document]);
+    assert_eq!(reply(&mut socket, close), None);
+    let resent = Id::new_v4();
+    send(&mut socket, &action(resent, 1, ContentAction::Close {}));
+    assert_eq!(
+        reply(&mut socket, resent),
+        Some(CommandError::StaleRevision { current: 2 })
+    );
+
+    // A snapshot carries it too.
+    let fetch = Id::new_v4();
+    send(&mut socket, &AppMessage::Fetch { id: fetch });
+    let (documents, _, closed) = snapshot_with_closed(&mut socket);
+    assert_eq!(documents.len(), 1);
+    assert_eq!(closed, vec![document]);
+    assert_eq!(reply(&mut socket, fetch), None);
+
+    // Undo right after the close reopens it.
+    let undo = Id::new_v4();
+    send(
+        &mut socket,
+        &AppMessage::Undo {
+            id: undo,
+            document_id: document,
+            expected_revision: 2,
+        },
+    );
+    let (documents, _, closed) = update_with_closed(&mut socket);
+    assert_eq!(documents[0].revision, 3);
+    assert!(closed.is_empty());
+    assert_eq!(reply(&mut socket, undo), None);
+
+    // The agent closes it through its tool, then revises it, which reopens it.
+    fixture.call(Operation::Action(ActionParams {
+        document_id: document,
+        expected_revision: 3,
+        action: ContentAction::Close {},
+    }));
+    let (_, _, closed) = update_with_closed(&mut socket);
+    assert_eq!(closed, vec![document]);
+    fixture.call(Operation::Publish(PublishRequest {
+        request_id: Id::new_v4(),
+        document_id: Some(document),
+        expected_revision: Some(4),
+        title: "Closing, revised".into(),
+        elements: vec![ElementInput {
+            id: element,
+            title: "Node".into(),
+            body: "Body".into(),
+            kind: ElementKind::Text,
+            source: None,
+        }],
+        relationships: vec![],
+        groups: vec![],
+    }));
+    let (documents, _, closed) = update_with_closed(&mut socket);
+    assert_eq!(documents[0].title, "Closing, revised");
+    assert!(closed.is_empty());
     fixture.stop(bridge, socket);
 }
 

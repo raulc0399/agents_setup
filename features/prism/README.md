@@ -123,7 +123,10 @@ type your question after it and press Enter there. Claude records its reply
 with `mcp__prism__answer`, and the card shows it. Codex has no prompt box
 access: ask it to retrieve the shared question with `prism_questions`. Share does
 not start a model turn or prove an answer began. **Drop** is the shared archive;
-**hide** and the filter only affect that tab. The diagram draws groups as lanes,
+**hide** and the filter only affect that tab. **Close** (× on a document or `W`)
+is shared too: the document leaves the strip in every window and the agent's
+`inspect` marks it; `Closed (N)` reopens it, `U` right after the close undoes it,
+and the agent publishing to it reopens it. The diagram draws groups as lanes,
 elements as boxes, relationships as arrows with numbered pills, `manual: true`
 relationships dashed and gate findings as amber badges; it pans, zooms and
 exports SVG. The app's status bar lists the keys of the current view. Hidden
@@ -142,7 +145,9 @@ content. Do not share binding files or runtime logs as public diagnostics.
 Schema 2 adds private UI arrangement with an in-place transactional migration
 from schema 1; content, questions and views are preserved. The terminal UI's
 view tables stay in schema 2 unused, so older `prism` binaries still open the
-store. Unknown newer schemas are refused. Stop live Prism processes before copying `.prism/` for a backup;
+store. A document's closed state is a `documents.closed` column added within
+schema 2; older binaries ignore it and keep it when they write. An older binary
+that undoes a close or reopen reports success but leaves the closed state as it is. Unknown newer schemas are refused. Stop live Prism processes before copying `.prism/` for a backup;
 include SQLite's WAL/SHM files if copying a live database. Prism writes
 `.prism/.gitignore` containing `*`, so the directory stays out of version
 control in every project; an existing file there is never overwritten.

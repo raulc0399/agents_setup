@@ -536,3 +536,90 @@ fn transient_binding_verification_failures_do_not_retire_the_bridge() {
     // The fifth consecutive failure is treated as a real loss of the bound CLI.
     assert!(!prism::bridge::binding_still_live(false, &mut failures));
 }
+
+#[test]
+fn tools_close_and_reopen_documents_with_the_revision_check() {
+    use prism::actions::{ContentAction, PublishRequest};
+    use prism::bridge::{ActionParams, apply_operation};
+    use prism::model::Id;
+    use prism::store::Store;
+    use serde_json::json;
+    let mut fixture = Fixture::new();
+    fixture
+        .binding
+        .bind_conversation(&Uuid::new_v4().to_string())
+        .unwrap();
+    let mut store = Store::open(":memory:").unwrap();
+    let request = PublishRequest {
+        request_id: Id::new_v4(),
+        document_id: None,
+        expected_revision: None,
+        title: "Plan".into(),
+        elements: vec![],
+        relationships: vec![],
+        groups: vec![],
+    };
+    let published = apply_operation(
+        &mut store,
+        &fixture.binding,
+        Operation::Publish(request.clone()),
+    )
+    .unwrap();
+    let document = Id::parse_str(published["document_id"].as_str().unwrap()).unwrap();
+
+    // The Codex tool arguments parse to the shared action; close takes no IDs.
+    let close = |revision: u64| {
+        prism::mcp::operation(
+            "prism_action",
+            json!({"document_id": document, "expected_revision": revision, "action": {"action": "close"}}),
+        )
+        .unwrap()
+    };
+    let with_ids = prism::mcp::operation(
+        "prism_action",
+        json!({"document_id": document, "expected_revision": 1, "action": {"action": "close", "ids": [document]}}),
+    );
+    assert!(with_ids.is_err(), "close takes no IDs");
+    let stale = apply_operation(&mut store, &fixture.binding, close(0)).unwrap_err();
+    assert!(
+        stale.to_string().contains("current revision is 1"),
+        "{stale}"
+    );
+    let closed = apply_operation(&mut store, &fixture.binding, close(1)).unwrap();
+    assert_eq!(closed["revision"], 2);
+
+    // Listing marks it; inspecting it says so too.
+    let inspect = |document_id| {
+        Operation::Inspect(InspectParams {
+            document_id,
+            cursor: None,
+        })
+    };
+    let listed = apply_operation(&mut store, &fixture.binding, inspect(None)).unwrap();
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["documents"][0]["closed"], true);
+    let shown = apply_operation(&mut store, &fixture.binding, inspect(Some(document))).unwrap();
+    assert_eq!(
+        (shown["closed"].clone(), shown["revision"].clone()),
+        (json!(true), json!(2))
+    );
+
+    // Reopen through the shared action, close again, then a publish reopens it.
+    let reopen = Operation::Action(ActionParams {
+        document_id: document,
+        expected_revision: 2,
+        action: ContentAction::Reopen {},
+    });
+    apply_operation(&mut store, &fixture.binding, reopen).unwrap();
+    apply_operation(&mut store, &fixture.binding, close(3)).unwrap();
+    let revision = PublishRequest {
+        request_id: Id::new_v4(),
+        document_id: Some(document),
+        expected_revision: Some(4),
+        ..request
+    };
+    apply_operation(&mut store, &fixture.binding, Operation::Publish(revision)).unwrap();
+    let listed = apply_operation(&mut store, &fixture.binding, inspect(None)).unwrap();
+    assert_eq!(listed["documents"][0]["closed"], false);
+    assert_eq!(listed["documents"][0]["revision"], 5);
+}

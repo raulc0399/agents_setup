@@ -9,7 +9,7 @@ use prism_core::protocol::{
     APP_PROTOCOL, AppMessage, BridgeMessage, CommandError, Refusal, Session,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -70,11 +70,13 @@ pub struct SessionSummary {
     pub loaded: bool,
 }
 
-/// Documents and shared questions of one session, in ID order.
+/// Documents and shared questions of one session, in ID order, and the IDs of the closed
+/// documents as the store has them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Content {
     pub documents: Vec<Document>,
     pub questions: Vec<Question>,
+    pub closed: Vec<Id>,
 }
 
 /// A command from the UI; the registry gives it a fresh ID.
@@ -175,6 +177,7 @@ pub enum Attach {
 struct SnapshotFrames {
     documents: BTreeMap<Id, Document>,
     questions: BTreeMap<Id, Question>,
+    closed: BTreeSet<Id>,
 }
 
 struct Entry {
@@ -183,6 +186,7 @@ struct Entry {
     connection: Option<Connection>,
     documents: BTreeMap<Id, Document>,
     questions: BTreeMap<Id, Question>,
+    closed: BTreeSet<Id>,
     /// Frames of a snapshot in progress; content is replaced when its last frame arrives.
     snapshot: Option<SnapshotFrames>,
     loaded: bool,
@@ -206,6 +210,7 @@ impl Entry {
             connection: Some(connection),
             documents: BTreeMap::new(),
             questions: BTreeMap::new(),
+            closed: BTreeSet::new(),
             snapshot: None,
             loaded: false,
             pending: Vec::new(),
@@ -372,6 +377,7 @@ impl Registry {
             BridgeMessage::Snapshot {
                 documents,
                 questions,
+                closed,
                 more,
             } => {
                 let frames = entry.snapshot.get_or_insert_default();
@@ -379,6 +385,7 @@ impl Registry {
                 frames
                     .questions
                     .extend(questions.into_iter().map(question_by_id));
+                frames.closed.extend(closed);
                 if more {
                     return;
                 }
@@ -386,6 +393,7 @@ impl Registry {
                 let frames = entry.snapshot.take().unwrap_or_default();
                 entry.documents = frames.documents;
                 entry.questions = frames.questions;
+                entry.closed = frames.closed;
                 if !entry.loaded {
                     entry.loaded = true;
                     events.push(HostEvent::State);
@@ -395,11 +403,14 @@ impl Registry {
             BridgeMessage::Update {
                 documents,
                 questions,
+                closed,
             } => {
                 entry.documents.extend(documents.into_iter().map(by_id));
                 entry
                     .questions
                     .extend(questions.into_iter().map(question_by_id));
+                // Every update carries the whole closed set.
+                entry.closed = closed.into_iter().collect();
                 events.push(HostEvent::Content { key: key.clone() });
             }
             BridgeMessage::Closed { reason } => {
@@ -479,6 +490,7 @@ impl Registry {
         self.entries.get(key).map(|entry| Content {
             documents: entry.documents.values().cloned().collect(),
             questions: entry.questions.values().cloned().collect(),
+            closed: entry.closed.iter().copied().collect(),
         })
     }
 

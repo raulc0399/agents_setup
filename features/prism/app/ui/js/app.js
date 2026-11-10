@@ -3,7 +3,7 @@ import { h } from './dom.js';
 import { agentLabel, firstLine, projectName, shortConversation } from './format.js';
 import { ACCEPT_NOTE, ListView } from './list.js';
 import { DetailPanel } from './panel.js';
-import { activeIds, hasDiagram, itemCount, rows as buildRows, sortedDocuments } from './rows.js';
+import { activeIds, documentsOf, hasDiagram, itemCount, rows as buildRows } from './rows.js';
 
 /** View state is saved this long after the last change, not on every key press. */
 const VIEW_SAVE_DELAY_MS = 300;
@@ -42,6 +42,7 @@ const KEY_HINTS = {
     [['/'], 'filter', 3],
     [['Esc'], 'clear', 4],
     [['[', ']'], 'documents', 4],
+    [['W'], 'close', 4],
     [['V'], 'diagram', 3],
   ],
   diagram: [
@@ -57,6 +58,7 @@ const KEY_HINTS = {
     [['H'], 'hide', 3],
     [['/'], 'filter', 3],
     [['S'], 'export', 4],
+    [['W'], 'close', 4],
     [['V'], 'list', 3],
   ],
 };
@@ -106,6 +108,13 @@ class App {
     this.pending = new Map();
     this.earlyReplies = new Map();
     this.ask = null;
+    /**
+     * The document this window closed last, `{key, id, revision}` with the revision its close
+     * produced, until the next command: U reopens it.
+     */
+    this.lastClosed = null;
+    /** Commands sent so far; a close only becomes the last one if nothing else went out after it. */
+    this.commandCount = 0;
     this.message = null;
     this.sessionsOpen = false;
     this.menu = null;
@@ -214,13 +223,32 @@ class App {
     try {
       const content = await this.backend.content(key);
       if (content) {
+        // Without a pick of its own the tab shows the first document, which may close too.
+        const shown = this.view(key).document ?? this.current(key)?.document.id ?? null;
         this.contents.set(key, content);
+        this.leaveClosedDocument(key, shown);
         this.pruneSelection(key);
       }
     } finally {
       this.loading.delete(key);
     }
     this.render();
+  }
+
+  /**
+   * The document shown is no longer open (closed here, by the agent or in another window): the
+   * first open one takes over as if picked, keeping the focus and selection of the one left.
+   */
+  leaveClosedDocument(key, shown) {
+    const view = this.view(key);
+    const open = documentsOf(this.contents.get(key), false);
+    if (!shown || open.some((document) => document.id === shown)) {
+      return;
+    }
+    const next = open[0]?.id ?? null;
+    const kept = { ...view.kept, [shown]: { focus: view.focus, selected: view.selected } };
+    const back = (next && kept[next]) || { focus: null, selected: [] };
+    this.storeView(key, { document: next, focus: back.focus, selected: back.selected, kept });
   }
 
   /** Selected items that were dropped, or left with their document, leave the selection. */
@@ -338,11 +366,11 @@ class App {
   /** The document, its visible rows, the focused and the selected rows of a tab; null before content. */
   current(key) {
     const content = this.contents.get(key);
-    if (!content || content.documents.length === 0) {
+    const documents = documentsOf(content, false);
+    if (documents.length === 0) {
       return null;
     }
     const view = this.view(key);
-    const documents = sortedDocuments(content.documents);
     const document = documents.find((candidate) => candidate.id === view.document) ?? documents[0];
     const rows = buildRows(document, new Set(view.hidden), view.filter);
     let focusIndex = rows.findIndex((row) => row.id === view.focus);
@@ -500,18 +528,19 @@ class App {
     const view = this.view(key);
     const mode = this.mode(key);
     const hidden = view.hidden.length;
+    const closed = documentsOf(this.contents.get(key), true);
     this.patch(
       'header',
       this.header,
-      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id],
-      () => this.tabHeader(key, session, state, current),
+      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, closed.length],
+      () => this.tabHeader(key, session, state, current, closed),
     );
 
     this.pane.hidden = !current;
     if (!current) {
       this.showBody(null);
-      this.patch('body', this.content, ['no-content', key, state, session?.loaded, this.contents.has(key)], () => [
-        this.emptyTab(key, session, state),
+      this.patch('body', this.content, ['no-content', key, state, session?.loaded, this.contents.has(key), closed.length], () => [
+        this.emptyTab(key, session, state, closed),
       ]);
       return;
     }
@@ -626,7 +655,7 @@ class App {
     }
   }
 
-  tabHeader(key, session, state, current) {
+  tabHeader(key, session, state, current, closed) {
     const agent = session ? agentLabel(session.agent) : '';
     const parts = [
       h(
@@ -649,28 +678,53 @@ class App {
     if (banner) {
       parts.push(banner);
     }
-    if (current) {
+    if (current || closed.length > 0) {
       parts.push(
         h(
           'div',
           { class: 'toolbar' },
-          h(
-            'div',
-            { class: 'documents', role: 'tablist', 'aria-label': 'Documents' },
-            current.documents.map((document) =>
-              h('button', {
-                role: 'tab',
-                'aria-selected': String(document.id === current.document.id),
-                title: document.title,
-                text: document.title,
-                onclick: () => this.showDocument(key, document.id),
-              }),
-            ),
-          ),
+          current
+            ? h(
+                'div',
+                { class: 'documents', role: 'tablist', 'aria-label': 'Documents' },
+                current.documents.map((document) => this.documentTab(key, document, document.id === current.document.id)),
+              )
+            : null,
+          closed.length > 0
+            ? h('button', {
+                class: 'button quiet closed-documents',
+                'aria-haspopup': 'menu',
+                title: 'Documents closed for everyone; pick one to reopen it',
+                text: `Closed (${closed.length})`,
+                onclick: (event) => this.openClosedMenu(key, event.currentTarget),
+              })
+            : null,
         ),
       );
     }
     return parts;
+  }
+
+  /** A document in the strip, with its close control (W closes the one shown). */
+  documentTab(key, document, selected) {
+    return h(
+      'div',
+      { class: selected ? 'document selected' : 'document', role: 'presentation' },
+      h('button', {
+        role: 'tab',
+        'aria-selected': String(selected),
+        title: document.title,
+        text: document.title,
+        onclick: () => this.showDocument(key, document.id),
+      }),
+      h('button', {
+        class: 'close',
+        title: 'Close this document for everyone (W)',
+        'aria-label': `Close ${document.title}`,
+        text: '×',
+        onclick: () => this.closeDocument(key, document),
+      }),
+    );
   }
 
   /** The view switch and export, the filter, then the counts with their actions. */
@@ -759,7 +813,7 @@ class App {
     return null;
   }
 
-  emptyTab(key, session, state) {
+  emptyTab(key, session, state, closed) {
     if (state === 'waiting') {
       return empty(
         'Waiting for this conversation',
@@ -772,6 +826,9 @@ class App {
     // Loaded in the host but not fetched into this window yet.
     if (!this.contents.has(key)) {
       return empty('Loading content…', null);
+    }
+    if (closed.length > 0) {
+      return empty('All documents are closed', `They are closed for everyone. Closed (${closed.length}) above reopens one.`);
     }
     return empty('Nothing published yet', 'Content appears here when the agent publishes to Prism.');
   }
@@ -918,17 +975,14 @@ class App {
     if (!this.menu) {
       return;
     }
-    const { key, x, y } = this.menu;
-    const windows = this.state.arrangement.windows;
-    const items = [
-      menuItem('Move to new window', () => this.backend.moveTab(key, null)),
-      ...windows
-        .map((window, index) => [window, index])
-        .filter(([window]) => window.id !== this.backend.windowId)
-        .map(([window, index]) => menuItem(`Move to window ${index + 1}${this.windowProjects(window)}`, () => this.backend.moveTab(key, window.id))),
-      h('hr'),
-      menuItem('Close tab', () => this.backend.closeTab(key)),
-    ];
+    const { key, x, y, closed } = this.menu;
+    const items = closed ? this.closedMenuItems(key) : this.tabMenuItems(key);
+    if (items.length === 0) {
+      // The last closed document was reopened meanwhile.
+      this.closeMenu();
+      return;
+    }
+    this.menuElement.classList.toggle('closed-menu', Boolean(closed));
     for (const item of items) {
       item.addEventListener('click', () => this.closeMenu());
     }
@@ -937,6 +991,28 @@ class App {
     const height = this.menuElement.offsetHeight;
     this.menuElement.style.setProperty('left', `${Math.min(x, window.innerWidth - width - 4)}px`);
     this.menuElement.style.setProperty('top', `${Math.min(y, window.innerHeight - height - 4)}px`);
+  }
+
+  tabMenuItems(key) {
+    const windows = this.state.arrangement.windows;
+    return [
+      menuItem('Move to new window', () => this.backend.moveTab(key, null)),
+      ...windows
+        .map((window, index) => [window, index])
+        .filter(([window]) => window.id !== this.backend.windowId)
+        .map(([window, index]) => menuItem(`Move to window ${index + 1}${this.windowProjects(window)}`, () => this.backend.moveTab(key, window.id))),
+      h('hr'),
+      menuItem('Close tab', () => this.backend.closeTab(key)),
+    ];
+  }
+
+  /** The closed documents of the tab, as the store has them; picking one reopens it for everyone. */
+  closedMenuItems(key) {
+    return documentsOf(this.contents.get(key), true).map((document) => {
+      const item = menuItem(document.title, () => this.reopenDocument(key, document));
+      item.title = `Reopen “${document.title}” for everyone`;
+      return item;
+    });
   }
 
   windowProjects(window) {
@@ -983,6 +1059,14 @@ class App {
 
   openMenu(key, x, y) {
     this.menu = { key, x, y };
+    this.renderMenu();
+    this.menuElement.querySelector('button')?.focus();
+  }
+
+  /** Closed (N): the closed documents in a menu below the control. */
+  openClosedMenu(key, control) {
+    const rect = control.getBoundingClientRect();
+    this.menu = { key, x: rect.left, y: rect.bottom + 4, closed: true };
     this.renderMenu();
     this.menuElement.querySelector('button')?.focus();
   }
@@ -1086,6 +1170,8 @@ class App {
     if (this.ask?.key === key) {
       this.ask = null;
     }
+    // U acts on the document shown from now on.
+    this.lastClosed = null;
     const view = this.view(key);
     const left = this.current(key)?.document.id;
     const kept = left ? { ...view.kept, [left]: { focus: view.focus, selected: view.selected } } : view.kept;
@@ -1365,8 +1451,71 @@ class App {
     );
   }
 
-  /** Reverts the latest undo record of the document, whatever made it (drop, accept, a tool). */
+  /** W or ×: closes the document in every window and for the agent; right after, U reopens it. */
+  async closeDocument(key, document) {
+    if (!document || !this.requireLive(key)) {
+      return;
+    }
+    // `send` counts this command first; another one after it ends the moment for U.
+    const count = this.commandCount + 1;
+    await this.send(
+      key,
+      { type: 'action', document_id: document.id, expected_revision: document.revision, action: { action: 'close' } },
+      {
+        sending: 'Closing…',
+        done: `Closed “${document.title}” for everyone. U reopens it.`,
+        onSuccess: () => {
+          if (this.commandCount === count) {
+            this.lastClosed = { key, id: document.id, revision: document.revision + 1 };
+          }
+        },
+      },
+    );
+  }
+
+  /** From Closed (N): reopens the document for everyone and shows it. */
+  async reopenDocument(key, document) {
+    if (!this.requireLive(key)) {
+      return;
+    }
+    await this.send(
+      key,
+      { type: 'action', document_id: document.id, expected_revision: document.revision, action: { action: 'reopen' } },
+      { sending: 'Reopening…', done: `Reopened “${document.title}”.`, onSuccess: () => this.showDocument(key, document.id) },
+    );
+  }
+
+  /** The document this window closed last, while nothing changed it and nothing was sent since. */
+  justClosed(key) {
+    const last = this.lastClosed;
+    if (last?.key !== key) {
+      return null;
+    }
+    return documentsOf(this.contents.get(key), true).find((document) => document.id === last.id && document.revision === last.revision) ?? null;
+  }
+
+  /**
+   * Reverts the latest undo record of the document, whatever made it (drop, accept, close, a
+   * tool); right after a close, that of the closed document, which reopens it.
+   */
   async undo(key) {
+    const errors = {
+      not_found: 'Nothing to undo in this document.',
+      // The store discards a record that can never apply, so the next undo reaches the one before.
+      undo_conflict: 'The latest action conflicts with later changes and was discarded; U undoes the one before it.',
+    };
+    const closed = this.justClosed(key);
+    if (closed) {
+      if (!this.requireLive(key)) {
+        return;
+      }
+      await this.send(
+        key,
+        { type: 'undo', document_id: closed.id, expected_revision: closed.revision },
+        { sending: 'Reopening…', done: `Reopened “${closed.title}”.`, errors, onSuccess: () => this.showDocument(key, closed.id) },
+      );
+      return;
+    }
     const current = this.current(key);
     if (!current || !this.requireLive(key)) {
       return;
@@ -1374,15 +1523,7 @@ class App {
     await this.send(
       key,
       { type: 'undo', document_id: current.document.id, expected_revision: current.document.revision },
-      {
-        sending: 'Undoing…',
-        done: 'Undid the latest action on this document.',
-        errors: {
-          not_found: 'Nothing to undo in this document.',
-          // The store discards a record that can never apply, so the next undo reaches the one before.
-          undo_conflict: 'The latest action conflicts with later changes and was discarded; U undoes the one before it.',
-        },
-      },
+      { sending: 'Undoing…', done: 'Undid the latest action on this document.', errors },
     );
   }
 
@@ -1391,6 +1532,9 @@ class App {
    * runs `onError` and shows the error, in the words of `errors[code]` when given.
    */
   async send(key, command, { sending, done, errors = {}, onSuccess = null, onError = null }) {
+    // Any command ends the moment right after a close.
+    this.commandCount += 1;
+    this.lastClosed = null;
     let id;
     try {
       id = await this.backend.send(key, command);
@@ -1492,6 +1636,7 @@ class App {
       '/': () => this.focusFilter(),
       '[': () => this.cycleDocuments(key, -1),
       ']': () => this.cycleDocuments(key, 1),
+      w: () => this.closeDocument(key, this.current(key)?.document),
       v: () => this.switchMode(key),
     };
     const diagram = this.mode(key) === 'diagram' ? this.diagramKeys(key) : {};
