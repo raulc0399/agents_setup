@@ -5,11 +5,11 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 
 ## Start here (handover)
 
-- **Code today**: `features/prism/` is one Rust crate. `src/bridge.rs` (bridge and tool
-  operations), `src/store.rs` (SQLite), `src/attachment.rs` (attach a running CLI),
-  `src/session.rs` (bindings, tmux), `src/ui/` (terminal UI, to be removed),
-  `plugins/claude/` (mod, tools, skill), `plugins/codex/` and `src/adapters/codex.rs`
-  (Codex agent's area).
+- **Code today**: `features/prism/` is a Cargo workspace: `prism` (bridge: `src/bridge.rs`
+  tool operations, `src/applink.rs` app link, `src/store.rs` SQLite, `src/attachment.rs`
+  attach by process ID and start time, `src/session.rs` bindings), `prism-core/` (model,
+  protocol, diagram layout), `app/` (desktop app, own workspace), `plugins/claude/` (mod,
+  tools, skill), `plugins/codex/` and `src/adapters/codex.rs` (Codex agent's area).
 - **Build and test**: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked --all-targets`, `cargo build --locked --release`; install with
   `install -m 755 target/release/prism ~/.local/bin/prism`.
@@ -36,6 +36,8 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 | 4 App shell | **[done]**, Mac pass open | one review round; the fix round was committed without a second review pass (usage limit). Mac checklist: see `app/README.md` if present, else the batch 4 report in the session |
 | 5 Diagram | **[done]**, Mac pass open (pinch, save dialog, Tab in WKWebView) | layout in the shell via `prism-core`; `LANE_GAP` grew to 48, arrows that skip a box run below the row |
 | 6 Ask, answer, drop, undo | **[done]**, Mac pass open (text selection, ⌘-click, prompt round trip) | multi-item ask lists every item; questions ordered by `(selection.revision, request_id)` with UUID v7 ids |
+| 7 Remove terminal UI | **[done]**, real loop open | needs: install binary, `/exit`, `claude -c`, app running on the Mac; steps in `docs/validation.md` |
+| 9.2 Codex handover | **[done]** | `docs/codex-handover.md` |
 
 Gate results (2026-11-09, from the `d_claude` container):
 
@@ -136,7 +138,7 @@ the Linux container.
    6.4 Accept and multi-selection (Space), as the terminal list view has them today; needed
        before batch 7 deletes it (found in the batch 4 review).
 
-7. **Remove the terminal UI, the tmux requirement and the old launcher** (Decisions 1 and 2)
+7. **Remove the terminal UI, the tmux requirement and the old launcher** **[done]** (Decisions 1 and 2)
    7.1 Delete `src/ui/`, `tests/ui.rs`, `tests/diagram.rs`, `tests/graph.rs` (moved to core),
        `examples/`, and the dependencies `ratatui`, `crossterm`, `resvg`, `usvg`,
        `tiny-skia`, `fontdb`.
@@ -153,7 +155,7 @@ the Linux container.
 
 9. **Codex**
    9.1 The MCP path uses the same bridge and app link; nothing app-specific in the adapter.
-   9.2 Codex-only changes are listed in `docs/codex-handover.md` for the Codex agent.
+   9.2 Codex-only changes are listed in `docs/codex-handover.md` for the Codex agent. **[done]**
 
 ## Validation per batch
 
