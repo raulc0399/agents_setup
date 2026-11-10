@@ -418,12 +418,12 @@ button {
 
 .documents button {
   max-width: 220px;
-  height: 24px;
-  padding: 0 10px;
-  border: none;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
   border-radius: 5px;
-  background: none;
-  color: var(--muted);
+  background: var(--surface-muted);
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -434,9 +434,9 @@ button {
 }
 
 .documents button[aria-selected="true"] {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: var(--shadow);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--pill-text);
   font-weight: 550;
 }
 
@@ -1126,33 +1126,54 @@ button {
   fill: var(--muted);
 }
 
-/* Arrow colors: the class on arrow and pill picks the token, the marker matches it. */
-.diagram-svg .prism-arrow-c0 {
-  --arrow: var(--arrow-0);
+/* Arrow colors: one rule per color class on the arrow line and its pill. WebKit does not
+   resolve a custom property set on an SVG group for its children, so no intermediate token. */
+.diagram-svg .prism-arrow-c0 .prism-line {
+  stroke: var(--arrow-0);
 }
 
-.diagram-svg .prism-arrow-c1 {
-  --arrow: var(--arrow-1);
+.diagram-svg .prism-arrow-c0 .prism-shape {
+  fill: var(--arrow-0);
 }
 
-.diagram-svg .prism-arrow-c2 {
-  --arrow: var(--arrow-2);
+.diagram-svg .prism-arrow-c1 .prism-line {
+  stroke: var(--arrow-1);
 }
 
-.diagram-svg .prism-arrow-c3 {
-  --arrow: var(--arrow-3);
+.diagram-svg .prism-arrow-c1 .prism-shape {
+  fill: var(--arrow-1);
 }
 
-.diagram-svg .prism-arrow-c4 {
-  --arrow: var(--arrow-4);
+.diagram-svg .prism-arrow-c2 .prism-line {
+  stroke: var(--arrow-2);
 }
 
-.diagram-svg .prism-arrow-c5 {
-  --arrow: var(--arrow-5);
+.diagram-svg .prism-arrow-c2 .prism-shape {
+  fill: var(--arrow-2);
 }
 
-.diagram-svg .prism-arrow .prism-line {
-  stroke: var(--arrow);
+.diagram-svg .prism-arrow-c3 .prism-line {
+  stroke: var(--arrow-3);
+}
+
+.diagram-svg .prism-arrow-c3 .prism-shape {
+  fill: var(--arrow-3);
+}
+
+.diagram-svg .prism-arrow-c4 .prism-line {
+  stroke: var(--arrow-4);
+}
+
+.diagram-svg .prism-arrow-c4 .prism-shape {
+  fill: var(--arrow-4);
+}
+
+.diagram-svg .prism-arrow-c5 .prism-line {
+  stroke: var(--arrow-5);
+}
+
+.diagram-svg .prism-arrow-c5 .prism-shape {
+  fill: var(--arrow-5);
 }
 
 .diagram-svg #prism-head-c0 path {
@@ -1181,10 +1202,6 @@ button {
 
 .diagram-svg #prism-head-focus path {
   fill: var(--focus);
-}
-
-.diagram-svg .prism-pill .prism-shape {
-  fill: var(--arrow);
 }
 
 .diagram-svg .prism-pill .prism-label {
