@@ -34,6 +34,7 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 | 2 `prism-core` | **[done]** | protocol 1: `hello` → `welcome` → `auth` → `snapshot`; see `prism-core/src/protocol.rs` |
 | 3 Bridge app link | **[done]** | `src/applink.rs`; commits noticed by polling SQLite `data_version`; legacy bindings report `bound_at_ms = 1` |
 | 4 App shell | **[done]**, Mac pass open | one review round; the fix round was committed without a second review pass (usage limit). Mac checklist: see `app/README.md` if present, else the batch 4 report in the session |
+| 5 Diagram | **[done]**, Mac pass open (pinch, save dialog, Tab in WKWebView) | layout in the shell via `prism-core`; `LANE_GAP` grew to 48, arrows that skip a box run below the row |
 
 Gate results (2026-11-09, from the `d_claude` container):
 
@@ -119,7 +120,7 @@ the Linux container.
        memory, list of live and ended sessions to reopen a closed tab.
    4.3 List view: cards with kind color, expanded focused card, `ask`, `hide`, `drop`.
 
-5. **Diagram in the app** (follows the "Diagrams (HTML)" rules in CLAUDE.md)
+5. **Diagram in the app** **[done]** (follows the "Diagrams (HTML)" rules in CLAUDE.md)
    5.1 Lanes = groups, boxes = bold name + subtitle ≤ 5 words, numbered pills on arrows,
        dashed = `manual`, amber gate badges.
    5.2 Pan and zoom with wheel, pinch, drag and keys; fit-all at start.
