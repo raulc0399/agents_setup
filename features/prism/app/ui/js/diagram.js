@@ -1,12 +1,12 @@
-import { MOD_KEY, h } from './dom.js';
-import { acceptanceBadges, askEditor, itemActions, questionBlock, selectionInside } from './list.js';
-import { questionsFor } from './rows.js';
+import { h } from './dom.js';
 
 /** Zoom limits in pixels per world unit; a fitted diagram is never blown up beyond MAX_FIT_SCALE. */
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 4;
 const MAX_FIT_SCALE = 1.25;
 const FIT_PADDING_PX = 24;
+/** Distance of the zoom controls from the canvas edge (`.diagram-controls` in styles.css). */
+const CONTROLS_INSET_PX = 12;
 const ZOOM_STEP = 1.25;
 const PAN_STEP_PX = 80;
 /** Ctrl+wheel: one mouse notch (about this many pixels) zooms one ZOOM_STEP; larger deltas
@@ -39,17 +39,18 @@ const VIEW_CLASSES = ['focused', 'selected'];
 
 /**
  * The diagram view of one tab: the SVG that `prism-core` laid out, panned and zoomed through
- * its viewBox, themed by `styles.css`, and a side panel for the focused item. A camera
+ * its viewBox, themed by `styles.css`; the tab's side pane shows the focused item. A camera
  * `{x, y, scale}` is the world point at the top left and pixels per world unit; each
  * document has its own, `null` fits the whole diagram.
  *
  * `actions`: layout(document, visibleIds) -> Diagram, onFocus(id), onToggle(id), onClear(),
- * onCamera(documentId, camera), and for the panel onAsk(), onAccept(), onHide(), onDrop(),
- * onSend(question), onCancelAsk(), onDraft(text).
+ * onCamera(documentId, camera), onLayout(): a new layout is shown (its `counts()` changed).
+ * `panel`: the tab's detail panel, which keeps the keyboard in the diagram as the canvas does.
  */
 export class DiagramView {
-  constructor(actions) {
+  constructor(actions, panel) {
     this.actions = actions;
+    this.panel = panel;
     this.model = null;
     this.diagram = null;
     this.svg = null;
@@ -61,7 +62,6 @@ export class DiagramView {
     this.gestureScale = null;
     this.shownFocus = null;
     this.shownSelection = null;
-    this.panelSignature = null;
 
     this.message = h('div', { class: 'diagram-message', hidden: true });
     this.zoomLabel = h('span', { class: 'zoom' });
@@ -97,9 +97,7 @@ export class DiagramView {
     this.canvas.addEventListener('gestureend', () => {
       this.gestureScale = null;
     });
-    // Focusable, so that its text can be scrolled with the keyboard.
-    this.panel = h('aside', { class: 'diagram-panel', tabindex: '0', 'aria-label': 'Item details' });
-    this.element = h('div', { class: 'diagram-view' }, h('div', { class: 'diagram-frame' }, this.canvas, this.message, this.controls), this.panel);
+    this.element = h('div', { class: 'diagram-frame' }, this.canvas, this.message, this.controls);
     this.resizes = new ResizeObserver(() => this.applyCamera());
     this.resizes.observe(this.canvas);
   }
@@ -111,8 +109,7 @@ export class DiagramView {
 
   /**
    * `model`: {document, rows, focus: the focused item's ID or null, selected: Set of selected
-   * item IDs, questions, camera: the camera saved for this document or null,
-   * ask: {text, quoteLabel} | null, readOnly: why commands are unavailable, or null}.
+   * item IDs, camera: the camera saved for this document or null}.
    */
   render(model) {
     const previousFocus = this.model?.focus ?? null;
@@ -127,7 +124,6 @@ export class DiagramView {
     this.camera = usableCamera(model.camera) ? model.camera : null;
     this.applyCamera();
     this.showFocus(model.focus !== previousFocus);
-    this.renderPanel();
   }
 
   async requestLayout(key, document, visible) {
@@ -167,7 +163,7 @@ export class DiagramView {
     this.shownSelection = null;
     this.applyCamera();
     this.showFocus(false);
-    this.renderPanel();
+    this.actions.onLayout();
     if (refocus) {
       (this.stop(this.model.focus) ?? this.canvas).focus({ preventScroll: true });
     }
@@ -183,13 +179,9 @@ export class DiagramView {
     (this.stop(this.model?.focus) ?? this.canvas).focus({ preventScroll: true });
   }
 
-  focusEditor() {
-    this.panel.querySelector('.ask textarea')?.focus();
-  }
-
-  /** The text the user selected inside the panel's text of the focused item. */
-  selectedText(id) {
-    return id === this.model?.focus ? selectionInside(this.panel.querySelector('.panel-body')) : '';
+  /** Boxes, arrows and badges of the diagram shown; null before its layout arrived. */
+  counts() {
+    return this.svg ? ['box', 'pill', 'gate'].map((kind) => this.svg.querySelectorAll(`[data-kind="${kind}"]`).length) : null;
   }
 
   showMessage(text) {
@@ -197,7 +189,7 @@ export class DiagramView {
     this.message.textContent = text ?? '';
   }
 
-  // Focus and panel
+  // Focus
 
   /** The keyboard stop of an item: its box, badge, lane or, for an arrow, its pill. */
   stop(id) {
@@ -209,7 +201,8 @@ export class DiagramView {
 
   /**
    * Highlights the focused item. When it `moved` by keyboard, the item also takes the
-   * keyboard (unless something outside the diagram has it) and comes into view.
+   * keyboard (unless something outside the diagram and its detail panel has it) and comes
+   * into view.
    */
   showFocus(moved) {
     if (!this.svg) {
@@ -245,44 +238,10 @@ export class DiagramView {
       return;
     }
     const active = document.activeElement;
-    if (active === document.body || active === null || this.element.contains(active)) {
+    if (active === document.body || active === null || this.element.contains(active) || this.panel.contains(active)) {
       stop.focus({ preventScroll: true });
     }
     this.reveal(stop);
-  }
-
-  /** Rebuilt only when what it shows changed; a rebuild keeps the draft, the keyboard and the caret. */
-  renderPanel() {
-    const { ask, readOnly } = this.model;
-    const row = this.model.rows.find((candidate) => candidate.id === this.model.focus) ?? null;
-    const selected = this.model.rows.filter((candidate) => this.model.selected.has(candidate.id));
-    const questions = row ? questionsFor(this.model.questions, this.model.document.id, row.id) : [];
-    const counts = this.svg ? ['box', 'pill', 'gate'].map((kind) => this.svg.querySelectorAll(`[data-kind="${kind}"]`).length) : null;
-    const signature = JSON.stringify([row, questions, selected.map((item) => [item.number, item.title]), ask ? [ask.quoteLabel, ask.sending] : null, readOnly, row ? null : [this.model.document.title, counts]]);
-    if (signature === this.panelSignature) {
-      return;
-    }
-    this.panelSignature = signature;
-    const previous = this.panel.querySelector('.ask textarea');
-    const typing = ask && previous && document.activeElement === previous;
-    const caret = typing ? [previous.selectionStart, previous.selectionEnd] : null;
-    const actions = row || selected.length > 0 || ask ? this.panelActions(selected.length, ask, readOnly) : null;
-    this.panel.replaceChildren(
-      ...(row ? itemPanel(row, questions, actions) : overviewPanel(this.model.document.title, counts, selected, actions)),
-    );
-    if (typing) {
-      const textarea = this.panel.querySelector('.ask textarea');
-      textarea.focus();
-      textarea.setSelectionRange(...caret);
-    }
-  }
-
-  /** The ask editor while asking, else the buttons for the focused or selected items. */
-  panelActions(selection, ask, readOnly) {
-    if (ask) {
-      return askEditor(ask, readOnly, this.actions);
-    }
-    return h('div', { class: 'panel-actions' }, itemActions(selection, readOnly, this.actions), readOnly ? h('span', { class: 'hint', text: readOnly }) : null);
   }
 
   // Camera
@@ -291,21 +250,24 @@ export class DiagramView {
     return { width: this.canvas.clientWidth, height: this.canvas.clientHeight };
   }
 
-  /** The camera that shows the whole diagram, centered. */
+  /** The camera that shows the whole diagram, centered above the zoom controls. */
   fitCamera() {
     const { width, height } = this.size();
     const bounds = this.diagram ?? { width: 0, height: 0 };
     if (bounds.width <= 0 || bounds.height <= 0) {
       return { x: 0, y: 0, scale: 1 };
     }
+    // The zoom controls sit at the bottom: the fitted diagram stays above them.
+    const bottom = Math.max(FIT_PADDING_PX, this.controls.offsetHeight + 2 * CONTROLS_INSET_PX);
+    const usable = height - FIT_PADDING_PX - bottom;
     const scale = clamp(
-      Math.min((width - 2 * FIT_PADDING_PX) / bounds.width, (height - 2 * FIT_PADDING_PX) / bounds.height, MAX_FIT_SCALE),
+      Math.min((width - 2 * FIT_PADDING_PX) / bounds.width, usable / bounds.height, MAX_FIT_SCALE),
       MIN_SCALE,
       MAX_SCALE,
     );
     return {
       x: bounds.width / 2 - width / 2 / scale,
-      y: bounds.height / 2 - height / 2 / scale,
+      y: bounds.height / 2 - (FIT_PADDING_PX + usable / 2) / scale,
       scale,
     };
   }
@@ -557,50 +519,4 @@ function usableCamera(camera) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), Math.max(min, max));
-}
-
-/** The focused item; `actions` (buttons or the ask editor) come before its questions. */
-function itemPanel(row, questions, actions) {
-  const badges = acceptanceBadges(row);
-  return [
-    h('div', { class: `panel-tag kind-${row.kind}` }, h('span', { class: 'kind', text: row.kindLabel }), h('span', { class: 'number', text: String(row.number) })),
-    h('h2', { class: 'panel-title', text: row.title }),
-    badges.length > 0 ? h('div', { class: 'badges' }, badges) : null,
-    row.body ? h('div', { class: 'panel-body', text: row.body }) : null,
-    row.source ? h('div', { class: 'card-source', text: row.source }) : null,
-    actions,
-    ...questions.map(questionBlock),
-  ].filter(Boolean);
-}
-
-function overviewPanel(title, counts, selected, actions) {
-  const [boxes, arrows, badges] = counts ?? [0, 0, 0];
-  const chip = (count, one, many) => h('span', { class: 'chip', text: `${count} ${count === 1 ? one : many}` });
-  return [
-    h('div', { class: 'panel-tag' }, h('span', { class: 'kind', text: 'Diagram' })),
-    h('h2', { class: 'panel-title', text: title }),
-    counts ? h('div', { class: 'chips' }, chip(boxes, 'box', 'boxes'), chip(arrows, 'arrow', 'arrows'), chip(badges, 'badge', 'badges')) : null,
-    selected.length > 0
-      ? h(
-          'div',
-          { class: 'panel-selection' },
-          h('h3', { text: `${selected.length} selected` }),
-          h('ul', {}, selected.map((item) => h('li', {}, h('span', { class: 'number', text: String(item.number) }), ' ', item.title))),
-        )
-      : null,
-    actions,
-    h(
-      'p',
-      { class: 'hint' },
-      'Click a box, an arrow’s number or a badge, or press ',
-      h('kbd', { text: 'Tab' }),
-      '; ',
-      h('kbd', { text: 'Space' }),
-      ' or ',
-      h('kbd', { text: MOD_KEY }),
-      ' and click selects several. Drag or scroll to pan; ',
-      h('kbd', { text: MOD_KEY }),
-      ' and scroll or pinch to zoom.',
-    ),
-  ].filter(Boolean);
 }

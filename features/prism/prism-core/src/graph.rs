@@ -68,21 +68,28 @@ pub const KIND_ARROW: &str = "arrow";
 pub const KIND_PILL: &str = "pill";
 /// Class modifier on the arrow and pill of a manual (dashed) step.
 const MODIFIER_MANUAL: &str = "manual";
+/// Marks an arrow color, followed by its index into `ARROW_COLORS`: in the class on arrow
+/// and pill (`prism-arrow-c0` ...) and in the id of its arrowhead (`prism-head-c0` ...).
+const COLOR_MARK: &str = "c";
 /// Class modifier on every second lane, which the default colors paint in the second tone.
 const MODIFIER_ALTERNATE: &str = "alt";
-/// Arrowhead markers: plain, manual and focused.
+/// Arrowhead markers: one per arrow color (see `COLOR_MARK`), and the focused one.
 const HEAD: &str = "prism-head";
-const HEAD_MANUAL: &str = "prism-head-manual";
 const HEAD_FOCUS: &str = "prism-head-focus";
 
 const BACKGROUND: &str = "#101418";
 const BOX_FILL: &str = "#1a2027";
 const TEXT: &str = "#d8dde3";
 const DIM: &str = "#8b93a1";
-const FOCUS: &str = "#4cc9f0";
+/// White, so that the focus differs from every kind and arrow color by more than hue.
+const FOCUS: &str = "#ffffff";
+const STEP: &str = "#4cc9f0";
 const AMBER: &str = "#f59e0b";
 const LANE_COLORS: [&str; 2] = ["#2dd4bf", "#6e9fff"];
-const FLOW: &str = "#6e9fff";
+/// Arrows within one lane, or between the same two lanes, take these colors in turn.
+pub const ARROW_COLORS: [&str; 6] = [
+    "#94a3b8", "#f472b6", "#2dd4bf", "#fb923c", "#b794f6", "#a3e635",
+];
 const PILL_TEXT: &str = "#0d1117";
 const GATE_TEXT: &str = "#1b1b1b";
 
@@ -178,6 +185,8 @@ struct Edge {
     dashed: bool,
     direction: Direction,
     pill: WorldRect,
+    /// Index into `ARROW_COLORS`.
+    color: usize,
 }
 
 #[derive(Default)]
@@ -192,7 +201,7 @@ pub struct GraphLayout {
 fn kind_color(kind: &ElementKind) -> &'static str {
     match kind {
         ElementKind::Text => TEXT,
-        ElementKind::Step => FOCUS,
+        ElementKind::Step => STEP,
         ElementKind::Finding => "#e5484d",
         ElementKind::Question => "#d783ff",
     }
@@ -465,6 +474,8 @@ impl GraphLayout {
             .filter(|item| !consumed_edges.contains(&item.id))
             .collect();
         sorted.sort_by_key(|item| (item.semantic_revision, item.id));
+        // Arrows per lane pair, unordered: the next arrow of a pair takes the next color.
+        let mut pair_counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for (index, relationship) in sorted.into_iter().enumerate() {
             let (Some(from), Some(to)) =
                 (rects.get(&relationship.from), rects.get(&relationship.to))
@@ -484,6 +495,12 @@ impl GraphLayout {
             };
             let (shown, pill) = place_pill(&points, &label, &blocked, &layout.edges);
             let name = |id: &Id| single_line(&document.elements[id].title);
+            let (from_lane, to_lane) = (lane_of[&relationship.from], lane_of[&relationship.to]);
+            let count = pair_counts
+                .entry((from_lane.min(to_lane), from_lane.max(to_lane)))
+                .or_default();
+            let color = *count % ARROW_COLORS.len();
+            *count += 1;
             layout.edges.push(Edge {
                 id: relationship.id,
                 points,
@@ -493,6 +510,7 @@ impl GraphLayout {
                 dashed: relationship.manual,
                 direction: relationship.direction.clone(),
                 pill,
+                color,
             });
         }
         let height = layout.lanes.last().map_or(0.0, |lane| lane.rect.bottom());
@@ -583,7 +601,12 @@ impl GraphLayout {
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" font-family="sans-serif">"#
         );
         svg.push_str("<defs>");
-        for (id, color) in [(HEAD, FLOW), (HEAD_MANUAL, DIM), (HEAD_FOCUS, FOCUS)] {
+        let heads = ARROW_COLORS
+            .iter()
+            .enumerate()
+            .map(|(index, color)| (head_id(index), *color))
+            .chain(std::iter::once((HEAD_FOCUS.to_owned(), FOCUS)));
+        for (id, color) in heads {
             let _ = write!(
                 svg,
                 r#"<marker id="{id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>"#
@@ -602,7 +625,7 @@ impl GraphLayout {
                     &mut svg,
                     group,
                     KIND_LANE,
-                    modifier,
+                    modifier.as_slice(),
                     Some(&format!("Group: {}", lane.title)),
                 ),
                 // The lane of ungrouped boxes is not content: themed, not clickable.
@@ -644,7 +667,7 @@ impl GraphLayout {
                 Direction::Undirected => String::new(),
             };
             // The pill is the arrow's keyboard stop; the line answers pointers only.
-            open_clickable(&mut svg, edge.id, KIND_ARROW, edge_modifier(edge), None);
+            open_clickable(&mut svg, edge.id, KIND_ARROW, &edge_modifiers(edge), None);
             // An invisible wide stroke makes the thin arrow easy to hit with a pointer.
             let _ = write!(
                 svg,
@@ -675,7 +698,7 @@ impl GraphLayout {
                 &mut svg,
                 node.id,
                 KIND_BOX,
-                Some(kind_name(&node.kind)),
+                &[kind_name(&node.kind)],
                 Some(&format!("{}: {}", kind_label(&node.kind), node.name)),
             );
             let _ = write!(
@@ -724,7 +747,7 @@ impl GraphLayout {
                     &mut svg,
                     gate.id,
                     KIND_GATE,
-                    Some(kind_name(&gate.kind)),
+                    &[kind_name(&gate.kind)],
                     Some(&if gate.more {
                         format!("{} more on {}: {}", gate.label, node.name, gate.title)
                     } else {
@@ -764,7 +787,7 @@ impl GraphLayout {
                 &mut svg,
                 edge.id,
                 KIND_PILL,
-                edge_modifier(edge),
+                &edge_modifiers(edge),
                 Some(&format!("Arrow {}: {}", edge.label, edge.ends)),
             );
             let _ = write!(
@@ -1057,18 +1080,28 @@ fn overlaps(a: &WorldRect, b: &WorldRect, margin: f32) -> bool {
 }
 
 /// Arrow and pill color, and the arrowhead marker to match.
-fn edge_paint(edge: &Edge, focused: bool) -> (&'static str, &'static str) {
+fn edge_paint(edge: &Edge, focused: bool) -> (&'static str, String) {
     if focused {
-        (FOCUS, HEAD_FOCUS)
-    } else if edge.dashed {
-        (DIM, HEAD_MANUAL)
+        (FOCUS, HEAD_FOCUS.to_owned())
     } else {
-        (FLOW, HEAD)
+        (ARROW_COLORS[edge.color], head_id(edge.color))
     }
 }
 
-fn edge_modifier(edge: &Edge) -> Option<&'static str> {
-    edge.dashed.then_some(MODIFIER_MANUAL)
+fn head_id(color: usize) -> String {
+    format!("{HEAD}-{COLOR_MARK}{color}")
+}
+
+/// `manual` for a dashed arrow, then its color.
+fn edge_modifiers(edge: &Edge) -> Vec<String> {
+    edge.dashed
+        .then(|| MODIFIER_MANUAL.to_owned())
+        .into_iter()
+        .chain(std::iter::once(format!(
+            "{KIND_ARROW}-{COLOR_MARK}{}",
+            edge.color
+        )))
+        .collect()
 }
 
 fn kind_name(kind: &ElementKind) -> &'static str {
@@ -1090,16 +1123,19 @@ fn kind_label(kind: &ElementKind) -> &'static str {
 }
 
 /// Opens the `<g>` around one clickable shape; the caller closes it. CSS themes the shape
-/// through its classes: `prism-<kind>`, plus `prism-<modifier>` when given. With a `label`
-/// it is a keyboard stop named by it; without, it answers pointers only.
+/// through its classes: `prism-<kind>`, plus `prism-<modifier>` for each modifier. With a
+/// `label` it is a keyboard stop named by it; without, it answers pointers only.
 fn open_clickable(
     svg: &mut String,
     id: Id,
     kind: &str,
-    modifier: Option<&str>,
+    modifiers: &[impl AsRef<str>],
     label: Option<&str>,
 ) {
-    let modifier = modifier.map_or(String::new(), |name| format!(" prism-{name}"));
+    let modifier: String = modifiers
+        .iter()
+        .map(|name| format!(" prism-{}", name.as_ref()))
+        .collect();
     let focus = label.map_or(r#"tabindex="-1" aria-hidden="true""#.to_owned(), |label| {
         format!(
             r#"tabindex="0" role="button" aria-label="{}""#,

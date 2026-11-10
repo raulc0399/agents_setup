@@ -117,6 +117,16 @@ export function itemCount(document) {
   return records(document).length;
 }
 
+/**
+ * Whether a document has something to draw beyond boxes: a group, or an arrow between two
+ * items, none of them archived.
+ */
+export function hasDiagram(document) {
+  const active = (id) => document.elements[id] && !document.elements[id].archived;
+  const arrows = Object.values(document.relationships).some((item) => !item.archived && active(item.from) && active(item.to));
+  return arrows || Object.values(document.groups).some((item) => !item.archived);
+}
+
 /** IDs of the items a document has that are not archived, hidden or not. */
 export function activeIds(document) {
   return new Set(records(document).map((record) => record.id));

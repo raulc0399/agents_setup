@@ -267,23 +267,34 @@ export const VERSION_PROBLEM =
 export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW, NOTES, RELEASE, SYNC_ITEM, TABS_ITEM };
 export const RELEASE_IDS = { item: releaseItem, link: releaseLink, group: releaseGroup };
 
-/** View state of the live tab per diagram scenario. */
+/** View state of the live tab per diagram scenario; the release flow opens in the diagram unless chosen otherwise. */
 const DIAGRAM_VIEWS = {
-  diagram: { focus: null, mode: 'diagram', cameras: {} },
-  'diagram-panel': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
-  'diagram-ask': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
-  'diagram-zoomed': { focus: releaseItem(7), mode: 'diagram', cameras: { [RELEASE]: { x: 20, y: -20, scale: 1.9 } } },
-  'diagram-checks': { focus: null, mode: 'list', cameras: {} },
-  'narrow-checks': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
+  diagram: { focus: null, cameras: {} },
+  'diagram-panel': { focus: releaseItem(4), cameras: {} },
+  'diagram-ask': { focus: releaseItem(4), cameras: {} },
+  'diagram-zoomed': { focus: releaseItem(7), cameras: { [RELEASE]: { x: 20, y: -20, scale: 1.9 } } },
+  // A focused and a selected arrow between the same two lanes: marked by more than their color.
+  'diagram-arrow': { focus: releaseLink(4), selected: [releaseLink(5)], cameras: {} },
+  'diagram-checks': { focus: null, modes: { [RELEASE]: 'list' }, cameras: {} },
+  'narrow-checks': { focus: releaseItem(4), cameras: {} },
 };
 export const CONTENTS_FOR_TESTS = CONTENTS;
 
-/** View state of the live tab per list scenario. */
+/**
+ * View state of the live tab per list scenario. The app plan has an arrow and a group, so it
+ * would open in the diagram: the list scenarios chose the list for it before.
+ */
+const LIST_MODES = { [PLAN]: 'list' };
 const LIST_VIEWS = {
-  focused: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004', hidden: [SYNC_ITEM], mode: 'list' },
-  questions: { document: PLAN, focus: SYNC_ITEM, hidden: [], mode: 'list' },
-  filter: { document: PLAN, focus: null, hidden: [], filter: 'pairing', mode: 'list' },
+  focused: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004', hidden: [SYNC_ITEM] },
+  questions: { document: PLAN, focus: SYNC_ITEM, hidden: [] },
+  filter: { document: PLAN, focus: null, hidden: [], filter: 'pairing' },
+  'action-checks': { modes: { ...LIST_MODES, [RELEASE]: 'list' } },
+  // A document without arrows or groups: a list without a view switch.
+  plain: { document: REVIEW },
 };
+/** Scenarios whose live tab has no saved view state: each document opens as its content says. */
+const FRESH_VIEWS = ['view-checks'];
 
 /** Fixture per scenario: `state` (AppState) and `contents` per session key. */
 export function fixture(scenario) {
@@ -315,7 +326,7 @@ export function fixture(scenario) {
     return { state, contents: CONTENTS };
   }
   const active = { ended: ENDED, disconnected: CODEX }[scenario] ?? LIVE;
-  const views = LIST_VIEWS[scenario] ? { [LIVE]: LIST_VIEWS[scenario] } : {};
+  const views = FRESH_VIEWS.includes(scenario) ? {} : { [LIVE]: { modes: LIST_MODES, ...LIST_VIEWS[scenario] } };
   if (DIAGRAM_VIEWS[scenario]) {
     views[LIVE] = { document: RELEASE, hidden: [], ...DIAGRAM_VIEWS[scenario] };
   }

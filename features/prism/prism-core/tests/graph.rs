@@ -1,5 +1,6 @@
 use prism_core::graph::{
-    Detail, GraphLayout, KIND_ARROW, KIND_BOX, KIND_GATE, KIND_LANE, KIND_PILL, WorldRect,
+    ARROW_COLORS, Detail, GraphLayout, KIND_ARROW, KIND_BOX, KIND_GATE, KIND_LANE, KIND_PILL,
+    WorldRect,
 };
 use prism_core::model::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -282,12 +283,12 @@ fn every_clickable_shape_is_tagged_and_wraps_its_own_shape() {
     assert!(
         group(KIND_ARROW, FLOW)
             .open
-            .contains(r#"class="prism-arrow prism-manual""#)
+            .contains(r#"class="prism-arrow prism-manual prism-arrow-c0""#)
     );
     assert!(
         group(KIND_PILL, FLOW)
             .open
-            .contains(r#"class="prism-pill prism-manual""#)
+            .contains(r#"class="prism-pill prism-manual prism-arrow-c0""#)
     );
     assert!(
         group(KIND_LANE, LANE)
@@ -671,4 +672,102 @@ fn arrows_into_one_side_of_a_box_end_apart() {
     assert_eq!(ends.len(), 2);
     assert_eq!(ends[0].1, ends[1].1, "both end on the top of box 3");
     assert!((ends[0].0 - ends[1].0).abs() >= 12.0, "apart: {ends:?}");
+}
+
+/// The color index of every arrow, from its class, in the SVG's order.
+fn arrow_colors(svg: &str) -> Vec<(Id, usize)> {
+    let (groups, _) = split(svg);
+    groups
+        .iter()
+        .filter(|group| group.kind == KIND_ARROW)
+        .map(|group| {
+            let class = attribute(&group.open, "class").unwrap();
+            let index = class.split("prism-arrow-c").nth(1).unwrap();
+            (group.id, index.parse().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn arrows_of_one_lane_pair_take_the_colors_in_turn() {
+    // Eight arrows inside the one lane of ungrouped boxes, in ID order.
+    let (mut document, mut visible) = steps(9);
+    let ids: Vec<u128> = (70..78).collect();
+    for (offset, id) in ids.iter().enumerate() {
+        let from = offset as u128 + 1;
+        let (key, relationship) = link(*id, from, from + 1, "next", offset == 1);
+        document.relationships.insert(key, relationship);
+        visible.insert(key);
+    }
+    let layout = GraphLayout::new(&document, &visible, Detail::Subtitles);
+    let svg = layout.svg(None, &BTreeSet::new());
+    let colors = arrow_colors(&svg);
+    let expected: Vec<(Id, usize)> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (Id::from_u128(*id), index % ARROW_COLORS.len()))
+        .collect();
+    assert_eq!(
+        colors, expected,
+        "distinct up to six, then the cycle repeats"
+    );
+    assert_eq!(
+        colors.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        layout.ids()[9..],
+        "numbered in focus order"
+    );
+    let again = GraphLayout::new(&document, &visible, Detail::Subtitles);
+    assert_eq!(
+        arrow_colors(&again.svg(None, &BTreeSet::new())),
+        colors,
+        "the same document gets the same colors"
+    );
+
+    // Line, head and pill carry the color as presentation attributes; dashes stay.
+    let (groups, _) = split(&svg);
+    let manual = Id::from_u128(ids[1]);
+    let arrow = groups
+        .iter()
+        .find(|group| group.kind == KIND_ARROW && group.id == manual)
+        .unwrap();
+    let pill = groups
+        .iter()
+        .find(|group| group.kind == KIND_PILL && group.id == manual)
+        .unwrap();
+    assert!(
+        arrow
+            .open
+            .contains(r#"class="prism-arrow prism-manual prism-arrow-c1""#)
+    );
+    assert!(
+        pill.open
+            .contains(r#"class="prism-pill prism-manual prism-arrow-c1""#)
+    );
+    let color = ARROW_COLORS[1];
+    assert!(arrow.inner.contains(&format!(r#"stroke="{color}""#)));
+    assert!(arrow.inner.contains(r#"stroke-dasharray="6 5""#));
+    assert!(arrow.inner.contains(r#"marker-end="url(#prism-head-c1)""#));
+    assert!(svg.contains(&format!(
+        r#"<marker id="prism-head-c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
+    )));
+    assert!(pill.inner.contains(&format!(r#"fill="{color}""#)));
+}
+
+#[test]
+fn each_lane_pair_counts_its_own_arrows_in_either_direction() {
+    let (mut document, mut visible) = three_lanes();
+    // Device to Staging, and back: one pair.
+    let (key, relationship) = link(65, 4, 1, "back", false);
+    document.relationships.insert(key, relationship);
+    visible.insert(key);
+    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+    let colors: BTreeMap<u128, usize> = arrow_colors(&svg)
+        .into_iter()
+        .map(|(id, color)| (id.as_u128(), color))
+        .collect();
+    // Device: 60; Device-Staging: 61, 65; Staging: 62; Staging-Live: 63, 64.
+    assert_eq!(
+        colors,
+        BTreeMap::from([(60, 0), (61, 0), (62, 0), (63, 0), (64, 1), (65, 1)])
+    );
 }

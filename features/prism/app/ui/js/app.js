@@ -2,7 +2,8 @@ import { DiagramView } from './diagram.js';
 import { h } from './dom.js';
 import { agentLabel, firstLine, projectName, shortConversation } from './format.js';
 import { ACCEPT_NOTE, ListView } from './list.js';
-import { activeIds, itemCount, rows as buildRows, sortedDocuments } from './rows.js';
+import { DetailPanel } from './panel.js';
+import { activeIds, hasDiagram, itemCount, rows as buildRows, sortedDocuments } from './rows.js';
 
 /** View state is saved this long after the last change, not on every key press. */
 const VIEW_SAVE_DELAY_MS = 300;
@@ -12,11 +13,12 @@ const TAB_DRAG_PREFIX = 'prism-tab:';
 /** A reply can arrive before `send_command` returned its ID; it waits this long to be matched. */
 const EARLY_REPLY_KEEP_MS = 10000;
 /**
- * Per tab, saved by the host. `cameras`: the diagram's zoom and pan per document ID; none fits
- * it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
+ * Per tab, saved by the host. `modes`: list or diagram per document ID, chosen with V; none
+ * shows the default for its content. `cameras`: the diagram's zoom and pan per document ID;
+ * none fits it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
  */
-const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], mode: 'list', cameras: {} };
-/** What a tab shows: `mode` in its view state; V switches. */
+const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], modes: {}, cameras: {} };
+/** What a document shows: its entry in `modes`, else the diagram when it has something to draw; V switches. */
 const VIEWS = ['list', 'diagram'];
 const VIEW_LABELS = { list: 'List', diagram: 'Diagram' };
 
@@ -97,6 +99,8 @@ class App {
     this.views = new Map();
     this.listViews = new Map();
     this.diagramViews = new Map();
+    this.panels = new Map();
+    this.shownPanel = null;
     this.focusIndex = new Map();
     this.saveTimers = new Map();
     this.pending = new Map();
@@ -127,7 +131,7 @@ class App {
       h('div', { class: 'strip-actions' }, this.sessionsButton),
     );
     this.header = h('div', { class: 'tab-header' });
-    // One input for the active tab's filter, kept across header rebuilds so typing goes on.
+    // One input for the active tab's filter, kept across pane rebuilds so typing goes on.
     this.filterInput = h('input', {
       class: 'filter',
       type: 'search',
@@ -143,7 +147,13 @@ class App {
         }
       },
     });
-    this.body = h('div', { class: 'body' });
+    // Updated in place, so a new revision does not rebuild the controls around the keyboard.
+    this.info = h('span', { class: 'info' });
+    // The body: the tab's list or diagram (or why there is none), and its side pane.
+    this.content = h('div', { class: 'content' });
+    this.controls = h('div', { class: 'pane-controls' });
+    this.pane = h('aside', { class: 'side-pane', 'aria-label': 'View and item details', hidden: true }, this.controls);
+    this.body = h('div', { class: 'body' }, this.content, this.pane);
     this.popover = h('div', { class: 'popover', role: 'dialog', 'aria-label': 'Sessions', hidden: true });
     this.main = h('main', { class: 'main' }, this.header, this.body, this.popover);
     this.statusMessage = h('div', { class: 'message', role: 'status' });
@@ -170,11 +180,13 @@ class App {
     this.render();
   }
 
-  /** The list and diagram of a tab that left this window are rebuilt if it comes back. */
+  /** The list, diagram and detail panel of a tab that left this window are rebuilt if it comes back. */
   forgetViews() {
     const tabs = new Set(this.myWindow()?.tabs ?? []);
-    for (const key of [...this.listViews.keys()].filter((key) => !tabs.has(key))) {
-      this.listViews.delete(key);
+    for (const views of [this.listViews, this.panels]) {
+      for (const key of [...views.keys()].filter((key) => !tabs.has(key))) {
+        views.delete(key);
+      }
     }
     for (const [key, view] of [...this.diagramViews].filter(([key]) => !tabs.has(key))) {
       view.dispose();
@@ -235,7 +247,9 @@ class App {
 
   view(key) {
     if (!this.views.has(key)) {
-      this.views.set(key, { ...DEFAULT_VIEW, ...(this.state.arrangement.views[key] ?? {}) });
+      // `mode` was one view for the whole tab, before `modes` held one per document.
+      const { mode, ...saved } = this.state.arrangement.views[key] ?? {};
+      this.views.set(key, { ...DEFAULT_VIEW, ...saved });
     }
     return this.views.get(key);
   }
@@ -261,17 +275,24 @@ class App {
         key,
         new ListView({
           onFocus: (id) => this.focus(key, id),
-          ...this.itemActions(key),
+          onToggle: (id) => this.toggleSelection(key, id),
         }),
       );
     }
     return this.listViews.get(key);
   }
 
-  /** What the list and the diagram panel do with the focused or selected items. */
+  /** The detail area of the tab's side pane, in both views. */
+  detailPanel(key) {
+    if (!this.panels.has(key)) {
+      this.panels.set(key, new DetailPanel(this.itemActions(key)));
+    }
+    return this.panels.get(key);
+  }
+
+  /** What the detail panel does with the focused or selected items. */
   itemActions(key) {
     return {
-      onToggle: (id) => this.toggleSelection(key, id),
       onAsk: () => this.openAsk(key),
       onAccept: () => this.accept(key),
       onHide: () => this.hide(key),
@@ -290,21 +311,26 @@ class App {
     if (!this.diagramViews.has(key)) {
       this.diagramViews.set(
         key,
-        new DiagramView({
-          layout: (document, visible) => this.backend.diagram(document, visible),
-          onFocus: (id) => this.focus(key, id),
-          ...this.itemActions(key),
-          onClear: () => this.focus(key, null),
-          onCamera: (documentId, camera) => {
-            const cameras = { ...this.view(key).cameras };
-            if (camera) {
-              cameras[documentId] = camera;
-            } else {
-              delete cameras[documentId];
-            }
-            this.storeView(key, { cameras });
+        new DiagramView(
+          {
+            layout: (document, visible) => this.backend.diagram(document, visible),
+            onFocus: (id) => this.focus(key, id),
+            onToggle: (id) => this.toggleSelection(key, id),
+            onClear: () => this.focus(key, null),
+            // The overview in the detail panel counts the shapes of the new layout.
+            onLayout: () => this.render(),
+            onCamera: (documentId, camera) => {
+              const cameras = { ...this.view(key).cameras };
+              if (camera) {
+                cameras[documentId] = camera;
+              } else {
+                delete cameras[documentId];
+              }
+              this.storeView(key, { cameras });
+            },
           },
-        }),
+          this.detailPanel(key).element,
+        ),
       );
     }
     return this.diagramViews.get(key);
@@ -329,6 +355,33 @@ class App {
     // Only what is shown counts: a selected item hidden or filtered out takes no part.
     const selected = new Set(view.selected);
     return { content, documents, document, rows, focus: rows[focusIndex] ?? null, selected: rows.filter((row) => selected.has(row.id)) };
+  }
+
+  /** What the tab's document shows: list, or diagram when it has something to draw. */
+  mode(key) {
+    const document = this.current(key)?.document;
+    if (!document || !hasDiagram(document)) {
+      return 'list';
+    }
+    return this.view(key).modes[document.id] ?? 'diagram';
+  }
+
+  /** V: the other view of the tab's document; a document with nothing to draw stays a list. */
+  switchMode(key) {
+    const current = this.current(key);
+    if (!current) {
+      return;
+    }
+    if (!hasDiagram(current.document)) {
+      this.setMessage('Nothing to draw: this document has no arrows or groups.');
+      return;
+    }
+    this.setMode(key, VIEWS[(VIEWS.indexOf(this.mode(key)) + 1) % VIEWS.length]);
+  }
+
+  setMode(key, mode) {
+    const document = this.current(key).document;
+    this.updateView(key, { modes: { ...this.view(key).modes, [document.id]: mode } });
   }
 
   // Rendering
@@ -430,8 +483,9 @@ class App {
     if (!key) {
       this.patch('header', this.header, null, () => []);
       this.header.hidden = true;
+      this.pane.hidden = true;
       this.showBody(null);
-      this.patch('body', this.body, ['empty', this.state.status, this.state.sessions, this.myWindow()?.id], () => [
+      this.patch('body', this.content, ['empty', this.state.status, this.state.sessions, this.myWindow()?.id], () => [
         this.emptyWindow(),
       ]);
       return;
@@ -445,37 +499,30 @@ class App {
     }
     const current = this.current(key);
     const view = this.view(key);
+    const mode = this.mode(key);
     const hidden = view.hidden.length;
-    const filtering = document.activeElement === this.filterInput;
-    const caret = filtering ? [this.filterInput.selectionStart, this.filterInput.selectionEnd] : null;
     this.patch(
       'header',
       this.header,
-      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, current?.rows.length, hidden, current?.selected.length, view.selected.length, view.mode],
-      () => this.tabHeader(key, session, state, current, hidden, view),
+      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id],
+      () => this.tabHeader(key, session, state, current),
     );
-    if (filtering && document.activeElement !== this.filterInput) {
-      this.filterInput.focus();
-      this.filterInput.setSelectionRange(...caret);
-    }
-    // While typing the two agree; they differ after a tab switch or Clear filter.
-    if (this.filterInput.value !== view.filter) {
-      this.filterInput.value = view.filter;
-    }
-    this.filterInput.classList.toggle('active', view.filter.trim() !== '');
 
+    this.pane.hidden = !current;
     if (!current) {
       this.showBody(null);
-      this.patch('body', this.body, ['no-content', key, state, session?.loaded, this.contents.has(key)], () => [
+      this.patch('body', this.content, ['no-content', key, state, session?.loaded, this.contents.has(key)], () => [
         this.emptyTab(key, session, state),
       ]);
       return;
     }
+    this.renderControls(key, current, view, mode);
     if (current.rows.length === 0) {
+      this.showPanel(null);
       this.showBody(null);
       const total = itemCount(current.document);
       const filter = view.filter.trim();
-      this.patch('body', this.body, ['no-rows', key, current.document.id, total, hidden, filter], () => [
+      this.patch('body', this.content, ['no-rows', key, current.document.id, total, hidden, filter], () => [
         total === 0
           ? empty('This document has no items', 'Dropped items come back with U (undo).')
           : filter
@@ -493,36 +540,73 @@ class App {
       return;
     }
     const selected = new Set(current.selected.map((row) => row.id));
-    const ask = this.ask?.key === key ? this.ask : null;
-    const readOnly = READ_ONLY_REASONS[state] ?? null;
+    const panel = this.detailPanel(key);
+    this.showPanel(panel);
+    const details = {
+      document: current.document,
+      rows: current.rows,
+      selected,
+      questions: current.content.questions,
+      ask: this.ask?.key === key ? this.ask : null,
+      readOnly: READ_ONLY_REASONS[state] ?? null,
+    };
 
-    if (view.mode === 'diagram') {
+    if (mode === 'diagram') {
       const diagramView = this.diagramView(key);
       this.showBody(diagramView, key);
-      diagramView.render({
-        document: current.document,
-        rows: current.rows,
-        // Only an item the user picked: without one the panel shows the overview.
-        focus: view.focus,
-        selected,
-        questions: current.content.questions,
-        camera: view.cameras?.[current.document.id] ?? null,
-        ask,
-        readOnly,
-      });
+      // Only an item the user picked: without one the panel shows the overview.
+      diagramView.render({ ...details, focus: view.focus, camera: view.cameras?.[current.document.id] ?? null });
+      panel.render({ ...details, focus: view.focus, counts: diagramView.counts() });
       return;
     }
     const listView = this.listView(key);
     this.showBody(listView, key);
-    listView.render({
-      document: current.document,
-      rows: current.rows,
-      focus: current.focus?.id ?? null,
-      selected,
-      questions: current.content.questions,
-      ask,
-      readOnly,
-    });
+    const focus = current.focus?.id ?? null;
+    listView.render({ ...details, focus });
+    panel.render({ ...details, focus, counts: null });
+  }
+
+  /**
+   * The controls block at the top of the side pane: the view switch when the document has
+   * something to draw, the filter, the counts with their actions, and the export.
+   */
+  renderControls(key, current, view, mode) {
+    const filtering = document.activeElement === this.filterInput;
+    const caret = filtering ? [this.filterInput.selectionStart, this.filterInput.selectionEnd] : null;
+    // A rebuild must not take the keyboard away from a focused button: its new copy takes it.
+    const control = this.controls.contains(document.activeElement) ? document.activeElement.dataset.control : null;
+    this.patch(
+      'controls',
+      this.controls,
+      [key, current.document.id, view.hidden.length, current.selected.length, view.selected.length, mode, hasDiagram(current.document)],
+      () => this.paneControls(key, current, view, mode),
+    );
+    if (filtering && document.activeElement !== this.filterInput) {
+      this.filterInput.focus();
+      this.filterInput.setSelectionRange(...caret);
+    }
+    if (control && !this.controls.contains(document.activeElement)) {
+      this.controls.querySelector(`[data-control="${control}"]`)?.focus();
+    }
+    this.info.textContent = `${current.rows.length} ${current.rows.length === 1 ? 'item' : 'items'} · revision ${current.document.revision}`;
+    // While typing the two agree; they differ after a tab switch or Clear filter.
+    if (this.filterInput.value !== view.filter) {
+      this.filterInput.value = view.filter;
+    }
+    this.filterInput.classList.toggle('active', view.filter.trim() !== '');
+  }
+
+  /** Below the controls, the side pane shows the tab's detail panel while there are items. */
+  showPanel(panel) {
+    if (this.shownPanel === panel) {
+      return;
+    }
+    // The controls stay in place, so the filter keeps the keyboard.
+    this.shownPanel?.element.remove();
+    this.shownPanel = panel;
+    if (panel) {
+      this.pane.append(panel.element);
+    }
   }
 
   /** Shows a tab's list or diagram in the body, keeping each tab's list scroll position across switches. */
@@ -536,17 +620,14 @@ class App {
     this.signatures.delete('body');
     this.shownView = view ? { view, key } : null;
     if (view) {
-      this.body.replaceChildren(view.element);
+      this.content.replaceChildren(view.element);
     }
     if (view instanceof ListView) {
       view.element.scrollTop = this.scrolls.get(key) ?? 0;
     }
   }
 
-  tabHeader(key, session, state, current, hidden, view) {
-    const mode = view.mode;
-    // Selected items hidden or filtered out stay selected but take no part in actions.
-    const filteredOut = current ? view.selected.length - current.selected.length : 0;
+  tabHeader(key, session, state, current) {
     const agent = session ? agentLabel(session.agent) : '';
     const parts = [
       h(
@@ -587,52 +668,74 @@ class App {
               }),
             ),
           ),
+        ),
+      );
+    }
+    return parts;
+  }
+
+  /** The view switch and export, the filter, then the counts with their actions. */
+  paneControls(key, current, view, mode) {
+    const hidden = view.hidden.length;
+    // Selected items hidden or filtered out stay selected but take no part in actions.
+    const filteredOut = view.selected.length - current.selected.length;
+    const switchable = hasDiagram(current.document);
+    const viewRow = switchable
+      ? h(
+          'div',
+          { class: 'pane-row' },
           h(
             'div',
             { class: 'segmented', role: 'group', 'aria-label': 'View' },
             VIEWS.map((name) =>
               h('button', {
                 'aria-pressed': String(name === mode),
+                'data-control': `view-${name}`,
                 title: `Show as ${VIEW_LABELS[name].toLowerCase()} (V)`,
                 text: VIEW_LABELS[name],
-                onclick: () => this.updateView(key, { mode: name }),
+                onclick: () => this.setMode(key, name),
               }),
             ),
           ),
-          this.filterInput,
           h('span', { class: 'spacer' }),
-          view.selected.length > 0
-            ? h('button', {
-                class: 'button quiet selection',
-                title: filteredOut > 0 ? 'Actions leave out selected items that are hidden or filtered out. Clear the selection (Esc)' : 'Clear the selection (Esc)',
-                text: `${current.selected.length} selected${filteredOut > 0 ? ` (${filteredOut} not shown)` : ''} · clear`,
-                onclick: () => this.clearSelection(key),
-              })
-            : null,
-          h('span', {
-            class: 'info',
-            text: `${current.rows.length} ${current.rows.length === 1 ? 'item' : 'items'} · revision ${current.document.revision}`,
-          }),
-          hidden > 0
-            ? h('button', {
-                class: 'button quiet',
-                title: 'Show the items hidden in this tab (Shift+H)',
-                text: `${hidden} hidden · show`,
-                onclick: () => this.updateView(key, { hidden: [] }),
-              })
-            : null,
           mode === 'diagram'
             ? h('button', {
                 class: 'button quiet',
+                'data-control': 'export',
                 title: 'Save the diagram as an SVG file (S)',
                 text: 'Export SVG',
                 onclick: () => this.exportDiagram(key),
               })
             : null,
-        ),
-      );
-    }
-    return parts;
+        )
+      : null;
+    return [
+      viewRow,
+      h('div', { class: 'pane-row' }, this.filterInput),
+      h(
+        'div',
+        { class: 'pane-row counts' },
+        this.info,
+        hidden > 0
+          ? h('button', {
+              class: 'button quiet',
+              'data-control': 'show-hidden',
+              title: 'Show the items hidden in this tab (Shift+H)',
+              text: `${hidden} hidden · show`,
+              onclick: () => this.updateView(key, { hidden: [] }),
+            })
+          : null,
+        view.selected.length > 0
+          ? h('button', {
+              class: 'button quiet selection',
+              'data-control': 'clear-selection',
+              title: filteredOut > 0 ? 'Actions leave out selected items that are hidden or filtered out. Clear the selection (Esc)' : 'Clear the selection (Esc)',
+              text: `${current.selected.length} selected${filteredOut > 0 ? ` (${filteredOut} not shown)` : ''} · clear`,
+              onclick: () => this.clearSelection(key),
+            })
+          : null,
+      ),
+    ];
   }
 
   banner(session, state) {
@@ -781,21 +884,25 @@ class App {
   renderStatus() {
     const key = this.activeKey();
     this.keys.hidden = !key;
-    const mode = key ? this.view(key).mode : 'list';
+    const mode = key ? this.mode(key) : 'list';
+    const document = key ? this.current(key)?.document : null;
     this.statusMessage.textContent = this.message?.text ?? '';
     this.statusMessage.title = this.message?.text ?? '';
     this.statusMessage.className = `message ${this.message?.tone ?? ''}`;
-    this.fitKeys(mode);
+    this.fitKeys(mode, Boolean(document && hasDiagram(document)));
   }
 
-  /** Shows the key hints that fit beside the message, leaving out the highest ranks first. */
-  fitKeys(mode) {
-    const signature = JSON.stringify([mode, this.keys.hidden, this.message?.text ?? '', this.statusbar.clientWidth]);
+  /**
+   * Shows the key hints that fit beside the message, leaving out the highest ranks first; V
+   * only when the document has a diagram to switch to.
+   */
+  fitKeys(mode, switchable) {
+    const signature = JSON.stringify([mode, switchable, this.keys.hidden, this.message?.text ?? '', this.statusbar.clientWidth]);
     if (this.keys.hidden || signature === this.keysSignature) {
       return;
     }
     this.keysSignature = signature;
-    let hints = KEY_HINTS[mode] ?? KEY_HINTS.list;
+    let hints = (KEY_HINTS[mode] ?? KEY_HINTS.list).filter(([keys]) => switchable || keys[0] !== 'V');
     this.keys.replaceChildren(...keyHints(hints));
     const ranks = [...new Set(hints.map(([, , rank]) => rank))].sort((left, right) => right - left);
     for (const rank of ranks) {
@@ -988,7 +1095,7 @@ class App {
   /** Enter or Esc in the filter: the keyboard goes back to the items, the filter stays. */
   leaveFilter() {
     const key = this.activeKey();
-    if (this.view(key).mode === 'diagram') {
+    if (this.mode(key) === 'diagram') {
       this.diagramView(key).restoreKeyboard();
     } else {
       this.listView(key).element.focus();
@@ -1004,7 +1111,7 @@ class App {
     if (current.selected.length > 0) {
       return current.selected;
     }
-    const focus = this.view(key).mode === 'diagram' ? this.diagramFocus(key) : current.focus;
+    const focus = this.mode(key) === 'diagram' ? this.diagramFocus(key) : current.focus;
     return focus ? [focus] : [];
   }
 
@@ -1102,10 +1209,9 @@ class App {
   }
 
   /**
-   * Opens the question editor for the focused or selected items: in the focused card, or in
-   * the diagram's panel; when the focused item is not among them, the first one takes the
-   * focus. Text selected inside the focused item becomes its quote; every other item is
-   * quoted in full.
+   * Opens the question editor for the focused or selected items in the detail panel; when
+   * the focused item is not among them, the first one takes the focus. Text selected inside
+   * the focused item's text in the panel becomes its quote; every other item is quoted in full.
    */
   openAsk(key) {
     if (!this.isLive(key)) {
@@ -1116,14 +1222,14 @@ class App {
     if (targets.length === 0) {
       return;
     }
-    const diagram = this.view(key).mode === 'diagram';
-    const view = diagram ? this.diagramView(key) : this.listView(key);
+    const diagram = this.mode(key) === 'diagram';
+    const panel = this.detailPanel(key);
     let focus = diagram ? this.diagramFocus(key) : this.current(key).focus;
     if (!focus || !targets.some((row) => row.id === focus.id)) {
       focus = targets[0];
       this.storeView(key, { focus: focus.id });
     }
-    const quoted = view.selectedText(focus.id);
+    const quoted = panel.selectedText(focus.id);
     const quotedRow = quoted.trim() ? focus : null;
     const ids = targets.map((row) => row.id);
     const same = this.ask?.key === key && this.ask.ids.join() === ids.join();
@@ -1139,9 +1245,9 @@ class App {
     };
     this.render();
     if (!diagram) {
-      view.reveal(focus.id);
+      this.listView(key).reveal(focus.id);
     }
-    view.focusEditor();
+    panel.focusEditor();
   }
 
   cancelAsk() {
@@ -1151,7 +1257,7 @@ class App {
     if (!key) {
       return;
     }
-    if (this.view(key).mode === 'diagram') {
+    if (this.mode(key) === 'diagram') {
       this.diagramView(key).restoreKeyboard();
     } else {
       this.listView(key).element.focus();
@@ -1351,6 +1457,10 @@ class App {
     if ((event.key === 'Enter' || event.key === ' ') && event.target.closest?.('button, [role="tab"]')) {
       return;
     }
+    // Arrow keys in the detail panel scroll it instead of moving or panning.
+    if (event.key.startsWith('Arrow') && event.target.closest?.('.detail-panel')) {
+      return;
+    }
 
     const key = this.activeKey();
     if (!key) {
@@ -1376,9 +1486,9 @@ class App {
       '/': () => this.focusFilter(),
       '[': () => this.cycleDocuments(key, -1),
       ']': () => this.cycleDocuments(key, 1),
-      v: () => this.updateView(key, { mode: VIEWS[(VIEWS.indexOf(this.view(key).mode) + 1) % VIEWS.length] }),
+      v: () => this.switchMode(key),
     };
-    const diagram = this.view(key).mode === 'diagram' ? this.diagramKeys(key, event.target) : {};
+    const diagram = this.mode(key) === 'diagram' ? this.diagramKeys(key) : {};
     const action = event.key in diagram ? diagram[event.key] : actions[event.key];
     if (action) {
       event.preventDefault();
@@ -1386,15 +1496,11 @@ class App {
     }
   }
 
-  /**
-   * Keys of the diagram, over those of the list; `null` turns a list key off. Arrow keys in
-   * the side panel scroll it instead of panning.
-   */
-  diagramKeys(key, target) {
+  /** Keys of the diagram, over those of the list. */
+  diagramKeys(key) {
     const diagram = this.diagramView(key);
     const focused = () => this.diagramFocus(key);
-    const inPanel = Boolean(target.closest?.('.diagram-panel'));
-    const pan = (dx, dy) => (inPanel ? null : () => diagram.panStep(dx, dy));
+    const pan = (dx, dy) => () => diagram.panStep(dx, dy);
     return {
       j: () => this.moveDiagramFocus(key, 1),
       k: () => this.moveDiagramFocus(key, -1),

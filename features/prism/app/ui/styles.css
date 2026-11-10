@@ -43,12 +43,18 @@
   --kind-link: #2563eb;
   --kind-group: #b46a0b;
 
-  /* Diagram roles, per the Diagrams rules: teal and blue lanes, blue flow, amber gates. */
+  /* Diagram roles, per the Diagrams rules: teal and blue lanes, amber gates. */
   --canvas: #fafbfc;
   --lane-a: var(--kind-step);
   --lane-b: var(--kind-link);
-  --flow: var(--kind-link);
-  --manual: var(--faint);
+  /* Arrows of one lane, or between the same two lanes, in turn (prism-arrow-c0 ...): at least
+     4.4:1 on the lane tints and 4.5:1 under the pill text; none is the focus blue. */
+  --arrow-0: #475569;
+  --arrow-1: #be185d;
+  --arrow-2: #0f766e;
+  --arrow-3: #c2410c;
+  --arrow-4: #7c3aed;
+  --arrow-5: #4d7c0f;
   --gate: #e8a020;
   --gate-text: #1b1b1b;
   --pill-text: #ffffff;
@@ -92,6 +98,12 @@
     --kind-group: #f0b44c;
 
     --canvas: #12151a;
+    --arrow-0: #94a3b8;
+    --arrow-1: #f472b6;
+    --arrow-2: #2dd4bf;
+    --arrow-3: #fb923c;
+    --arrow-4: #b794f6;
+    --arrow-5: #a3e635;
     --gate: #f0b44c;
     --pill-text: #0d1117;
   }
@@ -428,13 +440,13 @@ button {
   font-weight: 550;
 }
 
-.toolbar .spacer {
+.pane-row .spacer {
   flex: 1;
 }
 
-.toolbar .filter {
-  flex: 0 1 180px;
-  min-width: 80px;
+.pane-controls .filter {
+  flex: 1;
+  min-width: 0;
   height: 26px;
   padding: 0 9px;
   border: 1px solid var(--border-strong);
@@ -444,23 +456,23 @@ button {
   font: inherit;
 }
 
-.toolbar .filter:focus {
+.pane-controls .filter:focus {
   border-color: var(--focus);
   outline: none;
   box-shadow: 0 0 0 3px var(--focus-soft);
 }
 
-.toolbar .filter.active {
+.pane-controls .filter.active {
   border-color: var(--accent);
   background: var(--selected-bg);
 }
 
-.toolbar .button.selection {
+.pane-controls .button.selection {
   color: var(--accent);
   font-weight: 550;
 }
 
-.toolbar .info {
+.pane-controls .info {
   color: var(--faint);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -485,10 +497,18 @@ button {
   background: var(--danger-soft);
 }
 
+/* The tab's list or diagram, and its side pane (no column while hidden). */
 .body {
   grid-row: 2;
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 0;
+}
+
+.content {
+  display: grid;
   grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   min-height: 0;
 }
 
@@ -503,6 +523,8 @@ button {
 
 .cards {
   display: grid;
+  /* Cards never grow wider than the list for a long excerpt. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   max-width: 940px;
   margin: 0 auto;
@@ -602,10 +624,6 @@ button {
   white-space: nowrap;
 }
 
-.card.focused .card-head .title {
-  white-space: normal;
-}
-
 .badges {
   display: flex;
   flex: none;
@@ -660,16 +678,8 @@ button {
   white-space: nowrap;
 }
 
-.card-body {
-  margin: 6px 0 0 27px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
-  cursor: text;
-}
-
 .card-source {
-  margin: 6px 0 0 27px;
+  margin: 0;
   color: var(--muted);
   font: 12px/1.4 var(--mono);
   overflow-wrap: anywhere;
@@ -679,7 +689,7 @@ button {
 .card-question {
   display: grid;
   gap: 3px;
-  margin: 8px 0 0 27px;
+  margin: 0;
   padding: 7px 10px;
   border-left: 2px solid var(--kind-question);
   border-radius: 0 6px 6px 0;
@@ -734,23 +744,10 @@ button {
   color: var(--danger);
 }
 
-.card-actions {
-  display: flex;
-  gap: 6px;
-  margin: 10px 0 2px 27px;
-}
-
-.card-actions .hint {
-  margin-left: auto;
-  align-self: center;
-  color: var(--faint);
-  font-size: 11px;
-}
-
 .ask {
   display: grid;
   gap: 6px;
-  margin: 10px 0 2px 27px;
+  margin: 0;
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -827,13 +824,7 @@ button {
   font-weight: 550;
 }
 
-/* Diagram: the canvas pans and zooms through the SVG's viewBox; the panel shows one item. */
-
-.diagram-view {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  min-height: 0;
-}
+/* Diagram: the canvas pans and zooms through the SVG's viewBox. */
 
 .diagram-frame {
   position: relative;
@@ -906,15 +897,51 @@ button {
   text-align: center;
 }
 
-.diagram-panel {
+/* Side pane: the view's controls on top, the focused item below. */
+
+.side-pane {
   display: flex;
+  flex-direction: column;
+  width: 320px;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.pane-controls {
+  display: grid;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.pane-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.pane-row.counts .button {
+  height: 22px;
+  padding: 0 6px;
+}
+
+.detail-panel {
+  display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
   padding: 16px 18px;
   overflow-y: auto;
-  border-left: 1px solid var(--border);
-  background: var(--surface);
+  outline: none;
+}
+
+.detail-panel:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus);
 }
 
 .panel-tag {
@@ -964,29 +991,24 @@ button {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
+  cursor: text;
 }
 
-.diagram-panel .card-source,
-.diagram-panel .card-question,
-.diagram-panel .ask {
-  margin-left: 0;
-}
-
-.diagram-panel .ask .quote {
+.detail-panel .ask .quote {
   white-space: normal;
 }
 
 /* The panel is narrow: the key hint gets its own line above the buttons. */
-.diagram-panel .ask .row {
+.detail-panel .ask .row {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 
-.diagram-panel .ask .row .hint {
+.detail-panel .ask .row .hint {
   flex-basis: 100%;
 }
 
-.diagram-panel .badges {
+.detail-panel .badges {
   flex-wrap: wrap;
 }
 
@@ -1024,13 +1046,13 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-.diagram-panel .chips {
+.detail-panel .chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 
-.diagram-panel .hint {
+.detail-panel .hint {
   margin: 4px 0 0;
   color: var(--muted);
 }
@@ -1104,20 +1126,57 @@ button {
   fill: var(--muted);
 }
 
+/* Arrow colors: the class on arrow and pill picks the token, the marker matches it. */
+.diagram-svg .prism-arrow-c0 {
+  --arrow: var(--arrow-0);
+}
+
+.diagram-svg .prism-arrow-c1 {
+  --arrow: var(--arrow-1);
+}
+
+.diagram-svg .prism-arrow-c2 {
+  --arrow: var(--arrow-2);
+}
+
+.diagram-svg .prism-arrow-c3 {
+  --arrow: var(--arrow-3);
+}
+
+.diagram-svg .prism-arrow-c4 {
+  --arrow: var(--arrow-4);
+}
+
+.diagram-svg .prism-arrow-c5 {
+  --arrow: var(--arrow-5);
+}
+
 .diagram-svg .prism-arrow .prism-line {
-  stroke: var(--flow);
+  stroke: var(--arrow);
 }
 
-.diagram-svg .prism-arrow.prism-manual .prism-line {
-  stroke: var(--manual);
+.diagram-svg #prism-head-c0 path {
+  fill: var(--arrow-0);
 }
 
-.diagram-svg #prism-head path {
-  fill: var(--flow);
+.diagram-svg #prism-head-c1 path {
+  fill: var(--arrow-1);
 }
 
-.diagram-svg #prism-head-manual path {
-  fill: var(--manual);
+.diagram-svg #prism-head-c2 path {
+  fill: var(--arrow-2);
+}
+
+.diagram-svg #prism-head-c3 path {
+  fill: var(--arrow-3);
+}
+
+.diagram-svg #prism-head-c4 path {
+  fill: var(--arrow-4);
+}
+
+.diagram-svg #prism-head-c5 path {
+  fill: var(--arrow-5);
 }
 
 .diagram-svg #prism-head-focus path {
@@ -1125,11 +1184,7 @@ button {
 }
 
 .diagram-svg .prism-pill .prism-shape {
-  fill: var(--flow);
-}
-
-.diagram-svg .prism-pill.prism-manual .prism-shape {
-  fill: var(--manual);
+  fill: var(--arrow);
 }
 
 .diagram-svg .prism-pill .prism-label {
@@ -1165,10 +1220,21 @@ button {
   stroke-width: 2.5;
 }
 
+/* Focused and selected arrows do not rely on hue: a band along the line (its hit stroke,
+   so the area that answers the pointer stays), an outline and a halo on the pill. */
+.diagram-svg .prism-arrow.selected .prism-hit {
+  stroke: var(--accent);
+  stroke-opacity: 0.15;
+}
+
 .diagram-svg .prism-pill.selected .prism-shape,
 .diagram-svg .prism-gate.selected .prism-shape {
   stroke: var(--text);
   stroke-width: 2;
+}
+
+.diagram-svg .prism-pill.selected .prism-shape {
+  filter: drop-shadow(0 0 3px var(--accent));
 }
 
 /* The focused item, in every shape that shows it. */
@@ -1189,6 +1255,11 @@ button {
   stroke-width: 3;
 }
 
+.diagram-svg .prism-arrow.focused .prism-hit {
+  stroke: var(--focus);
+  stroke-opacity: 0.22;
+}
+
 .diagram-svg .prism-arrow.focused .prism-line[marker-end] {
   marker-end: url(#prism-head-focus);
 }
@@ -1199,6 +1270,9 @@ button {
 
 .diagram-svg .prism-pill.focused .prism-shape {
   fill: var(--focus);
+  stroke: var(--text);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 4px var(--focus));
 }
 
 .diagram-svg .prism-gate.focused .prism-shape {
@@ -1206,24 +1280,17 @@ button {
   stroke-width: 2.5;
 }
 
-/* Narrow windows: the panel goes below the canvas, the documents get a row of their own. */
+/* Narrow windows: the side pane goes below the list or canvas. */
 
 @media (max-width: 760px) {
-  .toolbar {
-    flex-wrap: wrap;
-    row-gap: 6px;
-  }
-
-  .toolbar .documents {
-    flex: 1 1 100%;
-  }
-
-  .diagram-view {
+  .body {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(0, 40%);
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
-  .diagram-panel {
+  .side-pane {
+    width: auto;
+    height: 40vh;
     border-top: 1px solid var(--border);
     border-left: none;
   }

@@ -1,15 +1,16 @@
 // Drives the product UI (ui/js/app.js) with the fake backend. `?scenario=<name>` picks the
-// fixture and the user input to replay; `?scenario=checks`, `?scenario=diagram-checks` and
-// `?scenario=action-checks` run the behaviour checks of the list, the diagram and the item
-// actions, `?scenario=status-checks` those of the connection status; each writes PASS or the
-// failures into #result.
+// fixture and the user input to replay; `?scenario=checks`, `?scenario=diagram-checks`,
+// `?scenario=view-checks` and `?scenario=action-checks` run the behaviour checks of the list,
+// the diagram, the view per document with its side pane, and the item actions,
+// `?scenario=status-checks` those of the connection status; each writes PASS or the failures
+// into #result.
 import { start } from '../ui/js/app.js';
-import { questionBlock } from '../ui/js/list.js';
+import { questionBlock } from '../ui/js/panel.js';
 import { fakeBackend } from './fake-backend.js';
 import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, VERSION_PROBLEM, fixture } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 const key = (name, options = {}) =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...options }));
@@ -105,7 +106,7 @@ async function replay(backend) {
     }
   } else if (scenario === 'diagram-ask') {
     await waitFor(() => document.querySelector('.diagram-svg [data-id]'));
-    selectText(document.querySelector('.diagram-panel .panel-body'), 3, 47);
+    selectText(document.querySelector('.detail-panel .panel-body'), 3, 47);
     key('Enter');
     await settle();
     typeQuestion('Who is the operator at night, and can a flagged batch wait until morning?', false);
@@ -231,7 +232,7 @@ async function checks(backend) {
   key('Tab', { ctrlKey: true });
   await settle();
   expect(document.querySelector('.banner')?.textContent.includes('Connection lost'), 'disconnected banner');
-  expect(document.querySelector('.card-actions .button.primary').disabled, 'ask is disabled while disconnected');
+  expect(document.querySelector('.detail-panel .panel-actions .button.primary').disabled, 'ask is disabled while disconnected');
   const tab = document.querySelectorAll('.tab')[1];
   tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 30 }));
   await settle();
@@ -277,14 +278,14 @@ async function diagramChecks(backend, app) {
   const svg = (scope = root) => scope.querySelector('.diagram-svg');
   const shape = (kind, id) => svg()?.querySelector(`[data-kind="${kind}"][data-id="${id}"]`);
   const viewBox = (scope = root) => svg(scope).getAttribute('viewBox').split(' ').map(Number);
-  const panel = (part) => root.querySelector(`.diagram-panel ${part}`)?.textContent ?? '';
+  const panel = (part) => root.querySelector(`.detail-panel ${part}`)?.textContent ?? '';
   const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   const canvas = () => root.querySelector('.diagram-canvas');
   const close = (a, b) => Math.abs(a - b) < 0.5;
   await settle();
 
-  // V switches the tab to its diagram; the choice is view state.
-  expect(root.querySelector('.cards'), 'the tab starts in the list');
+  // V switches the document to its diagram; the choice is view state.
+  expect(root.querySelector('.cards'), 'the document starts in the list, as chosen before');
   key('v');
   expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'V shows the diagram');
   expect(root.querySelector('.segmented [aria-pressed="true"]')?.textContent === 'Diagram', 'the switch shows the diagram');
@@ -421,7 +422,7 @@ async function diagramChecks(backend, app) {
 
   // Arrow keys in the panel scroll it instead of panning.
   box = viewBox();
-  const details = root.querySelector('.diagram-panel');
+  const details = root.querySelector('.detail-panel');
   details.focus();
   details.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   expect(JSON.stringify(viewBox()) === JSON.stringify(box), 'arrow keys in the panel do not pan');
@@ -456,10 +457,11 @@ async function diagramChecks(backend, app) {
   // Each document keeps its own zoom and pan.
   key('+');
   const release = viewBox();
-  key(']');
-  expect(await waitFor(() => svg()?.querySelectorAll('[data-kind="box"]').length === 2), 'the next document has its own diagram');
+  const showDocument = (title) => [...root.querySelectorAll('.documents button')].find((button) => button.textContent === title).click();
+  showDocument('App plan');
+  expect(await waitFor(() => svg()?.querySelectorAll('[data-kind="box"]').length === 6 && !svg().querySelector(`[data-id="${item(1)}"]`)), 'another document has its own diagram');
   const other = viewBox();
-  key('[');
+  showDocument('Release flow');
   expect(await waitFor(() => svg()?.querySelector(`[data-id="${item(1)}"]`)), 'back on the release flow');
   expect(JSON.stringify(viewBox()) === JSON.stringify(release), 'its camera is kept');
   expect(other[2] !== release[2], 'the other document was fitted');
@@ -474,7 +476,7 @@ async function diagramChecks(backend, app) {
   await new Promise((resolve) => setTimeout(resolve, 400));
   const saved = backend.views[KEYS.LIVE];
   const camera = saved?.cameras?.[KEYS.RELEASE];
-  expect(saved?.mode === 'diagram' && camera?.scale > 0, 'mode and camera are saved');
+  expect(saved?.modes?.[KEYS.RELEASE] === 'diagram' && camera?.scale > 0, 'mode and camera are saved');
   const restored = fixture('diagram-checks');
   restored.state.arrangement.views = structuredClone(backend.views);
   root.hidden = true;
@@ -530,7 +532,7 @@ async function actionChecks(backend, app) {
   // While disconnected, Accept and Drop are disabled and their keys send nothing.
   key('Tab', { ctrlKey: true });
   await settle();
-  const offline = () => [...document.querySelectorAll('.card.focused .card-actions .button')].map((node) => `${node.textContent}:${node.disabled}`);
+  const offline = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].map((node) => `${node.textContent}:${node.disabled}`);
   expect(offline().join('|') === 'Ask:true|Accept:true|Hide:false|Drop:true', `shared actions are disabled: ${offline()}`);
   for (const name of ['a', 'x', 'u']) {
     key(name);
@@ -548,8 +550,8 @@ async function actionChecks(backend, app) {
   key(' ');
   await settle();
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `Space selects, got ${selectedCards()}`);
-  expect(buttons('.card.focused .card-actions').join('|') === 'Ask about 2|Accept 2|Hide 2|Drop 2', `buttons name the selection: ${buttons('.card.focused .card-actions')}`);
-  expect(document.querySelector('.toolbar .selection')?.textContent === '2 selected · clear', 'the toolbar counts the selection');
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask about 2|Accept 2|Hide 2|Drop 2', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
+  expect(document.querySelector('.pane-controls .selection')?.textContent === '2 selected · clear', 'the pane counts the selection');
   ctrlClick(card(plan(6)));
   await settle();
   expect(selectedCards().length === 3 && document.querySelector('.card.focused').dataset.id === plan(6), 'Ctrl+click selects and focuses');
@@ -562,7 +564,7 @@ async function actionChecks(backend, app) {
   expect(JSON.stringify((await saved())?.selected) === JSON.stringify([plan(2)]), 'the selection is view state');
   key('Escape');
   await settle();
-  expect(selectedCards().length === 0 && !document.querySelector('.toolbar .selection'), 'Esc clears the selection');
+  expect(selectedCards().length === 0 && !document.querySelector('.pane-controls .selection'), 'Esc clears the selection');
   key('A');
   await settle();
   expect(selectedCards().length === 8, 'Shift+A selects every item shown');
@@ -579,10 +581,10 @@ async function actionChecks(backend, app) {
   key('j');
   key(' ');
   await settle();
-  const quote = selectText(document.querySelector('.card.focused .card-body'), 2, 30);
+  const quote = selectText(document.querySelector('.detail-panel .panel-body'), 2, 30);
   key('Enter');
   await settle();
-  expect(document.querySelector('.card.focused .ask .quote')?.textContent === `Asking about 2 items (2, 4), quoting your selection in item 4, “${quote}”, the others in full`, `the editor says what it quotes: ${document.querySelector('.ask .quote')?.textContent}`);
+  expect(document.querySelector('.detail-panel .ask .quote')?.textContent === `Asking about 2 items (2, 4), quoting your selection in item 4, “${quote}”, the others in full`, `the editor says what it quotes: ${document.querySelector('.ask .quote')?.textContent}`);
   typeQuestion('How do these two relate?');
   await settle();
   const ask = backend.sent.at(-1);
@@ -601,24 +603,24 @@ async function actionChecks(backend, app) {
   key('j');
   key('Enter');
   await settle();
-  expect(document.querySelector('.card.focused')?.dataset.id === plan(2) && document.querySelector('.card.focused .ask'), 'the first selected card takes the editor');
+  expect(document.querySelector('.card.focused')?.dataset.id === plan(2) && document.querySelector('.detail-panel .ask'), 'the first selected card takes the editor');
   document.querySelector('.ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   key('j');
   key('j');
   await settle();
 
   // An error reply keeps the editor and the draft.
-  const kept = selectText(document.querySelector('.card.focused .card-body'), 2, 20);
+  const kept = selectText(document.querySelector('.detail-panel .panel-body'), 2, 20);
   key('Enter');
   await settle();
   typeQuestion('Still there?');
   await settle();
   const failing = backend.sent.at(-1);
-  const sendButton = () => document.querySelector('.card.focused .ask .button.primary');
+  const sendButton = () => document.querySelector('.detail-panel .ask .button.primary');
   expect(sendButton()?.disabled && sendButton().textContent === 'Sending…', 'the editor waits for the reply');
   backend.reply(failing.key, failing.id, { code: 'failed', message: 'binding retired' });
   await settle();
-  expect(document.querySelector('.card.focused .ask textarea')?.value === 'Still there?' && !sendButton().disabled, 'an error reply keeps the editor and the draft');
+  expect(document.querySelector('.detail-panel .ask textarea')?.value === 'Still there?' && !sendButton().disabled, 'an error reply keeps the editor and the draft');
   expect(message().classList.contains('error') && message().textContent === 'binding retired', `and shows the error: ${message().textContent}`);
 
   // Sending reads the items again: a new title goes along, an item that left stops the send.
@@ -641,11 +643,11 @@ async function actionChecks(backend, app) {
     document.elements[plan(2)].archived = true;
   });
   await settle();
-  expect(JSON.stringify(app.view(KEYS.LIVE).selected) === JSON.stringify([plan(4)]) && document.querySelector('.toolbar .selection')?.textContent === '1 selected · clear', 'a dropped item leaves the selection when the update arrives');
+  expect(JSON.stringify(app.view(KEYS.LIVE).selected) === JSON.stringify([plan(4)]) && document.querySelector('.pane-controls .selection')?.textContent === '1 selected · clear', 'a dropped item leaves the selection when the update arrives');
   const sentBefore = backend.sent.length;
   typeQuestion('And now?');
   await settle();
-  expect(backend.sent.length === sentBefore && message().textContent.includes('left the list') && document.querySelector('.card.focused .ask'), `an item that left stops the send: ${message().textContent}`);
+  expect(backend.sent.length === sentBefore && message().textContent.includes('left the list') && document.querySelector('.detail-panel .ask'), `an item that left stops the send: ${message().textContent}`);
   document.querySelector('.ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   backend.update(KEYS.LIVE, structuredClone(original));
   await settle();
@@ -657,7 +659,7 @@ async function actionChecks(backend, app) {
   await settle();
 
   // 6.4 Accept: one `action` on the selection; the note says acceptance is no tool permission.
-  expect(document.querySelector('.card.focused .card-actions .button:nth-child(2)').title.includes('never permission to run tools'), 'the Accept button says what acceptance is');
+  expect(document.querySelector('.detail-panel .panel-actions .button:nth-child(2)').title.includes('never permission to run tools'), 'the Accept button says what acceptance is');
   key('a');
   await settle();
   const accept = backend.sent.at(-1);
@@ -742,7 +744,7 @@ async function actionChecks(backend, app) {
   // Selected items hidden or filtered out take no part in Ask, Accept and Drop.
   app.updateView(KEYS.LIVE, { selected: [plan(2), plan(4), plan(6)], hidden: [plan(6)], filter: 'pairing' });
   await settle();
-  expect(document.querySelector('.toolbar .selection')?.textContent === '1 selected (2 not shown) · clear', `the toolbar counts what is not shown: ${document.querySelector('.toolbar .selection')?.textContent}`);
+  expect(document.querySelector('.pane-controls .selection')?.textContent === '1 selected (2 not shown) · clear', `the pane counts what is not shown: ${document.querySelector('.pane-controls .selection')?.textContent}`);
   for (const name of ['a', 'x']) {
     key(name);
     await settle();
@@ -766,7 +768,7 @@ async function actionChecks(backend, app) {
   // 6.2 Question states, the latest first, on the card and for every outcome.
   card(plan(5)).click();
   await settle();
-  const blocks = () => [...document.querySelectorAll('.card.focused .card-question')].map((node) => [node.querySelector('.q').textContent, node.querySelector('.state').textContent]);
+  const blocks = () => [...document.querySelectorAll('.detail-panel .card-question')].map((node) => [node.querySelector('.q').textContent, node.querySelector('.state').textContent]);
   const expected = [
     ['Should the filter be shared as well?', 'Placed in the CLI prompt box'],
     ['Can hide follow the tab when it moves?', 'Answered'],
@@ -775,9 +777,9 @@ async function actionChecks(backend, app) {
     ['Is this still open?', 'Refused: native sending from Prism is disabled for Claude'],
   ];
   expect(JSON.stringify(blocks()) === JSON.stringify(expected), `questions latest first with their states: ${JSON.stringify(blocks())}`);
-  expect(document.querySelector('.card.focused .card-question.tone-answered .a')?.textContent.startsWith('Yes: hidden items'), 'the answer is shown');
-  const actionsRow = document.querySelector('.card.focused .card-actions');
-  expect(actionsRow && actionsRow.compareDocumentPosition(document.querySelector('.card.focused .card-question')) & Node.DOCUMENT_POSITION_FOLLOWING, 'the actions come before the questions');
+  expect(document.querySelector('.detail-panel .card-question.tone-answered .a')?.textContent.startsWith('Yes: hidden items'), 'the answer is shown');
+  const actionsRow = document.querySelector('.detail-panel .panel-actions');
+  expect(actionsRow && actionsRow.compareDocumentPosition(document.querySelector('.detail-panel .card-question')) & Node.DOCUMENT_POSITION_FOLLOWING, 'the actions come before the questions');
   expect(card(plan(3)).querySelector('.badge.asked')?.textContent === 'asked · shared', `a collapsed card shows its latest state: ${card(plan(3)).querySelector('.badge.asked')?.textContent}`);
   next = await content();
   next.questions.find((question) => question.request_id.endsWith('000000000004')).answer = 'Not yet: the filter is a private reading aid.';
@@ -804,7 +806,7 @@ async function actionChecks(backend, app) {
 
   // 6.3 The filter: local to the tab, over kind, title, text and ID; typing keeps the keyboard.
   key('/');
-  const filter = document.querySelector('.toolbar .filter');
+  const filter = document.querySelector('.pane-controls .filter');
   expect(document.activeElement === filter, '/ goes to the filter');
   const untouched = [backend.sent.length, JSON.stringify(app.view(KEYS.LIVE))];
   for (const name of ['a', 'x', 'u', 'h', 'H', 'A', ' ', 'j', 'v', '/']) {
@@ -846,11 +848,11 @@ async function actionChecks(backend, app) {
   expect(JSON.stringify(boxes()) === JSON.stringify([item(2), item(3), item(6)]), `namely ${boxes()}`);
   document.querySelector(`.diagram-svg [data-kind="box"][data-id="${item(3)}"]`).dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await settle();
-  expect(document.querySelector('.diagram-panel .badge.accepted'), 'the panel shows an accepted item');
+  expect(document.querySelector('.detail-panel .badge.accepted'), 'the panel shows an accepted item');
   key('h');
   expect(await waitFor(() => boxes().length === 2), 'a hidden box leaves the filtered diagram');
   const view = await saved();
-  expect(view?.filter === 'batch' && JSON.stringify(view.hidden) === JSON.stringify([item(3)]) && view.mode === 'diagram', `filter and hidden are view state: ${JSON.stringify(view)}`);
+  expect(view?.filter === 'batch' && JSON.stringify(view.hidden) === JSON.stringify([item(3)]) && view.modes?.[KEYS.RELEASE] === 'diagram', `filter and hidden are view state: ${JSON.stringify(view)}`);
   const restored = fixture('list');
   restored.state.arrangement.views = structuredClone(backend.views);
   const root = document.getElementById('app');
@@ -861,7 +863,7 @@ async function actionChecks(backend, app) {
   start(fakeBackend(restored), again);
   const againBoxes = () => [...again.querySelectorAll('.diagram-svg [data-kind="box"]')].map((node) => node.dataset.id).sort();
   expect(await waitFor(() => againBoxes().length === 2), 'a reopened tab keeps filter and hidden in the diagram');
-  expect(again.querySelector('.toolbar .filter')?.value === 'batch', 'and shows its filter');
+  expect(again.querySelector('.pane-controls .filter')?.value === 'batch', 'and shows its filter');
   again.remove();
   root.hidden = false;
   key('H');
@@ -875,23 +877,23 @@ async function actionChecks(backend, app) {
   // 6.1 Ask from the diagram panel: Enter opens the editor there, with the same payload.
   shape(item(5)).dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await settle();
-  expect(document.querySelector('.diagram-panel .badge.stale')?.textContent === 'changed since accepted', 'the panel shows changed since accepted');
+  expect(document.querySelector('.detail-panel .badge.stale')?.textContent === 'changed since accepted', 'the panel shows changed since accepted');
   shape(item(4)).dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await settle();
-  expect(buttons('.diagram-panel .panel-actions').join('|') === 'Ask|Accept|Hide|Drop', `the panel has the item actions: ${buttons('.diagram-panel .panel-actions')}`);
-  const panelQuote = selectText(document.querySelector('.diagram-panel .panel-body'), 3, 40);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Accept|Hide|Drop', `the panel has the item actions: ${buttons('.detail-panel .panel-actions')}`);
+  const panelQuote = selectText(document.querySelector('.detail-panel .panel-body'), 3, 40);
   key('Enter');
   await settle();
-  const editor = document.querySelector('.diagram-panel .ask textarea');
+  const editor = document.querySelector('.detail-panel .ask textarea');
   expect(editor && document.activeElement === editor, 'Enter opens the editor in the panel');
-  expect(document.querySelector('.diagram-panel .ask .quote')?.textContent === `Quoting your selection: “${panelQuote}”`, 'quoting the text selected in the panel');
+  expect(document.querySelector('.detail-panel .ask .quote')?.textContent === `Quoting your selection: “${panelQuote}”`, 'quoting the text selected in the panel');
   typeQuestion('Who is on call at night?');
   await settle();
   const panelAsk = backend.sent.at(-1);
   expect(JSON.stringify(panelAsk?.command) === JSON.stringify({ type: 'ask', selection: { document_id: KEYS.RELEASE, revision: 2, ids: [item(4)] }, items: [{ number: 4, title: 'Review anomalies', quote: panelQuote }], question: 'Who is on call at night?' }), `the panel sends the list's payload: ${JSON.stringify(panelAsk?.command)}`);
   backend.reply(panelAsk.key, panelAsk.id);
   await settle();
-  expect(!document.querySelector('.diagram-panel .ask') && document.activeElement === shape(item(4)), 'the editor closes and the box has the keyboard');
+  expect(!document.querySelector('.detail-panel .ask') && document.activeElement === shape(item(4)), 'the editor closes and the box has the keyboard');
 
   // Selection in the diagram: Space and Ctrl+click; the panel asks about all of them.
   key(' ');
@@ -899,23 +901,173 @@ async function actionChecks(backend, app) {
   await settle();
   expect(shape(item(4)).classList.contains('selected') && shape(item(2)).classList.contains('selected'), 'selected boxes are marked');
   expect(shape(item(4)).getAttribute('aria-label').startsWith('Selected: ') && !shape(item(3)).getAttribute('aria-label').startsWith('Selected'), 'and named selected');
-  expect(buttons('.diagram-panel .panel-actions')[0] === 'Ask about 2', 'the panel counts the selection');
-  document.querySelector('.diagram-panel .panel-actions .button.primary').click();
+  expect(buttons('.detail-panel .panel-actions')[0] === 'Ask about 2', 'the panel counts the selection');
+  document.querySelector('.detail-panel .panel-actions .button.primary').click();
   await settle();
-  expect(document.querySelector('.diagram-panel .ask .quote')?.textContent === 'Asking about 2 items (2, 4), quoting each in full', `the Ask button asks about both: ${document.querySelector('.diagram-panel .ask .quote')?.textContent}`);
-  document.querySelector('.diagram-panel .ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  expect(document.querySelector('.detail-panel .ask .quote')?.textContent === 'Asking about 2 items (2, 4), quoting each in full', `the Ask button asks about both: ${document.querySelector('.detail-panel .ask .quote')?.textContent}`);
+  document.querySelector('.detail-panel .ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await settle();
-  expect(!document.querySelector('.diagram-panel .ask'), 'Esc in the editor cancels');
+  expect(!document.querySelector('.detail-panel .ask'), 'Esc in the editor cancels');
   key('Escape');
   await settle();
-  expect(!document.querySelector('.diagram-svg .selected') && document.querySelector('.diagram-panel .panel-title')?.textContent === 'Upload batch', 'Esc clears the selection first');
+  expect(!document.querySelector('.diagram-svg .selected') && document.querySelector('.detail-panel .panel-title')?.textContent === 'Upload batch', 'Esc clears the selection first');
   key('Escape');
   await settle();
-  expect(document.querySelector('.diagram-panel .panel-tag')?.textContent === 'Diagram', 'then the focus');
+  expect(document.querySelector('.detail-panel .panel-tag')?.textContent === 'Diagram', 'then the focus');
   expect(!shape(item(4)).getAttribute('aria-label').startsWith('Selected'), 'a deselected box gets its name back');
   key('Enter');
   await settle();
-  expect(message().textContent.startsWith('Pick an item first') && !document.querySelector('.diagram-panel .ask'), `Enter with nothing picked says so: ${message().textContent}`);
+  expect(message().textContent.startsWith('Pick an item first') && !document.querySelector('.detail-panel .ask'), `Enter with nothing picked says so: ${message().textContent}`);
+
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/**
+ * The view per document and the side pane: a document with arrows or groups opens in the
+ * diagram, one without in a list without a switch; V's choice is saved per document; the
+ * pane holds the view's controls in both views; arrows of one lane pair differ in color.
+ */
+async function viewChecks(backend) {
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const { link } = RELEASE_IDS;
+  const svg = () => document.querySelector('.diagram-svg');
+  const boxes = () => [...document.querySelectorAll('.diagram-svg [data-kind="box"]')].map((node) => node.dataset.id);
+  const controls = (part) => document.querySelector(`.side-pane .pane-controls ${part}`);
+  const pressed = () => controls('.segmented [aria-pressed="true"]')?.textContent;
+  const showDocument = (title) => [...document.querySelectorAll('.documents button')].find((button) => button.textContent === title).click();
+  const filter = () => controls('.filter');
+  const typeFilter = async (text) => {
+    filter().value = text;
+    filter().dispatchEvent(new Event('input'));
+    await settle();
+  };
+  const saved = () => new Promise((resolve) => setTimeout(() => resolve(backend.views[KEYS.LIVE]), 400));
+  await settle();
+
+  // A document with an arrow and a group opens in the diagram; the controls are in the pane.
+  expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'the app plan opens in the diagram');
+  expect(pressed() === 'Diagram', `the switch shows the diagram, got ${pressed()}`);
+  const toolbar = document.querySelector('.toolbar');
+  const toolbarEmpty = () => toolbar.children.length === 1 && toolbar.firstChild.classList.contains('documents') && !toolbar.querySelector('.filter, .segmented, .info, .button');
+  expect(toolbarEmpty(), 'the toolbar holds only the documents');
+  expect(filter() && controls('.info')?.textContent === '8 items · revision 3', `the pane has the filter and the counts: ${controls('.info')?.textContent}`);
+  expect([...document.querySelectorAll('.pane-controls .button')].some((button) => button.textContent === 'Export SVG'), 'and the export in the diagram');
+  expect(document.querySelector('.side-pane .detail-panel .panel-tag')?.textContent === 'Diagram', 'below the controls, the overview');
+
+  // The filter works from the pane in the diagram; / still goes there.
+  key('/');
+  expect(document.activeElement === filter(), '/ goes to the filter in the pane');
+  await typeFilter('pairing');
+  expect(await waitFor(() => boxes().length === 1), `the diagram shows only matching boxes: ${boxes()}`);
+  expect(controls('.info')?.textContent === '3 items · revision 3' && document.activeElement === filter(), 'the counts follow, the filter keeps the keyboard');
+  await typeFilter('');
+  filter().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  expect(await waitFor(() => boxes().length === 6), 'all boxes again');
+  expect(document.activeElement === document.querySelector('.diagram-canvas'), 'Esc leaves the filter for the diagram');
+
+  // Arrows between the same two lanes differ in color; line, head and pill agree.
+  showDocument('Release flow');
+  expect(await waitFor(() => svg()?.querySelector(`[data-id="${link(5)}"]`)), 'the release flow opens in the diagram too');
+  const colorClass = (kind, id) => [...svg().querySelector(`[data-kind="${kind}"][data-id="${id}"]`).classList].find((name) => name.startsWith('prism-arrow-c'));
+  const stroke = (id) => getComputedStyle(svg().querySelector(`[data-kind="arrow"][data-id="${id}"] .prism-line`)).stroke;
+  const pillFill = (id) => getComputedStyle(svg().querySelector(`[data-kind="pill"][data-id="${id}"] .prism-shape`)).fill;
+  const classes = [1, 2, 3, 4, 5].map((number) => colorClass('arrow', link(number)));
+  expect(JSON.stringify(classes) === JSON.stringify(['prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c1']), `staging to live has two colors, the other pairs one arrow each: ${classes}`);
+  expect([1, 2, 3, 4, 5].every((number) => colorClass('pill', link(number)) === classes[number - 1]), 'pills carry their arrow color');
+  expect(stroke(link(4)) !== stroke(link(5)), `the two arrows from staging to live differ: ${stroke(link(4))}, ${stroke(link(5))}`);
+  expect([4, 5].every((number) => pillFill(link(number)) === stroke(link(number))), 'each pill takes its line color');
+  const head = getComputedStyle(svg().querySelector('#prism-head-c1 path')).fill;
+  expect(head === stroke(link(5)), `the arrowhead too: ${head}`);
+  expect(svg().querySelector(`[data-kind="arrow"][data-id="${link(4)}"]`).classList.contains('prism-manual') && svg().querySelector(`[data-id="${link(4)}"] [stroke-dasharray]`), 'the manual arrow stays dashed');
+
+  // Pane buttons keep the keyboard: a new revision updates the counts in place, a rebuild refocuses.
+  const control = (name) => controls(`[data-control="${name}"]`);
+  control('export').focus();
+  const exportButton = control('export');
+  const revised = structuredClone(CONTENTS_FOR_TESTS[KEYS.LIVE]);
+  revised.documents.find((candidate) => candidate.id === KEYS.RELEASE).revision = 3;
+  backend.update(KEYS.LIVE, revised);
+  expect(await waitFor(() => controls('.info')?.textContent === '18 items · revision 3'), 'a new revision updates the counts');
+  expect(document.activeElement === exportButton, 'the focused button keeps the keyboard');
+  control('view-list').focus();
+  control('view-list').click();
+  await settle();
+  expect(document.querySelector('.cards') && document.activeElement === control('view-list'), 'the rebuilt switch keeps the keyboard on its button');
+  control('view-diagram').click();
+  expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'and switches back');
+  key('+');
+  const releaseCamera = () => backend.views[KEYS.LIVE]?.cameras?.[KEYS.RELEASE];
+
+  // V on the app plan: the list, saved for that document only.
+  showDocument('App plan');
+  await waitFor(() => svg());
+  key('v');
+  await settle();
+  expect(document.querySelector('.cards') && pressed() === 'List', 'V shows the app plan as a list');
+  expect(toolbarEmpty() && filter() && controls('.info')?.textContent === '8 items · revision 3' && controls('.segmented'), 'the list has the same controls in the pane');
+  expect(![...document.querySelectorAll('.pane-controls .button')].some((button) => button.textContent === 'Export SVG'), 'without the export');
+  expect(document.querySelector('.detail-panel .panel-title')?.textContent === document.querySelector('.card.focused .title')?.textContent, 'the pane shows the focused card');
+  expect(document.querySelector('.detail-panel .panel-body')?.textContent.startsWith('Replace the terminal UI') && !document.querySelector('.card.focused .panel-body, .card.focused .button'), 'with its text and actions; the card stays compact');
+  await typeFilter('pairing');
+  expect(document.querySelectorAll('.card').length === 3, 'the filter works from the pane in the list');
+  await typeFilter('');
+  const modesSaved = (modes) => modes?.[KEYS.PLAN] === 'list' && modes[KEYS.RELEASE] === 'diagram' && Object.keys(modes).length === 2;
+  expect(modesSaved((await saved())?.modes), `the choice is saved per document: ${JSON.stringify(backend.views[KEYS.LIVE]?.modes)}`);
+  showDocument('Release flow');
+  expect(await waitFor(() => svg()?.querySelector('[data-id]')) && pressed() === 'Diagram', 'the release flow keeps its own view');
+  showDocument('App plan');
+  await settle();
+  expect(document.querySelector('.cards'), 'and the app plan its list');
+
+  // An arrow counts only while both its ends are there: without them and the group, nothing to draw.
+  const archived = structuredClone(revised);
+  const plan = archived.documents.find((candidate) => candidate.id === KEYS.PLAN);
+  plan.elements[KEYS.TABS_ITEM].archived = true;
+  Object.values(plan.groups).forEach((group) => {
+    group.archived = true;
+  });
+  backend.update(KEYS.LIVE, archived);
+  expect(await waitFor(() => !controls('.segmented') && document.querySelector('.cards')), 'an arrow to an archived item draws nothing: no switch');
+  backend.update(KEYS.LIVE, revised);
+  expect(await waitFor(() => controls('.segmented')), 'the switch is back with the items');
+
+  // A document without arrows or groups: a list, no switch, and V only says so.
+  showDocument('Review findings');
+  await settle();
+  expect(document.querySelector('.cards') && !controls('.segmented') && filter(), 'a plain list has the filter but no view switch');
+  expect(!document.querySelector('.statusbar .keys').textContent.includes('diagram'), `and no V hint: ${document.querySelector('.statusbar .keys').textContent}`);
+  key('v');
+  await settle();
+  expect(document.querySelector('.cards') && document.querySelector('.statusbar .message').textContent === 'Nothing to draw: this document has no arrows or groups.', `V says why: ${document.querySelector('.statusbar .message').textContent}`);
+  expect(modesSaved((await saved())?.modes), 'and saves nothing');
+
+  // A reopened tab shows each document as chosen, with its camera; a `mode` saved per tab before is ignored.
+  const camera = releaseCamera();
+  const restored = fixture('view-checks');
+  restored.state.arrangement.views = structuredClone(backend.views);
+  Object.assign(restored.state.arrangement.views[KEYS.LIVE], { document: KEYS.RELEASE, mode: 'list' });
+  const root = document.getElementById('app');
+  root.hidden = true;
+  const again = document.createElement('div');
+  again.className = 'app';
+  document.body.append(again);
+  const reopened = fakeBackend(restored);
+  start(reopened, again);
+  expect(await waitFor(() => again.querySelector('.diagram-svg')?.getAttribute('viewBox')), 'the reopened tab shows the release flow as a diagram');
+  const box = again.querySelector('.diagram-svg').getAttribute('viewBox').split(' ').map(Number);
+  const width = again.querySelector('.diagram-canvas').clientWidth;
+  expect(camera?.scale > 0 && Math.abs(box[0] - camera.x) < 0.5 && Math.abs(width / box[2] - camera.scale) < 0.01, `with its camera: ${box} ${JSON.stringify(camera)}`);
+  [...again.querySelectorAll('.documents button')].find((button) => button.textContent === 'App plan').click();
+  expect(await waitFor(() => again.querySelector('.cards')), 'and the app plan as a list');
+  const resaved = await new Promise((resolve) => setTimeout(() => resolve(reopened.views[KEYS.LIVE]), 400));
+  expect(resaved && !('mode' in resaved) && modesSaved(resaved.modes), `the old mode is not saved again: ${JSON.stringify(resaved)}`);
+  again.remove();
+  root.hidden = false;
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
@@ -963,7 +1115,7 @@ async function statusChecks(backend) {
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
 
-/** At a narrow window: the panel goes below the canvas and nothing scrolls the page. */
+/** At a narrow window: the side pane goes below the canvas or the list and nothing scrolls the page. */
 async function narrowChecks() {
   const failures = [];
   const expect = (condition, message) => {
@@ -972,11 +1124,17 @@ async function narrowChecks() {
     }
   };
   expect(await waitFor(() => document.querySelector('.diagram-svg [data-id]')), 'the diagram is shown');
+  const zoom = document.querySelector('.diagram-controls').getBoundingClientRect();
+  const clear = [...document.querySelectorAll('.diagram-svg [data-kind="lane"], .diagram-svg [data-kind="box"]')].every((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.bottom <= zoom.top || rect.right <= zoom.left;
+  });
+  expect(clear, 'the fitted diagram leaves room for the zoom controls');
   const canvas = document.querySelector('.diagram-canvas').getBoundingClientRect();
-  const panel = document.querySelector('.diagram-panel').getBoundingClientRect();
+  const panel = document.querySelector('.side-pane').getBoundingClientRect();
   const svg = document.querySelector('.diagram-svg').getBoundingClientRect();
   expect(window.innerWidth < 760, `a narrow window, got ${window.innerWidth}`);
-  expect(panel.top >= canvas.bottom - 1 && panel.height > 0, 'the panel is below the canvas');
+  expect(panel.top >= canvas.bottom - 1 && panel.height > 0, 'the pane is below the canvas');
   expect(canvas.height > 150 && svg.width === canvas.width && svg.height === canvas.height, 'the SVG fills its frame');
   key('+');
   key('+');
@@ -984,6 +1142,12 @@ async function narrowChecks() {
   const page = document.scrollingElement;
   expect(page.scrollHeight <= window.innerHeight && page.scrollWidth <= window.innerWidth, 'zooming in does not scroll the page');
   expect(document.querySelector('.diagram-svg').getBoundingClientRect().width === canvas.width, 'the diagram pans inside its frame');
+  key('v');
+  await settle();
+  const list = document.querySelector('.view').getBoundingClientRect();
+  const pane = document.querySelector('.side-pane').getBoundingClientRect();
+  expect(pane.top >= list.bottom - 1 && list.height > 150 && pane.width === list.width, 'in the list too');
+  expect(page.scrollHeight <= window.innerHeight && page.scrollWidth <= window.innerWidth, 'and the page does not scroll');
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
 

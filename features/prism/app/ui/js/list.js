@@ -1,11 +1,11 @@
-import { MOD_KEY, h } from './dom.js';
-import { questionsFor, typedQuestion } from './rows.js';
+import { h } from './dom.js';
+import { questionsFor } from './rows.js';
 
 /**
  * What a shared question's outcome means for the user. Only shared questions cross to the
  * app: `pending` is shared and nothing more is known (the Claude mod places it in the prompt
  * box, Codex retrieves it when asked), `submitted` is the mod's report that it filled the
- * prompt box. `short` goes on a collapsed card, `label` and the outcome's reason under the
+ * prompt box. `short` goes on a card, `label` and the outcome's reason under the
  * question; `tone` colors both.
  */
 const QUESTION_STATES = {
@@ -23,12 +23,11 @@ const ANSWERED = { short: 'answered', label: 'Answered', tone: 'answered' };
 export const ACCEPT_NOTE = 'Acceptance is feedback for the agent, never permission to run tools.';
 
 /**
- * The list view of one tab: a card per row, the focused card expanded with its actions and,
- * when asking, the question editor. Cards are kept per item ID and rebuilt only when what
- * they show changed, so updates do not shift the layout or steal the editor's focus.
+ * The list view of one tab: a compact card per row; the tab's side pane shows the focused
+ * one with its actions and, when asking, the question editor. Cards are kept per item ID and
+ * rebuilt only when what they show changed, so updates do not shift the layout.
  *
- * `actions`: onFocus(id), onToggle(id), onAsk(), onAccept(), onHide(), onDrop(),
- * onSend(question), onCancelAsk(), onDraft(text).
+ * `actions`: onFocus(id), onToggle(id).
  */
 export class ListView {
   constructor(actions) {
@@ -36,25 +35,17 @@ export class ListView {
     this.cards = new Map();
     this.list = h('div', { class: 'cards', role: 'list', 'aria-label': 'Items' });
     this.element = h('div', { class: 'view', tabindex: '0' }, this.list);
-    this.editor = null;
   }
 
-  /**
-   * `model`: {document, rows, focus, selected: Set of selected item IDs, questions,
-   * ask: {id, text, quoteLabel} | null, readOnly: why commands are unavailable, or null
-   * while the conversation is live}.
-   */
+  /** `model`: {document, rows, focus, selected: Set of selected item IDs, questions}. */
   render(model) {
     const seen = new Set();
     model.rows.forEach((row, index) => {
       seen.add(row.id);
       const focused = row.id === model.focus;
       const selected = model.selected.has(row.id);
-      const asking = focused && model.ask?.id === row.id;
       const questions = questionsFor(model.questions, model.document.id, row.id);
-      // The focused card's buttons name how many items they act on.
-      const selection = focused ? model.selected.size : null;
-      const signature = JSON.stringify([row, focused, selected, selection, asking, asking && [model.ask.quoteLabel, model.ask.sending], model.readOnly, questions]);
+      const signature = JSON.stringify([row, focused, selected, questions]);
       let entry = this.cards.get(row.id);
       if (!entry) {
         entry = {
@@ -68,7 +59,7 @@ export class ListView {
       }
       if (entry.signature !== signature) {
         entry.signature = signature;
-        this.fill(entry.element, row, { focused, selected, selection, ask: asking ? model.ask : null, questions, readOnly: model.readOnly });
+        this.fill(entry.element, row, { focused, selected, questions });
       }
       if (this.list.children[index] !== entry.element) {
         this.list.insertBefore(entry.element, this.list.children[index] ?? null);
@@ -88,16 +79,7 @@ export class ListView {
     this.cards.get(id)?.element.scrollIntoView({ block: 'nearest' });
   }
 
-  /** The text the user selected inside the item's own body, if both ends of it are there. */
-  selectedText(id) {
-    return selectionInside(this.cards.get(id)?.element.querySelector('.card-body'));
-  }
-
-  focusEditor() {
-    this.editor?.querySelector('textarea')?.focus();
-  }
-
-  fill(card, row, { focused, selected, selection, ask, questions, readOnly }) {
+  fill(card, row, { focused, selected, questions }) {
     card.className = `card kind-${row.kind}${focused ? ' focused' : ''}${selected ? ' selected' : ''}`;
     if (focused) {
       card.setAttribute('aria-current', 'true');
@@ -129,46 +111,11 @@ export class ListView {
       h('span', { class: 'title', text: row.title }),
       h('span', { class: 'badges' }, badges),
     );
-
-    if (!focused) {
-      card.replaceChildren(...[head, row.excerpt ? h('div', { class: 'excerpt', text: row.excerpt }) : null].filter(Boolean));
-      return;
-    }
-
-    const parts = [head, h('div', { class: 'card-body', text: row.body })];
-    if (row.source) {
-      parts.push(h('div', { class: 'card-source', text: row.source }));
-    }
-    // Rebuilding the asking card (its item changed) keeps the draft, the keyboard and the caret.
-    const previous = this.editor?.querySelector('textarea');
-    const typing = ask && previous && document.activeElement === previous;
-    const caret = typing ? [previous.selectionStart, previous.selectionEnd] : null;
-    this.editor = ask ? askEditor(ask, readOnly, this.actions) : null;
-    // Actions before the questions, as in the diagram panel.
-    parts.push(this.editor ?? h('div', { class: 'card-actions' }, itemActions(selection, readOnly, this.actions), h('span', { class: 'hint', text: readOnly ?? '' })));
-    for (const question of questions) {
-      parts.push(questionBlock(question));
-    }
-    card.replaceChildren(...parts.filter(Boolean));
-    if (typing) {
-      const textarea = this.editor.querySelector('textarea');
-      textarea.focus();
-      textarea.setSelectionRange(...caret);
-    }
+    card.replaceChildren(...[head, row.excerpt ? h('div', { class: 'excerpt', text: row.excerpt }) : null].filter(Boolean));
   }
 }
 
-/** The selected text if both of its ends lie inside `container`; empty otherwise. */
-export function selectionInside(container) {
-  const selection = window.getSelection();
-  const inside = container && selection && container.contains(selection.anchorNode) && container.contains(selection.focusNode);
-  if (!inside || selection.isCollapsed) {
-    return '';
-  }
-  return selection.toString();
-}
-
-/** "accepted" or "changed since accepted", as cards and the diagram panel show them. */
+/** "accepted" or "changed since accepted", as cards and the detail panel show them. */
 export function acceptanceBadges(row) {
   const badges = [];
   if (row.isAccepted) {
@@ -180,76 +127,6 @@ export function acceptanceBadges(row) {
   return badges;
 }
 
-/**
- * Ask, Accept, Hide and Drop for the focused item or, when `selection` items are selected,
- * for those; the labels say which.
- */
-export function itemActions(selection, readOnly, actions) {
-  const many = selection > 0;
-  const what = many ? `the ${selection} selected ${selection === 1 ? 'item' : 'items'}` : 'this item';
-  const count = many ? ` ${selection}` : '';
-  const button = (className, text, title, action, shared = true) =>
-    h('button', {
-      class: `button ${className}`,
-      disabled: shared && Boolean(readOnly),
-      title: shared && readOnly ? readOnly : title,
-      text,
-      onclick: (event) => {
-        event.stopPropagation();
-        action();
-      },
-    });
-  const ask = button('primary', many ? `Ask about${count}` : 'Ask', `Ask about ${what} (Enter)`, actions.onAsk);
-  // Keeps a text selection inside the item, which becomes the quote.
-  ask.addEventListener('mousedown', (event) => event.preventDefault());
-  return [
-    ask,
-    button('', `Accept${count}`, `Accept ${what}. ${ACCEPT_NOTE} (A)`, actions.onAccept),
-    button('', `Hide${count}`, `Hide ${what} in this tab (H)`, actions.onHide, false),
-    button('danger', `Drop${count}`, `Drop ${what} for everyone; U undoes (X)`, actions.onDrop),
-  ];
-}
-
-/**
- * The question editor: what it quotes, the typed question, send and cancel.
- * `ask`: {text, quoteLabel, sending}; `actions`: onSend(question), onCancelAsk(), onDraft(text).
- */
-export function askEditor(ask, readOnly, actions) {
-  const textarea = h('textarea', {
-    placeholder: 'Your question (optional): the CLI prompt box receives the items, the quote and this text',
-    'aria-label': 'Question',
-    value: ask.text,
-    oninput: () => actions.onDraft(textarea.value),
-    onkeydown: (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        actions.onCancelAsk();
-      } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        actions.onSend(textarea.value);
-      }
-    },
-  });
-  return h(
-    'div',
-    { class: 'ask', onclick: (event) => event.stopPropagation() },
-    h('div', { class: 'quote', title: ask.quoteLabel, text: ask.quoteLabel }),
-    textarea,
-    h(
-      'div',
-      { class: 'row' },
-      h('span', { class: 'hint' }, h('kbd', { text: MOD_KEY }), ' ', h('kbd', { text: 'Enter' }), ' sends · ', h('kbd', { text: 'Esc' }), ' cancels'),
-      h('button', { class: 'button', text: 'Cancel', onclick: () => actions.onCancelAsk() }),
-      h('button', {
-        class: 'button primary',
-        disabled: Boolean(readOnly) || ask.sending,
-        text: ask.sending ? 'Sending…' : 'Send to CLI',
-        onclick: () => actions.onSend(textarea.value),
-      }),
-    ),
-  );
-}
-
 /** `short`, the full `text` with the outcome's reason, and the `tone` of a shared question. */
 export function questionState(question) {
   const outcome = question.outcome;
@@ -257,18 +134,4 @@ export function questionState(question) {
   const detail = question.answer ? null : (outcome.reason ?? outcome.turn_id ?? null);
   const text = [detail ? `${state.label}: ${detail}` : state.label, state.note].filter(Boolean).join('. ');
   return { short: state.short, text, tone: state.tone };
-}
-
-/** A shared question with its delivery state and answer, as cards and the diagram panel show it. */
-export function questionBlock(question) {
-  const typed = typedQuestion(question);
-  const state = questionState(question);
-  const items = question.snapshot.selection.ids.length;
-  return h(
-    'div',
-    { class: `card-question tone-${state.tone}` },
-    h('div', { class: 'q', text: typed || 'Shared as a reference' }),
-    question.answer ? h('div', { class: 'a', text: question.answer }) : null,
-    h('div', { class: 'state', text: items > 1 ? `${state.text} · asked about ${items} items` : state.text }),
-  );
 }
