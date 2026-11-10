@@ -510,6 +510,75 @@ fn different_protocol_is_refused_and_retried() {
     fixture.stop(bridge, socket);
 }
 
+/// Waits until the link's last error contains `expected` and returns it.
+fn link_error(link: &AppLink, expected: &str) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let status = link.status();
+        if let Some(error) = status.error.filter(|error| error.contains(expected)) {
+            assert_eq!(status.state, LinkState::Retrying);
+            return error;
+        }
+        assert!(Instant::now() < deadline, "no error containing {expected}");
+        std::thread::sleep(ACCEPT_POLL);
+    }
+}
+
+#[test]
+fn a_protocol_mismatch_names_both_numbers_and_the_older_side() {
+    let fixture = Fixture::new();
+    let link = AppLink::start(&fixture.binding_path, fixture.config()).unwrap();
+    let newer = APP_PROTOCOL + 1;
+    let older = APP_PROTOCOL - 1;
+
+    // A newer app refuses the hello.
+    let mut socket = fixture.accept();
+    let BridgeMessage::Hello { .. } = recv(&mut socket) else {
+        panic!("expected hello");
+    };
+    send(
+        &mut socket,
+        &AppMessage::Refused {
+            protocol: newer,
+            reason: Refusal::Protocol,
+        },
+    );
+    expect_end(&mut socket);
+    let error = link_error(&link, "this bridge is older");
+    assert_eq!(
+        error,
+        format!(
+            "the Prism app speaks protocol {newer}, this bridge protocol {APP_PROTOCOL}; this \
+             bridge is older: install the newer prism binary in this container, then restart \
+             the conversation"
+        )
+    );
+
+    // An older app's welcome is refused.
+    let mut socket = fixture.accept();
+    welcome(&mut socket, &fixture.token, older);
+    assert_eq!(refused(&mut socket), Refusal::Protocol);
+    expect_end(&mut socket);
+    let error = link_error(&link, "the app is older");
+    assert_eq!(
+        error,
+        format!(
+            "the Prism app speaks protocol {older}, this bridge protocol {APP_PROTOCOL}; the app \
+             is older: build and install the newer Prism app on the host"
+        )
+    );
+
+    // The message stays while the link retries; a connection clears it.
+    let (socket, ..) = fixture.connect();
+    let deadline = Instant::now() + WAIT;
+    while link.status().state != LinkState::Connected {
+        assert!(Instant::now() < deadline, "the link did not connect");
+        std::thread::sleep(ACCEPT_POLL);
+    }
+    assert!(link.status().error.is_none());
+    close(link, socket);
+}
+
 #[test]
 fn malformed_app_nonce_is_refused_and_retried() {
     let fixture = Fixture::new();

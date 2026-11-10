@@ -9,8 +9,8 @@ APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-"$APP_DIR/target/ui-screenshots"}
 CHROMIUM=${CHROMIUM:-chromium}
 SIZE=1280,800
-CHECKS="checks diagram-checks action-checks"
-SCENARIOS="empty port-error no-tabs list focused ask select questions filter accepted ended disconnected sessions menu error diagram diagram-panel diagram-zoomed diagram-ask"
+CHECKS="checks diagram-checks action-checks status-checks"
+SCENARIOS="empty port-error mismatch no-tabs list focused ask select questions filter accepted ended disconnected sessions menu error diagram diagram-panel diagram-zoomed diagram-ask"
 # A narrow window: the diagram's panel goes below the canvas.
 NARROW_SIZE=600,760
 NARROW_CHECKS="narrow-checks"

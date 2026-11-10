@@ -4,7 +4,7 @@ Prism 0.1.0 is a project-local visual workspace beside an existing Codex or
 Claude Code conversation. It provides lists, diagrams, acceptance, archive/undo,
 private questions, and multiple views of shared content. Both CLIs share one
 bridge application; each has its own native package under `plugins/`. The Prism
-desktop app (`app/`, see [the app plan](docs/app-plan.md)) runs on the host and
+desktop app (`app/`, see [the app plan](docs/app-plan.md); build and install: [app/README.md](app/README.md)) runs on the host and
 shows each conversation in a tab.
 
 ## Requirements

@@ -210,6 +210,8 @@ function status(overrides = {}) {
     ],
     problem: null,
     settings_file: '/Users/me/Library/Application Support/local.prism.desktop/settings.json',
+    version: '0.1.0',
+    protocol: 1,
     ...overrides,
   };
 }
@@ -259,6 +261,9 @@ function arrangement(active, views = {}) {
   };
 }
 
+export const VERSION_PROBLEM =
+  'A bridge speaks Prism protocol 2, this app protocol 1. This app is older: build and install the newer Prism app.';
+
 export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW, NOTES, RELEASE, SYNC_ITEM, TABS_ITEM };
 export const RELEASE_IDS = { item: releaseItem, link: releaseLink, group: releaseGroup };
 
@@ -285,6 +290,12 @@ export function fixture(scenario) {
   if (scenario === 'empty') {
     return {
       state: { status: status(), sessions: [], arrangement: { windows: [{ id: 'w1', tabs: [], active: null }], project_windows: {}, closed: [], labels: {}, views: {}, focused: 'w1', next_window: 1 } },
+      contents: {},
+    };
+  }
+  if (scenario === 'mismatch' || scenario === 'status-checks') {
+    return {
+      state: { status: status({ problem: VERSION_PROBLEM }), sessions: [], arrangement: fixture('empty').state.arrangement },
       contents: {},
     };
   }

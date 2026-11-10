@@ -133,6 +133,88 @@ fn another_protocol_number_or_a_bad_hello_is_refused() {
     assert!(app.host.state().status.problem.is_some());
 }
 
+/// Waits for the problem and checks it stays after the refused bridge went away.
+fn version_problem(app: &TestApp) -> String {
+    let state = app.wait_for("the problem", |state| state.status.problem.is_some());
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(app.host.state().status.problem, state.status.problem);
+    state.status.problem.unwrap()
+}
+
+#[test]
+fn a_bridge_with_another_protocol_is_told_apart_by_which_side_is_older() {
+    let older = APP_PROTOCOL - 1;
+    let newer = APP_PROTOCOL + 1;
+    for (bridge_protocol, expected) in [
+        (older, "The bridge is older: install the newer prism binary"),
+        (
+            newer,
+            "This app is older: build and install the newer Prism app",
+        ),
+    ] {
+        let app = start_app();
+        let mut bridge = FakeBridge::open(app.port());
+        bridge.send_text(
+            &json!({"type": "hello", "protocol": bridge_protocol, "nonce": nonce()}).to_string(),
+        );
+        assert!(matches!(
+            bridge.receive(),
+            AppMessage::Refused {
+                reason: Refusal::Protocol,
+                ..
+            }
+        ));
+        assert!(bridge.closed());
+        let problem = version_problem(&app);
+        assert!(
+            problem.starts_with(&format!(
+                "A bridge speaks Prism protocol {bridge_protocol}, this app protocol {APP_PROTOCOL}."
+            )),
+            "{problem}"
+        );
+        assert!(problem.contains(expected), "{problem}");
+
+        let _bridge = app.connect(session(1, 1));
+        app.wait_for("the problem cleared", |state| {
+            state.status.problem.is_none()
+        });
+    }
+
+    // A bridge that refuses the welcome for its own protocol number.
+    let app = start_app();
+    let mut bridge = FakeBridge::open(app.port());
+    bridge.hello(&app.token());
+    bridge.send(&BridgeMessage::Refused {
+        protocol: newer,
+        reason: Refusal::Protocol,
+    });
+    assert!(bridge.closed());
+    let problem = version_problem(&app);
+    assert!(
+        problem.contains(&format!(
+            "protocol {newer}, this app protocol {APP_PROTOCOL}"
+        )) && problem.contains("This app is older"),
+        "{problem}"
+    );
+}
+
+#[test]
+fn the_status_names_the_app_version_and_protocol() {
+    let status = start_app().host.state().status;
+    assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(status.protocol, APP_PROTOCOL);
+}
+
+/// `tauri.conf.json` repeats the workspace version, which the bundles and the installer
+/// carry; this keeps the two in step.
+#[test]
+fn the_tauri_config_carries_the_workspace_version() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src-tauri/tauri.conf.json");
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(config["version"], env!("CARGO_PKG_VERSION"));
+}
+
 #[test]
 fn a_bridge_refusing_the_welcome_is_reported() {
     let app = start_app();

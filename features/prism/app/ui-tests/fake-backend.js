@@ -94,6 +94,11 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
       contents[key] = content;
       emit({ type: 'content', key });
     },
+    /** Test side: the host's state changes, for example its status. */
+    change(mutate) {
+      mutate(current);
+      changed();
+    },
     /** Test side: the bridge answers a command. */
     reply(key, id, error = null) {
       emit({ type: 'reply', key, id, error });

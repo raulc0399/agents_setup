@@ -4,8 +4,8 @@ use crate::host::Shared;
 use crate::registry::{Attach, Connection, Outgoing};
 use futures_util::{SinkExt, StreamExt};
 use prism_core::protocol::{
-    APP_PROTOCOL, AppMessage, BridgeMessage, MAX_MESSAGE_BYTES, Prover, Refusal, Session,
-    check_protocol, nonce, proof, verify_proof,
+    APP_PROTOCOL, AppMessage, BridgeMessage, MAX_MESSAGE_BYTES, ProtocolError, Prover, Refusal,
+    Session, check_protocol, nonce, proof, verify_proof,
 };
 use std::io;
 use std::net::SocketAddr;
@@ -65,6 +65,9 @@ enum HandshakeFailure {
     Closed,
     #[error("a bridge could not connect: {0}")]
     Protocol(String),
+    /// The bridge speaks this other protocol number.
+    #[error("{}", version_mismatch(*.0))]
+    Version(u32),
     #[error("a bridge proved a different pairing token; it re-reads the pairing file and retries")]
     Token,
     #[error("a bridge refused this app ({0:?}); its pairing file may be from an earlier start")]
@@ -80,10 +83,22 @@ impl HandshakeFailure {
         matches!(
             self,
             HandshakeFailure::Protocol(_)
+                | HandshakeFailure::Version(_)
                 | HandshakeFailure::Token
                 | HandshakeFailure::RefusedByBridge(_)
         )
     }
+}
+
+/// Both protocol numbers and which side to update, for a bridge that speaks another one.
+fn version_mismatch(bridge: u32) -> String {
+    let update = if bridge < APP_PROTOCOL {
+        "The bridge is older: install the newer prism binary in its container, then restart \
+         that conversation."
+    } else {
+        "This app is older: build and install the newer Prism app."
+    };
+    format!("A bridge speaks Prism protocol {bridge}, this app protocol {APP_PROTOCOL}. {update}")
 }
 
 async fn serve(stream: TcpStream, id: u64, shared: Arc<Shared>, permit: OwnedSemaphorePermit) {
@@ -128,9 +143,9 @@ async fn handshake(socket: &mut Socket, token: &str) -> Result<Session, Handshak
     let hello = next_text(socket).await?;
     let welcome_proof = match prove_hello(&hello, token) {
         Ok(welcome_proof) => welcome_proof,
-        Err(message) => {
+        Err(failure) => {
             refuse(socket, Refusal::Protocol).await;
-            return Err(HandshakeFailure::Protocol(message));
+            return Err(failure);
         }
     };
     let own_nonce = nonce();
@@ -153,6 +168,9 @@ async fn handshake(socket: &mut Socket, token: &str) -> Result<Session, Handshak
             }
             Ok(session)
         }
+        Ok(BridgeMessage::Refused { protocol, .. }) if protocol != APP_PROTOCOL => {
+            Err(HandshakeFailure::Version(protocol))
+        }
         Ok(BridgeMessage::Refused { reason, .. }) => Err(HandshakeFailure::RefusedByBridge(reason)),
         Ok(_) => {
             refuse(socket, Refusal::Protocol).await;
@@ -168,14 +186,21 @@ async fn handshake(socket: &mut Socket, token: &str) -> Result<Session, Handshak
 }
 
 /// Checks the `hello` and returns the app's proof over the bridge's nonce.
-fn prove_hello(hello: &str, token: &str) -> Result<String, String> {
-    check_protocol(hello).map_err(|error| error.to_string())?;
-    match serde_json::from_str::<BridgeMessage>(hello) {
-        Ok(BridgeMessage::Hello { nonce, .. }) => {
-            proof(token, Prover::App, &nonce).map_err(|error| error.to_string())
+fn prove_hello(hello: &str, token: &str) -> Result<String, HandshakeFailure> {
+    match check_protocol(hello) {
+        Ok(()) => {}
+        Err(ProtocolError::Unsupported { theirs }) => {
+            return Err(HandshakeFailure::Version(theirs));
         }
-        Ok(_) => Err("expected hello".into()),
-        Err(error) => Err(format!("unreadable hello: {error}")),
+        Err(error) => return Err(HandshakeFailure::Protocol(error.to_string())),
+    }
+    match serde_json::from_str::<BridgeMessage>(hello) {
+        Ok(BridgeMessage::Hello { nonce, .. }) => proof(token, Prover::App, &nonce)
+            .map_err(|error| HandshakeFailure::Protocol(error.to_string())),
+        Ok(_) => Err(HandshakeFailure::Protocol("expected hello".into())),
+        Err(error) => Err(HandshakeFailure::Protocol(format!(
+            "unreadable hello: {error}"
+        ))),
     }
 }
 

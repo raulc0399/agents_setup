@@ -31,7 +31,7 @@ use prism_core::pairing::{
 };
 use prism_core::protocol::{
     self, APP_PROTOCOL, AppMessage, BridgeMessage, CliProcess, CommandError, MAX_MESSAGE_BYTES,
-    Prover, Refusal, Session,
+    ProtocolError, Prover, Refusal, Session,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -358,7 +358,10 @@ impl Link {
             if message_type(&text).as_deref() == Some(WELCOME_TYPE) {
                 refuse(socket, Refusal::Protocol);
             }
-            return Err(error.into());
+            return Err(match error {
+                ProtocolError::Unsupported { theirs } => anyhow!(version_mismatch(theirs)),
+                error => error.into(),
+            });
         }
         let app_nonce = match serde_json::from_str::<AppMessage>(&text)? {
             AppMessage::Welcome {
@@ -720,6 +723,18 @@ impl Connection {
         }
         Ok(())
     }
+}
+
+/// Both protocol numbers and which side to update, for an app that speaks another one; the
+/// `status` operation reports it while the link retries.
+fn version_mismatch(app: u32) -> String {
+    let update = if app < APP_PROTOCOL {
+        "the app is older: build and install the newer Prism app on the host"
+    } else {
+        "this bridge is older: install the newer prism binary in this container, then restart \
+         the conversation"
+    };
+    format!("the Prism app speaks protocol {app}, this bridge protocol {APP_PROTOCOL}; {update}")
 }
 
 fn data_version(connection: &rusqlite::Connection) -> Result<i64> {

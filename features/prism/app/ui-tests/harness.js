@@ -1,14 +1,15 @@
 // Drives the product UI (ui/js/app.js) with the fake backend. `?scenario=<name>` picks the
 // fixture and the user input to replay; `?scenario=checks`, `?scenario=diagram-checks` and
 // `?scenario=action-checks` run the behaviour checks of the list, the diagram and the item
-// actions and write PASS or the failures into #result.
+// actions, `?scenario=status-checks` those of the connection status; each writes PASS or the
+// failures into #result.
 import { start } from '../ui/js/app.js';
 import { questionBlock } from '../ui/js/list.js';
 import { fakeBackend } from './fake-backend.js';
-import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, fixture } from './fixtures.js';
+import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, VERSION_PROBLEM, fixture } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 const key = (name, options = {}) =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...options }));
@@ -915,6 +916,49 @@ async function actionChecks(backend, app) {
   key('Enter');
   await settle();
   expect(message().textContent.startsWith('Pick an item first') && !document.querySelector('.diagram-panel .ask'), `Enter with nothing picked says so: ${message().textContent}`);
+
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/** A bridge problem shows in every empty state and the sessions panel until it clears; the version is always shown. */
+async function statusChecks(backend) {
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const text = (selector) => document.querySelector(selector)?.textContent ?? '';
+  const problemShown = (selector) => [...document.querySelectorAll(`${selector} .fact.bad`)].some((fact) => fact.textContent === VERSION_PROBLEM);
+  await settle();
+
+  expect(text('.empty h2') === 'No conversations connected yet', `the empty state: ${text('.empty h2')}`);
+  expect(problemShown('.empty'), 'the empty state names both protocols and the older side');
+  expect(text('.empty .facts .about') === 'Prism 0.1.0 · app protocol 1', `the version line: ${text('.empty .facts .about')}`);
+  expect(document.querySelector('.strip-actions .button .dot.disconnected')?.title === VERSION_PROBLEM, 'the sessions button is marked');
+
+  // Another conversation is connected, but not in this window.
+  backend.change((state) => {
+    state.sessions = [
+      { key: 'claude:c1', host: 'd_claude', project: '/workspace/website', agent: 'claude', conversation: 'c1', link: { state: 'live' }, loaded: true },
+    ];
+    state.arrangement.closed = ['claude:c1'];
+  });
+  await settle();
+  expect(text('.empty h2') === 'No tabs in this window', `the empty state with a session: ${text('.empty h2')}`);
+  expect(problemShown('.empty'), 'the problem stays in the empty state with a session');
+  document.querySelector('.strip-actions .button').click();
+  await settle();
+  expect(problemShown('.popover .status'), 'the sessions panel shows the problem');
+  expect(text('.popover .status .about') === 'Prism 0.1.0 · app protocol 1', 'and the version line');
+
+  // A bridge connected: the host cleared the problem.
+  backend.change((state) => {
+    state.status.problem = null;
+  });
+  await settle();
+  expect(!document.querySelector('.popover .fact.bad') && !document.querySelector('.empty .fact.bad'), 'the problem is gone');
+  expect(!document.querySelector('.strip-actions .button .dot'), 'and so is the mark');
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }

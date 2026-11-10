@@ -1281,6 +1281,13 @@ button {
   color: var(--danger);
 }
 
+.facts .about,
+.status .about {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .empty .session-picker {
   width: min(460px, 90vw);
   margin-top: 6px;

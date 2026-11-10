@@ -369,7 +369,10 @@ class App {
       [...this.tabs.children].find((tab) => tab.dataset.key === focused)?.focus();
     }
     const live = this.state.sessions.filter((session) => session.link.state === 'live').length;
-    this.patch('sessions-button', this.sessionsButton, [live, this.state.sessions.length], () => [
+    const problem = this.state.status.problem;
+    this.patch('sessions-button', this.sessionsButton, [live, this.state.sessions.length, problem], () => [
+      // A bridge that could not connect opens no tab; the mark points to the panel that says why.
+      problem ? h('span', { class: 'dot disconnected', title: problem, role: 'img', 'aria-label': `Problem: ${problem}` }) : null,
       'Sessions',
       h('span', { class: 'count', text: String(live) }),
     ]);
@@ -683,7 +686,8 @@ class App {
         this.statusFacts(),
       );
     }
-    return empty('No tabs in this window', 'Open a conversation here:', this.sessionPicker());
+    const problem = status.problem ? h('div', { class: 'facts' }, fact('bad', status.problem)) : null;
+    return empty('No tabs in this window', 'Open a conversation here:', problem, this.sessionPicker());
   }
 
   statusFacts() {
@@ -709,6 +713,7 @@ class App {
       facts.push(fact('bad', status.problem));
     }
     facts.push(fact('waiting', 'Optional settings ', h('code', { text: status.settings_file })));
+    facts.push(h('div', { class: 'about', text: `Prism ${status.version} · app protocol ${status.protocol}` }));
     return h('div', { class: 'facts' }, facts);
   }
 

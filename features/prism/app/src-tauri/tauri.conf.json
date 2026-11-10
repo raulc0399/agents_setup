@@ -15,7 +15,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Lists and diagrams beside Claude and Codex conversations",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

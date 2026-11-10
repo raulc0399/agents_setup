@@ -8,7 +8,7 @@ use crate::registry::{
 use crate::settings::Settings;
 use prism_core::model::Id;
 use prism_core::pairing::Pairing;
-use prism_core::protocol::{BridgeMessage, Session, nonce};
+use prism_core::protocol::{APP_PROTOCOL, BridgeMessage, Session, nonce};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -97,6 +97,9 @@ pub struct Status {
     /// The latest handshake or protocol problem with a bridge; cleared when one connects.
     pub problem: Option<String>,
     pub settings_file: PathBuf,
+    /// This app's version and the app protocol it speaks, shown beside the status.
+    pub version: String,
+    pub protocol: u32,
 }
 
 /// Everything a window needs except content.
@@ -247,6 +250,8 @@ impl Host {
             pairing: Vec::new(),
             problem: None,
             settings_file: Settings::path(&config.data_directory),
+            version: env!("CARGO_PKG_VERSION").into(),
+            protocol: APP_PROTOCOL,
         };
         let listener = match listener::bind(config.address).await {
             Ok(listener) => {
