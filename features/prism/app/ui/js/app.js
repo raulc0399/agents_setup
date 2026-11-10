@@ -1,3 +1,4 @@
+import { DiagramView } from './diagram.js';
 import { h } from './dom.js';
 import { agentLabel, firstLine, projectName, shortConversation } from './format.js';
 import { ListView } from './list.js';
@@ -8,8 +9,11 @@ const VIEW_SAVE_DELAY_MS = 300;
 /** After a tab was dropped outside every window, wait this long for another window to claim it. */
 const DRAG_OUT_CHECK_DELAY_MS = 250;
 const TAB_DRAG_PREFIX = 'prism-tab:';
-/** Per tab, saved by the host. */
-const DEFAULT_VIEW = { document: null, focus: null, hidden: [] };
+/** Per tab, saved by the host. `cameras`: the diagram's zoom and pan per document ID; none fits it. */
+const DEFAULT_VIEW = { document: null, focus: null, hidden: [], mode: 'list', cameras: {} };
+/** What a tab shows: `mode` in its view state; V switches. */
+const VIEWS = ['list', 'diagram'];
+const VIEW_LABELS = { list: 'List', diagram: 'Diagram' };
 
 const LINK_LABELS = { live: 'Live', disconnected: 'Disconnected', ended: 'Ended', waiting: 'Waiting for bridge' };
 const READ_ONLY_REASONS = {
@@ -17,14 +21,26 @@ const READ_ONLY_REASONS = {
   waiting: 'Read-only until the bridge connects',
   ended: 'Read-only: this conversation ended',
 };
-const KEY_HINTS = [
-  [['J', 'K'], 'move'],
-  [['Enter'], 'ask'],
-  [['H'], 'hide'],
-  [['X'], 'drop'],
-  [['U'], 'undo'],
-  [['[', ']'], 'documents'],
-];
+const KEY_HINTS = {
+  list: [
+    [['J', 'K'], 'move'],
+    [['Enter'], 'ask'],
+    [['H'], 'hide'],
+    [['X'], 'drop'],
+    [['U'], 'undo'],
+    [['[', ']'], 'documents'],
+    [['V'], 'diagram'],
+  ],
+  diagram: [
+    [['J', 'K'], 'move'],
+    [['+', '-'], 'zoom'],
+    [['0'], 'fit'],
+    [['Esc'], 'clear'],
+    [['H'], 'hide'],
+    [['S'], 'export'],
+    [['V'], 'list'],
+  ],
+};
 const SESSION_GROUPS = [
   ['Live', ['live']],
   ['Disconnected', ['disconnected', 'waiting']],
@@ -63,6 +79,7 @@ class App {
     this.loading = new Set();
     this.views = new Map();
     this.listViews = new Map();
+    this.diagramViews = new Map();
     this.focusIndex = new Map();
     this.saveTimers = new Map();
     this.pending = new Map();
@@ -96,15 +113,7 @@ class App {
     this.popover = h('div', { class: 'popover', role: 'dialog', 'aria-label': 'Sessions', hidden: true });
     this.main = h('main', { class: 'main' }, this.header, this.body, this.popover);
     this.statusMessage = h('div', { class: 'message', role: 'status' });
-    this.keys = h(
-      'div',
-      { class: 'keys' },
-      KEY_HINTS.map(([keys, action], index) => [
-        index > 0 ? ' · ' : '',
-        keys.map((name, position) => [position > 0 ? ' ' : '', h('kbd', { text: name })]),
-        ` ${action}`,
-      ]),
-    );
+    this.keys = h('div', { class: 'keys' });
     this.statusbar = h('footer', { class: 'statusbar' }, this.statusMessage, this.keys);
     this.menuElement = h('div', { class: 'menu', role: 'menu', hidden: true });
     this.root.replaceChildren(this.tabstrip, this.main, this.statusbar, this.menuElement);
@@ -121,7 +130,20 @@ class App {
 
   async refreshState() {
     this.state = await this.backend.state();
+    this.forgetViews();
     this.render();
+  }
+
+  /** The list and diagram of a tab that left this window are rebuilt if it comes back. */
+  forgetViews() {
+    const tabs = new Set(this.myWindow()?.tabs ?? []);
+    for (const key of [...this.listViews.keys()].filter((key) => !tabs.has(key))) {
+      this.listViews.delete(key);
+    }
+    for (const [key, view] of [...this.diagramViews].filter(([key]) => !tabs.has(key))) {
+      view.dispose();
+      this.diagramViews.delete(key);
+    }
   }
 
   onEvent(event) {
@@ -172,13 +194,18 @@ class App {
   }
 
   updateView(key, change) {
+    this.storeView(key, change);
+    this.render();
+  }
+
+  /** Records a view change and saves it shortly after, without rendering (zoom and pan). */
+  storeView(key, change) {
     this.views.set(key, { ...this.view(key), ...change });
     clearTimeout(this.saveTimers.get(key));
     this.saveTimers.set(
       key,
       setTimeout(() => this.backend.setView(key, this.views.get(key)), VIEW_SAVE_DELAY_MS),
     );
-    this.render();
   }
 
   listView(key) {
@@ -201,6 +228,29 @@ class App {
       );
     }
     return this.listViews.get(key);
+  }
+
+  diagramView(key) {
+    if (!this.diagramViews.has(key)) {
+      this.diagramViews.set(
+        key,
+        new DiagramView({
+          layout: (document, visible) => this.backend.diagram(document, visible),
+          onFocus: (id) => this.focus(key, id),
+          onClear: () => this.focus(key, null),
+          onCamera: (documentId, camera) => {
+            const cameras = { ...this.view(key).cameras };
+            if (camera) {
+              cameras[documentId] = camera;
+            } else {
+              delete cameras[documentId];
+            }
+            this.storeView(key, { cameras });
+          },
+        }),
+      );
+    }
+    return this.diagramViews.get(key);
   }
 
   /** The document, its visible rows and the focused row of a tab; null before content. */
@@ -337,8 +387,8 @@ class App {
     this.patch(
       'header',
       this.header,
-      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, current?.rows.length, hidden],
-      () => this.tabHeader(key, session, state, current, hidden),
+      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, current?.rows.length, hidden, view.mode],
+      () => this.tabHeader(key, session, state, current, hidden, view.mode),
     );
 
     if (!current) {
@@ -363,6 +413,19 @@ class App {
       return;
     }
 
+    if (view.mode === 'diagram') {
+      const diagramView = this.diagramView(key);
+      this.showBody(diagramView, key);
+      diagramView.render({
+        document: current.document,
+        rows: current.rows,
+        // Only an item the user picked: without one the panel shows the overview.
+        focus: view.focus,
+        questions: current.content.questions,
+        camera: view.cameras?.[current.document.id] ?? null,
+      });
+      return;
+    }
     const listView = this.listView(key);
     this.showBody(listView, key);
     listView.render({
@@ -375,23 +438,25 @@ class App {
     });
   }
 
-  /** Shows a tab's view in the body, keeping each tab's scroll position across switches. */
-  showBody(listView, key) {
-    if (this.shownView?.view === listView) {
+  /** Shows a tab's list or diagram in the body, keeping each tab's list scroll position across switches. */
+  showBody(view, key) {
+    if (this.shownView?.view === view) {
       return;
     }
-    if (this.shownView) {
+    if (this.shownView?.view instanceof ListView) {
       this.scrolls.set(this.shownView.key, this.shownView.view.element.scrollTop);
     }
     this.signatures.delete('body');
-    this.shownView = listView ? { view: listView, key } : null;
-    if (listView) {
-      this.body.replaceChildren(listView.element);
-      listView.element.scrollTop = this.scrolls.get(key) ?? 0;
+    this.shownView = view ? { view, key } : null;
+    if (view) {
+      this.body.replaceChildren(view.element);
+    }
+    if (view instanceof ListView) {
+      view.element.scrollTop = this.scrolls.get(key) ?? 0;
     }
   }
 
-  tabHeader(key, session, state, current, hidden) {
+  tabHeader(key, session, state, current, hidden, mode) {
     const agent = session ? agentLabel(session.agent) : '';
     const parts = [
       h(
@@ -432,6 +497,18 @@ class App {
               }),
             ),
           ),
+          h(
+            'div',
+            { class: 'segmented', role: 'group', 'aria-label': 'View' },
+            VIEWS.map((name) =>
+              h('button', {
+                'aria-pressed': String(name === mode),
+                title: `Show as ${VIEW_LABELS[name].toLowerCase()} (V)`,
+                text: VIEW_LABELS[name],
+                onclick: () => this.updateView(key, { mode: name }),
+              }),
+            ),
+          ),
           h('span', { class: 'spacer' }),
           h('span', {
             class: 'info',
@@ -443,6 +520,14 @@ class App {
                 title: 'Show the items hidden in this tab (Shift+H)',
                 text: `${hidden} hidden · show`,
                 onclick: () => this.updateView(key, { hidden: [] }),
+              })
+            : null,
+          mode === 'diagram'
+            ? h('button', {
+                class: 'button quiet',
+                title: 'Save the diagram as an SVG file (S)',
+                text: 'Export SVG',
+                onclick: () => this.exportDiagram(key),
               })
             : null,
         ),
@@ -593,7 +678,10 @@ class App {
   }
 
   renderStatus() {
-    this.keys.hidden = !this.activeKey();
+    const key = this.activeKey();
+    this.keys.hidden = !key;
+    const mode = key ? this.view(key).mode : 'list';
+    this.patch('keys', this.keys, [mode], () => keyHints(KEY_HINTS[mode] ?? KEY_HINTS.list));
     this.statusMessage.textContent = this.message?.text ?? '';
     this.statusMessage.className = `message ${this.message?.tone ?? ''}`;
   }
@@ -763,6 +851,51 @@ class App {
     this.updateView(key, { document: next.id, focus: null });
   }
 
+  /** The item picked in the diagram, if it is still shown. */
+  diagramFocus(key) {
+    return this.current(key)?.rows.find((row) => row.id === this.view(key).focus) ?? null;
+  }
+
+  /** J and K in the diagram follow the layout's order: boxes with their badges, then arrows (lanes are left out). */
+  moveDiagramFocus(key, step) {
+    const order = this.diagramView(key).diagram?.order ?? [];
+    if (order.length === 0) {
+      return;
+    }
+    const index = order.indexOf(this.view(key).focus);
+    let next;
+    if (step === Infinity || step === -Infinity) {
+      next = step > 0 ? order.length - 1 : 0;
+    } else if (index === -1) {
+      next = step > 0 ? 0 : order.length - 1;
+    } else {
+      next = Math.min(Math.max(index + step, 0), order.length - 1);
+    }
+    this.focus(key, order[next]);
+  }
+
+  clearDiagramFocus(key) {
+    this.focus(key, null);
+    this.diagramView(key).focusCanvas();
+  }
+
+  async exportDiagram(key) {
+    const current = this.current(key);
+    const svg = current ? this.diagramView(key).exportSvg() : null;
+    if (!svg) {
+      this.setMessage('The diagram is not ready to export yet.', 'error');
+      return;
+    }
+    try {
+      const path = await this.backend.exportSvg(current.document.title, svg);
+      if (path) {
+        this.setMessage(`Saved the diagram to ${path}.`, 'success');
+      }
+    } catch (error) {
+      this.setMessage(String(error), 'error');
+    }
+  }
+
   isLive(key) {
     return this.session(key)?.link.state === 'live';
   }
@@ -896,7 +1029,8 @@ class App {
       this.render();
       return;
     }
-    if (event.target.closest?.('textarea, input')) {
+    // Handled where it happened, for example arrow keys on the tab strip.
+    if (event.defaultPrevented || event.target.closest?.('textarea, input')) {
       return;
     }
     if (event.ctrlKey && event.key === 'Tab') {
@@ -940,12 +1074,45 @@ class App {
       u: () => this.undo(key),
       '[': () => this.cycleDocuments(key, -1),
       ']': () => this.cycleDocuments(key, 1),
+      v: () => this.updateView(key, { mode: VIEWS[(VIEWS.indexOf(this.view(key).mode) + 1) % VIEWS.length] }),
     };
-    const action = actions[event.key];
+    const diagram = this.view(key).mode === 'diagram' ? this.diagramKeys(key, event.target) : {};
+    const action = event.key in diagram ? diagram[event.key] : actions[event.key];
     if (action) {
       event.preventDefault();
       action();
     }
+  }
+
+  /**
+   * Keys of the diagram, over those of the list; `null` turns a list key off. Arrow keys in
+   * the side panel scroll it instead of panning.
+   */
+  diagramKeys(key, target) {
+    const diagram = this.diagramView(key);
+    const focused = () => this.diagramFocus(key);
+    const inPanel = Boolean(target.closest?.('.diagram-panel'));
+    const pan = (dx, dy) => (inPanel ? null : () => diagram.panStep(dx, dy));
+    return {
+      j: () => this.moveDiagramFocus(key, 1),
+      k: () => this.moveDiagramFocus(key, -1),
+      Home: () => this.moveDiagramFocus(key, -Infinity),
+      End: () => this.moveDiagramFocus(key, Infinity),
+      ArrowLeft: pan(-1, 0),
+      ArrowRight: pan(1, 0),
+      ArrowUp: pan(0, -1),
+      ArrowDown: pan(0, 1),
+      '+': () => diagram.zoomStep(1),
+      '=': () => diagram.zoomStep(1),
+      '-': () => diagram.zoomStep(-1),
+      0: () => diagram.fit(),
+      Escape: () => this.clearDiagramFocus(key),
+      h: () => focused() && this.hide(key, focused()),
+      x: () => focused() && this.drop(key, focused()),
+      s: () => this.exportDiagram(key),
+      // Enter acts on the focused shape; the list's ask editor is not shown here.
+      Enter: null,
+    };
   }
 
   onMenuKey(event) {
@@ -960,6 +1127,14 @@ class App {
       items[(index + step + items.length) % items.length]?.focus();
     }
   }
+}
+
+function keyHints(hints) {
+  return hints.map(([keys, action], index) => [
+    index > 0 ? ' · ' : '',
+    keys.map((name, position) => [position > 0 ? ' ' : '', h('kbd', { text: name })]),
+    ` ${action}`,
+  ]).flat(Infinity);
 }
 
 function empty(title, text, ...extra) {

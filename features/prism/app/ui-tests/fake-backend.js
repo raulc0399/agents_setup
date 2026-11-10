@@ -1,6 +1,7 @@
 // In-memory stand-in for the native shell with the same shape as ui/js/backend.js. It keeps
 // the arrangement rules the UI relies on simple: tabs move, close and reopen; commands are
-// recorded and answered by the test.
+// recorded and answered by the test. Diagrams are laid out by prism-core through the test
+// server (ui-tests/server.py); exports are recorded instead of saved.
 
 export function fakeBackend({ state, contents }, windowId = 'w1') {
   const listeners = [];
@@ -30,6 +31,7 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
     sent: [],
     views: {},
     shown: [],
+    exports: [],
     state: async () => structuredClone(current),
     content: async (key) => (contents[key] ? structuredClone(contents[key]) : null),
     async send(key, command) {
@@ -72,6 +74,17 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
     },
     async setView(key, view) {
       this.views[key] = view;
+    },
+    async diagram(document, visible) {
+      const response = await fetch('/diagram', { method: 'POST', body: JSON.stringify({ document, visible }) });
+      if (!response.ok) {
+        throw await response.text();
+      }
+      return response.json();
+    },
+    async exportSvg(title, svg) {
+      this.exports.push({ title, svg });
+      return `/Users/me/Desktop/${title}.svg`;
     },
     onEvent(callback) {
       listeners.push(callback);

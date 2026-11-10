@@ -8,6 +8,8 @@
  *   send(key, command)            -> command ID; rejects with a message
  *   activateTab(key), closeTab(key), reopenTab(key), moveTab(key, target | null),
  *   showWindow(windowId), setView(key, view)
+ *   diagram(document, visibleIds) -> {svg, width, height, order}: the layout from prism-core
+ *   exportSvg(title, svg)         -> the path saved to, or null when the user cancelled
  *   onEvent(callback)             host events: {type: "state"}, {type: "content", key},
  *                                 {type: "reply", key, id, error}
  */
@@ -27,6 +29,8 @@ export function tauriBackend() {
     moveTab: (key, target) => invoke('move_tab', { key, target }),
     showWindow: (window) => invoke('show_window', { window }),
     setView: (key, view) => invoke('set_view', { key, view }),
+    diagram: (document, visible) => invoke('diagram_layout', { document, visible }),
+    exportSvg: (title, svg) => invoke('export_svg', { title, svg }),
     onEvent: (callback) => event.listen(HOST_EVENT, (message) => callback(message.payload)),
   };
 }

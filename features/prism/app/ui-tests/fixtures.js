@@ -9,6 +9,7 @@ const CLOSED = 'claude:4d7a9c1e-2f58-4b36-a0e7-5c3b8d9f1e62';
 const PLAN = '11111111-0000-4000-8000-000000000001';
 const REVIEW = '11111111-0000-4000-8000-000000000002';
 const NOTES = '11111111-0000-4000-8000-000000000003';
+const RELEASE = '11111111-0000-4000-8000-000000000004';
 
 function element(id, kind, order, title, body, extra = {}) {
   return {
@@ -81,6 +82,76 @@ const question = {
   answer: 'Not for batch 4: Docker Desktop resets the forwarded connection when a container stops. Pings would need a protocol rule first.',
 };
 
+/** Release flow: three lanes, five arrows (one manual), two gate badges. */
+const releaseItem = (number) => `a4000000-0000-4000-8000-00000000000${number}`;
+const releaseLink = (number) => `b4000000-0000-4000-8000-00000000000${number}`;
+const releaseGroup = (number) => `c4000000-0000-4000-8000-00000000000${number}`;
+
+const releaseElements = [
+  element(releaseItem(1), 'step', 0, 'Capture readings', 'Sensor app records a reading every minute and queues it offline.', { source: 'device/src/capture.rs', semantic_revision: 2 }),
+  element(releaseItem(2), 'step', 1, 'Upload batch', 'Sends the queued readings over HTTPS once the device is online.', { semantic_revision: 2 }),
+  element(releaseItem(3), 'step', 2, 'Validate batch', 'Schema and range checks reject readings outside the sensor limits.', { semantic_revision: 2 }),
+  element(releaseItem(4), 'step', 3, 'Review anomalies', 'An operator checks flagged readings before they are released.', { semantic_revision: 2 }),
+  element(releaseItem(5), 'step', 4, 'Publish dashboard', 'Released readings appear on the public dashboard within a minute.', { semantic_revision: 2 }),
+  element(releaseItem(6), 'text', 5, 'Archive raw batches', 'Raw uploads are kept for 90 days for audits.', { semantic_revision: 2 }),
+  element(releaseItem(7), 'finding', 6, 'Clock drift on old devices', 'Devices older than 2021 drift up to 40 s a day; timestamps need the server clock.', { semantic_revision: 2 }),
+  element(releaseItem(8), 'question', 7, 'Who approves a release?', 'The review step needs a named approver per shift.', { semantic_revision: 2 }),
+];
+
+function relationship(number, from, to, label, manual = false) {
+  return {
+    id: releaseLink(number),
+    from: releaseItem(from),
+    to: releaseItem(to),
+    label,
+    direction: 'directed',
+    manual,
+    semantic_revision: 2,
+    accepted_revision: null,
+    archived: false,
+  };
+}
+
+const releaseLinks = [
+  relationship(1, 1, 2, 'queue'),
+  relationship(2, 2, 3, 'upload'),
+  relationship(3, 3, 4, 'flag anomalies'),
+  relationship(4, 4, 5, 'approve release', true),
+  relationship(5, 3, 6, 'store raw batch'),
+  relationship(6, 7, 1, 'affects'),
+  relationship(7, 8, 4, 'blocks'),
+];
+
+const releaseGroups = [
+  ['Device', [1, 2]],
+  ['Server staging', [3, 4]],
+  ['Server live', [5, 6]],
+].map(([title, members], index) => ({
+  id: releaseGroup(index + 1),
+  title,
+  members: members.map(releaseItem),
+  semantic_revision: 2,
+  accepted_revision: null,
+  archived: false,
+}));
+
+const releaseQuestion = {
+  request_id: 'd0000000-0000-4000-8000-000000000002',
+  workspace_id: 'e0000000-0000-4000-8000-000000000001',
+  generation: 1,
+  snapshot: {
+    selection: { document_id: RELEASE, revision: 2, ids: [releaseItem(4)] },
+    document_title: 'Release flow',
+    elements: {},
+    relationships: {},
+    groups: {},
+  },
+  text: 'Item 4: Review anomalies\n> An operator checks flagged readings…\n\nCan small batches skip the review?',
+  mode: 'share',
+  outcome: { state: 'submitted' },
+  answer: 'No: every batch with a flagged reading waits for the operator; batches without flags skip the queue.',
+};
+
 const reviewElements = [
   element('a1000000-0000-4000-8000-000000000001', 'finding', 0, 'Pairing token printed in debug logs', 'The bridge logs the pairing file contents at debug level.', { semantic_revision: 1 }),
   element('a1000000-0000-4000-8000-000000000002', 'finding', 1, 'Snapshot frames are not size-checked on the app side', 'MAX_MESSAGE_BYTES is enforced by the WebSocket configuration.', { semantic_revision: 1 }),
@@ -129,8 +200,9 @@ const CONTENTS = {
       document(PLAN, 'App plan', 3, planElements, planLinks, planGroups),
       document(REVIEW, 'Review findings', 1, reviewElements),
       document(NOTES, 'Notes', 1, []),
+      document(RELEASE, 'Release flow', 2, releaseElements, releaseLinks, releaseGroups),
     ],
-    questions: [question],
+    questions: [question, releaseQuestion],
   },
   [CODEX]: { documents: [document('22222222-0000-4000-8000-000000000001', 'Invoice export', 1, codexElements)], questions: [] },
   [ENDED]: { documents: [document('33333333-0000-4000-8000-000000000001', 'Summary', 1, endedElements)], questions: [] },
@@ -155,7 +227,17 @@ function arrangement(active, views = {}) {
   };
 }
 
-export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW };
+export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW, RELEASE };
+export const RELEASE_IDS = { item: releaseItem, link: releaseLink, group: releaseGroup };
+
+/** View state of the live tab per diagram scenario. */
+const DIAGRAM_VIEWS = {
+  diagram: { focus: null, mode: 'diagram', cameras: {} },
+  'diagram-panel': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
+  'diagram-zoomed': { focus: releaseItem(7), mode: 'diagram', cameras: { [RELEASE]: { x: 20, y: -20, scale: 1.9 } } },
+  'diagram-checks': { focus: null, mode: 'list', cameras: {} },
+  'narrow-checks': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
+};
 export const CONTENTS_FOR_TESTS = CONTENTS;
 
 /** Fixture per scenario: `state` (AppState) and `contents` per session key. */
@@ -183,5 +265,8 @@ export function fixture(scenario) {
   }
   const active = { ended: ENDED, disconnected: CODEX }[scenario] ?? LIVE;
   const views = scenario === 'focused' ? { [LIVE]: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004', hidden: ['a0000000-0000-4000-8000-000000000005'], mode: 'list' } } : {};
+  if (DIAGRAM_VIEWS[scenario]) {
+    views[LIVE] = { document: RELEASE, hidden: [], ...DIAGRAM_VIEWS[scenario] };
+  }
   return { state: { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) }, contents: CONTENTS };
 }

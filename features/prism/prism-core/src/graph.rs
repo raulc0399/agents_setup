@@ -1,16 +1,22 @@
 //! Graphic diagram: lanes, boxes, arrows and gates laid out in world units and written as
 //! SVG. The same geometry answers clicks; every clickable shape in the SVG carries `data-id`
-//! and `data-kind` (one of the `KIND_*` values).
+//! and `data-kind` (one of the `KIND_*` values). Shapes and texts carry `prism-*` classes, so
+//! a stylesheet can theme what the presentation attributes paint by default.
 use crate::model::{Direction, Document, ElementKind, Id, single_line};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 pub const BOX_WIDTH: f32 = 220.0;
-const BOX_GAP_X: f32 = 40.0;
+const BOX_GAP_X: f32 = 48.0;
 const BOX_GAP_Y: f32 = 64.0;
 pub const LANE_PADDING: f32 = 24.0;
 const LANE_TITLE_HEIGHT: f32 = 22.0;
-const LANE_GAP: f32 = 24.0;
+/// Room between lanes; an arrow from one lane to another turns in its middle.
+const LANE_GAP: f32 = 48.0;
+/// Width per character of a lane title (upper case, letter-spaced), and the room added
+/// around it, for keeping pills and lines off it.
+const LANE_TITLE_CHAR_WIDTH: f32 = 8.5;
+const LANE_TITLE_PADDING: f32 = 20.0;
 const NAME_HEIGHT: f32 = 32.0;
 const SUBTITLE_HEIGHT: f32 = 52.0;
 const BODY_LINE_HEIGHT: f32 = 15.0;
@@ -20,7 +26,35 @@ const SUBTITLE_WORDS: usize = 5;
 const MAX_COLUMNS: usize = 4;
 const PILL_HEIGHT: f32 = 20.0;
 const PILL_CHAR_WIDTH: f32 = 6.6;
+const PILL_PADDING: f32 = 16.0;
+/// Free space a pill keeps to boxes and badges; a pill without it shows only its number.
+const PILL_MARGIN: f32 = 4.0;
 const GATE_HEIGHT: f32 = 18.0;
+/// Room around a badge's "! " and label; a "+N" badge has no "! ".
+const GATE_PADDING: f32 = 26.0;
+const MORE_PADDING: f32 = 20.0;
+const GATE_GAP: f32 = 6.0;
+/// How far a badge reaches down into its box: it stays clear of the box's name.
+const GATE_OVERLAP: f32 = 5.0;
+/// Badges share the right part of their box's top edge; arrows enter left of them.
+const GATE_ROOM: f32 = BOX_WIDTH * 0.75;
+/// Badges shown per box; one "+N" badge stands for the rest.
+const MAX_GATES: usize = 2;
+/// Two arrows' lines closer than this, side by side, read as one. A line moves away from
+/// another in steps of `RUN_STEP`, at most `RUN_STEPS` either way.
+const RUN_SPACING: f32 = 12.0;
+const RUN_STEP: f32 = 6.0;
+const RUN_STEPS: usize = 16;
+/// Two collinear lines with less than this between their ends read as one.
+const RUN_TOLERANCE: f32 = 16.0;
+/// Room a line keeps to boxes, badges, lane titles and lane edges.
+const RUN_MARGIN: f32 = 4.0;
+/// Room an arrow's end keeps to the corners of its box side.
+const PORT_INSET: f32 = 12.0;
+/// Where along a segment a pill may sit, tried in this order.
+const PILL_POSITIONS: [f32; 3] = [0.5, 0.25, 0.75];
+const NAME_CHARS: usize = 26;
+const SUBTITLE_CHARS: usize = 32;
 const ARROW_HIT_DISTANCE: f32 = 8.0;
 /// Pixels per world unit below which boxes show names only, and above which full text.
 const SUBTITLE_SCALE: f32 = 0.45;
@@ -34,6 +68,12 @@ pub const KIND_ARROW: &str = "arrow";
 pub const KIND_PILL: &str = "pill";
 /// Class modifier on the arrow and pill of a manual (dashed) step.
 const MODIFIER_MANUAL: &str = "manual";
+/// Class modifier on every second lane, which the default colors paint in the second tone.
+const MODIFIER_ALTERNATE: &str = "alt";
+/// Arrowhead markers: plain, manual and focused.
+const HEAD: &str = "prism-head";
+const HEAD_MANUAL: &str = "prism-head-manual";
+const HEAD_FOCUS: &str = "prism-head-focus";
 
 const BACKGROUND: &str = "#101418";
 const BOX_FILL: &str = "#1a2027";
@@ -107,8 +147,13 @@ struct Lane {
 struct Gate {
     id: Id,
     kind: ElementKind,
+    /// The whole title; `label` is what fits on the badge.
+    title: String,
     label: String,
     rect: WorldRect,
+    /// The "+N" badge for the badges beyond `MAX_GATES`: its ID is the first of them, its
+    /// title lists them all.
+    more: bool,
 }
 
 struct Node {
@@ -125,7 +170,11 @@ struct Node {
 struct Edge {
     id: Id,
     points: Vec<(f32, f32)>,
+    /// Number and label; `shown` is what fits on the pill.
     label: String,
+    shown: String,
+    /// `<from> to <to>`, for the accessible name.
+    ends: String,
     dashed: bool,
     direction: Direction,
     pill: WorldRect,
@@ -250,8 +299,10 @@ impl GraphLayout {
             gates.entry(other).or_default().push(Gate {
                 id: element.id,
                 kind: element.kind.clone(),
-                label: single_line(&element.title),
+                title: single_line(&element.title),
+                label: String::new(),
                 rect: WorldRect::default(),
+                more: false,
             });
         }
 
@@ -315,13 +366,10 @@ impl GraphLayout {
             ..Default::default()
         };
         let mut y = 0.0;
+        let mut lane_of: BTreeMap<Id, usize> = BTreeMap::new();
         for (index, (group, title, members)) in lane_members.into_iter().enumerate() {
             let color = LANE_COLORS[index % LANE_COLORS.len()];
-            let title_height = if title.is_empty() {
-                0.0
-            } else {
-                LANE_TITLE_HEIGHT
-            };
+            let title_height = title_height(&title);
             let lane_top = y;
             let mut row_y = lane_top + title_height + LANE_PADDING;
             let mut row_height: f32 = 0.0;
@@ -345,19 +393,8 @@ impl GraphLayout {
                     width: BOX_WIDTH,
                     height,
                 };
-                let mut node_gates = gates.remove(id).unwrap_or_default();
-                let mut gate_x = rect.right();
-                for gate in &mut node_gates {
-                    let width = gate.label.chars().count() as f32 * PILL_CHAR_WIDTH + 26.0;
-                    gate_x -= width - 6.0;
-                    gate.rect = WorldRect {
-                        x: gate_x,
-                        y: rect.y - GATE_HEIGHT / 2.0,
-                        width,
-                        height: GATE_HEIGHT,
-                    };
-                    gate_x -= 6.0;
-                }
+                let node_gates = place_gates(gates.remove(id).unwrap_or_default(), &rect);
+                lane_of.insert(*id, index);
                 layout.nodes.push(Node {
                     id: *id,
                     rect,
@@ -392,6 +429,37 @@ impl GraphLayout {
             .iter()
             .map(|node| (node.id, node.rect))
             .collect();
+        // What a pill must not cover: boxes, badges and lane titles.
+        let titles = layout
+            .lanes
+            .iter()
+            .filter(|lane| !lane.title.is_empty())
+            .map(|lane| WorldRect {
+                x: lane.rect.x,
+                y: lane.rect.y,
+                width: lane.title.chars().count() as f32 * LANE_TITLE_CHAR_WIDTH
+                    + LANE_TITLE_PADDING,
+                height: LANE_TITLE_HEIGHT,
+            });
+        let blocked: Vec<WorldRect> = layout
+            .nodes
+            .iter()
+            .flat_map(|node| {
+                std::iter::once(node.rect).chain(node.gates.iter().map(|gate| gate.rect))
+            })
+            .chain(titles)
+            .collect();
+        let obstacles: Vec<WorldRect> = rects.values().copied().collect();
+        let lane_bands: Vec<(WorldRect, f32)> = layout
+            .lanes
+            .iter()
+            .map(|lane| (lane.rect, title_height(&lane.title)))
+            .collect();
+        let runs = Runs {
+            blocked: &blocked,
+            lanes: &lane_bands,
+            width: lane_width,
+        };
         let mut sorted: Vec<_> = relationships
             .iter()
             .filter(|item| !consumed_edges.contains(&item.id))
@@ -403,28 +471,28 @@ impl GraphLayout {
             else {
                 continue;
             };
-            let obstacles: Vec<WorldRect> = rects.values().copied().collect();
-            let points = route(from, to, lane_width, &obstacles);
+            let lane = |id: &Id| layout.lanes[lane_of[id]].rect;
+            let lanes = (lane(&relationship.from), lane(&relationship.to));
+            let mut route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
+            separate_runs(&mut route, &layout.edges, &runs);
+            let points = route.points;
             let label = single_line(&relationship.label);
             let label = if label.starts_with(|character: char| character.is_ascii_digit()) {
                 label
             } else {
                 format!("{} {label}", index + 1)
             };
-            let (x1, y1, x2, y2) = longest_segment(&points);
-            let pill_width = label.chars().count() as f32 * PILL_CHAR_WIDTH + 16.0;
+            let (shown, pill) = place_pill(&points, &label, &blocked, &layout.edges);
+            let name = |id: &Id| single_line(&document.elements[id].title);
             layout.edges.push(Edge {
                 id: relationship.id,
                 points,
                 label,
+                shown,
+                ends: format!("{} to {}", name(&relationship.from), name(&relationship.to)),
                 dashed: relationship.manual,
                 direction: relationship.direction.clone(),
-                pill: WorldRect {
-                    x: (x1 + x2) / 2.0 - pill_width / 2.0,
-                    y: (y1 + y2) / 2.0 - PILL_HEIGHT / 2.0,
-                    width: pill_width,
-                    height: PILL_HEIGHT,
-                },
+                pill,
             });
         }
         let height = layout.lanes.last().map_or(0.0, |lane| lane.rect.bottom());
@@ -453,7 +521,8 @@ impl GraphLayout {
         self.edges.len()
     }
 
-    /// Focus order: boxes in lane order, each followed by its gates, then arrows.
+    /// Focus order: boxes in lane order, each followed by its badges, then arrows. Lanes are
+    /// not part of it; in the SVG's keyboard order they come first.
     pub fn ids(&self) -> Vec<Id> {
         let mut ids = Vec::new();
         for node in &self.nodes {
@@ -479,15 +548,15 @@ impl GraphLayout {
             .map(|edge| edge.pill)
     }
 
-    /// Gates and pills sit on top of boxes and arrows, so they win.
+    /// The topmost shape at a point, in reverse paint order: pills, badges, boxes, arrows.
     pub fn hit(&self, x: f32, y: f32) -> Option<Id> {
+        if let Some(edge) = self.edges.iter().find(|edge| edge.pill.contains(x, y)) {
+            return Some(edge.id);
+        }
         for node in &self.nodes {
             if let Some(gate) = node.gates.iter().find(|gate| gate.rect.contains(x, y)) {
                 return Some(gate.id);
             }
-        }
-        if let Some(edge) = self.edges.iter().find(|edge| edge.pill.contains(x, y)) {
-            return Some(edge.id);
         }
         if let Some(node) = self.nodes.iter().find(|node| node.rect.contains(x, y)) {
             return Some(node.id);
@@ -502,6 +571,9 @@ impl GraphLayout {
             .map(|edge| edge.id)
     }
 
+    /// Paint order, bottom to top (`hit` checks it top to bottom): lanes, arrows, each box
+    /// with its badges, pills. Keyboard order: lanes, then `ids()`, with one stop per arrow
+    /// on its pill.
     pub fn svg(&self, focus: Option<Id>, selected: &BTreeSet<Id>) -> String {
         let mut svg = String::new();
         let width = self.bounds.width.max(1.0);
@@ -510,39 +582,52 @@ impl GraphLayout {
             svg,
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" font-family="sans-serif">"#
         );
+        svg.push_str("<defs>");
+        for (id, color) in [(HEAD, FLOW), (HEAD_MANUAL, DIM), (HEAD_FOCUS, FOCUS)] {
+            let _ = write!(
+                svg,
+                r#"<marker id="{id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>"#
+            );
+        }
+        svg.push_str("</defs>");
         let _ = write!(
             svg,
-            r#"<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{FLOW}"/></marker><marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{DIM}"/></marker><marker id="f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{FOCUS}"/></marker></defs>"#
+            r#"<rect class="prism-background" x="0" y="0" width="{width}" height="{height}" fill="{BACKGROUND}"/>"#
         );
-        let _ = write!(
-            svg,
-            r#"<rect x="0" y="0" width="{width}" height="{height}" fill="{BACKGROUND}"/>"#
-        );
-        for lane in &self.lanes {
+        for (index, lane) in self.lanes.iter().enumerate() {
             let r = lane.rect;
-            if let Some(group) = lane.group {
-                open_clickable(&mut svg, group, KIND_LANE, None);
+            let modifier = (index % 2 == 1).then_some(MODIFIER_ALTERNATE);
+            match lane.group {
+                Some(group) => open_clickable(
+                    &mut svg,
+                    group,
+                    KIND_LANE,
+                    modifier,
+                    Some(&format!("Group: {}", lane.title)),
+                ),
+                // The lane of ungrouped boxes is not content: themed, not clickable.
+                None => {
+                    let modifier = modifier.map_or(String::new(), |name| format!(" prism-{name}"));
+                    let _ = write!(svg, r#"<g class="prism-{KIND_LANE}{modifier}">"#);
+                }
             }
             let _ = write!(
                 svg,
-                r#"<rect x="{}" y="{}" width="{}" height="{}" rx="4" fill="{}" fill-opacity="0.06" stroke="{}" stroke-opacity="0.35"/>"#,
+                r#"<rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="4" fill="{}" fill-opacity="0.06" stroke="{}" stroke-opacity="0.35"/>"#,
                 r.x, r.y, r.width, r.height, lane.color, lane.color
             );
             if !lane.title.is_empty() {
                 let _ = write!(
                     svg,
-                    r#"<text x="{}" y="{}" fill="{}" font-size="11" font-weight="700" letter-spacing="1">{}</text>"#,
+                    r#"<text class="prism-title" x="{}" y="{}" fill="{}" font-size="11" font-weight="700" letter-spacing="1">{}</text>"#,
                     r.x + 10.0,
                     r.y + 16.0,
                     lane.color,
                     escape(&lane.title.to_uppercase())
                 );
             }
-            if lane.group.is_some() {
-                svg.push_str("</g>");
-            }
+            svg.push_str("</g>");
         }
-        // Arrows first, boxes over them, then pills and gates on top: the order `hit` checks.
         for edge in &self.edges {
             let focused = focus == Some(edge.id);
             let (stroke, marker) = edge_paint(edge, focused);
@@ -550,25 +635,25 @@ impl GraphLayout {
             for (index, (x, y)) in edge.points.iter().enumerate() {
                 let _ = write!(path, "{}{x},{y}", if index == 0 { "M" } else { " L" });
             }
-            let (start, end) = match edge.direction {
-                Direction::Directed => ("", format!(r#" marker-end="url(#{marker})""#)),
-                Direction::Bidirectional => (
-                    r#" marker-start="url(#MARKER)""#,
-                    format!(r#" marker-end="url(#{marker})""#),
-                ),
-                Direction::Undirected => ("", String::new()),
+            let head = format!("url(#{marker})");
+            let markers = match edge.direction {
+                Direction::Directed => format!(r#" marker-end="{head}""#),
+                Direction::Bidirectional => {
+                    format!(r#" marker-start="{head}" marker-end="{head}""#)
+                }
+                Direction::Undirected => String::new(),
             };
-            let start = start.replace("MARKER", marker);
-            open_clickable(&mut svg, edge.id, KIND_ARROW, edge_modifier(edge));
+            // The pill is the arrow's keyboard stop; the line answers pointers only.
+            open_clickable(&mut svg, edge.id, KIND_ARROW, edge_modifier(edge), None);
             // An invisible wide stroke makes the thin arrow easy to hit with a pointer.
             let _ = write!(
                 svg,
-                r#"<path d="{path}" fill="none" stroke="{BACKGROUND}" stroke-opacity="0" stroke-width="{}" pointer-events="stroke"/>"#,
+                r#"<path class="prism-hit" d="{path}" fill="none" stroke="{BACKGROUND}" stroke-opacity="0" stroke-width="{}" pointer-events="stroke"/>"#,
                 ARROW_HIT_DISTANCE * 2.0
             );
             let _ = write!(
                 svg,
-                r#"<path d="{path}" fill="none" stroke="{stroke}" stroke-width="{}"{}{start}{end}/></g>"#,
+                r#"<path class="prism-line" d="{path}" fill="none" stroke="{stroke}" stroke-width="{}"{}{markers}/></g>"#,
                 if focused { 3.0 } else { 1.8 },
                 if edge.dashed {
                     r#" stroke-dasharray="6 5""#
@@ -586,10 +671,16 @@ impl GraphLayout {
             } else {
                 BOX_FILL
             };
-            open_clickable(&mut svg, node.id, KIND_BOX, Some(kind_name(&node.kind)));
+            open_clickable(
+                &mut svg,
+                node.id,
+                KIND_BOX,
+                Some(kind_name(&node.kind)),
+                Some(&format!("{}: {}", kind_label(&node.kind), node.name)),
+            );
             let _ = write!(
                 svg,
-                r#"<rect x="{}" y="{}" width="{}" height="{}" rx="6" fill="{fill}" stroke="{stroke}" stroke-width="{}"/><rect x="{}" y="{}" width="5" height="{}" rx="2" fill="{}"/>"#,
+                r#"<rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="6" fill="{fill}" stroke="{stroke}" stroke-width="{}"/><rect class="prism-stripe" x="{}" y="{}" width="5" height="{}" rx="2" fill="{}"/>"#,
                 r.x,
                 r.y,
                 r.width,
@@ -602,63 +693,91 @@ impl GraphLayout {
             );
             let _ = write!(
                 svg,
-                r#"<text x="{}" y="{}" fill="{TEXT}" font-weight="700" font-size="14">{}</text>"#,
+                r#"<text class="prism-name" x="{}" y="{}" fill="{TEXT}" font-weight="700" font-size="14">{}</text>"#,
                 r.x + 14.0,
                 r.y + 21.0,
-                escape(&clip(&node.name, 28))
+                escape(&clip(&node.name, NAME_CHARS))
             );
             if self.detail == Detail::Subtitles && !node.subtitle.is_empty() {
                 let _ = write!(
                     svg,
-                    r#"<text x="{}" y="{}" fill="{DIM}" font-size="12">{}</text>"#,
+                    r#"<text class="prism-subtitle" x="{}" y="{}" fill="{DIM}" font-size="12">{}</text>"#,
                     r.x + 14.0,
                     r.y + 39.0,
-                    escape(&clip(&node.subtitle, 32))
+                    escape(&clip(&node.subtitle, SUBTITLE_CHARS))
                 );
             }
             for (index, line) in node.body.iter().enumerate() {
                 let _ = write!(
                     svg,
-                    r#"<text x="{}" y="{}" fill="{TEXT}" font-size="12">{}</text>"#,
+                    r#"<text class="prism-body" x="{}" y="{}" fill="{TEXT}" font-size="12">{}</text>"#,
                     r.x + 14.0,
                     r.y + NAME_HEIGHT + 10.0 + index as f32 * BODY_LINE_HEIGHT,
                     escape(line)
                 );
             }
             svg.push_str("</g>");
+            for gate in &node.gates {
+                let g = gate.rect;
+                let focused = focus == Some(gate.id);
+                open_clickable(
+                    &mut svg,
+                    gate.id,
+                    KIND_GATE,
+                    Some(kind_name(&gate.kind)),
+                    Some(&if gate.more {
+                        format!("{} more on {}: {}", gate.label, node.name, gate.title)
+                    } else {
+                        format!(
+                            "{} on {}: {}",
+                            kind_label(&gate.kind),
+                            node.name,
+                            gate.title
+                        )
+                    }),
+                );
+                let text = if gate.more {
+                    escape(&gate.label)
+                } else if gate.label.is_empty() {
+                    "!".to_owned()
+                } else {
+                    format!("! {}", escape(&gate.label))
+                };
+                let _ = write!(
+                    svg,
+                    r#"<rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="9" fill="{AMBER}" stroke="{}" stroke-width="{}"/><text class="prism-label" x="{}" y="{}" fill="{GATE_TEXT}" font-size="11" font-weight="700">{text}</text></g>"#,
+                    g.x,
+                    g.y,
+                    g.width,
+                    g.height,
+                    if focused { FOCUS } else { AMBER },
+                    if focused { 2.5 } else { 0.0 },
+                    g.x + 10.0,
+                    g.y + 13.0,
+                );
+            }
         }
         for edge in &self.edges {
             let (stroke, _) = edge_paint(edge, focus == Some(edge.id));
             let p = edge.pill;
-            open_clickable(&mut svg, edge.id, KIND_PILL, edge_modifier(edge));
+            open_clickable(
+                &mut svg,
+                edge.id,
+                KIND_PILL,
+                edge_modifier(edge),
+                Some(&format!("Arrow {}: {}", edge.label, edge.ends)),
+            );
             let _ = write!(
                 svg,
-                r#"<rect x="{}" y="{}" width="{}" height="{}" rx="10" fill="{stroke}"/><text x="{}" y="{}" text-anchor="middle" fill="{PILL_TEXT}" font-size="11" font-weight="700">{}</text></g>"#,
+                r#"<title>{}</title><rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="10" fill="{stroke}"/><text class="prism-label" x="{}" y="{}" text-anchor="middle" fill="{PILL_TEXT}" font-size="11" font-weight="700">{}</text></g>"#,
+                escape(&edge.label),
                 p.x,
                 p.y,
                 p.width,
                 p.height,
                 p.center_x(),
                 p.center_y() + 4.0,
-                escape(&edge.label)
-            );
-        }
-        for gate in self.nodes.iter().flat_map(|node| &node.gates) {
-            let g = gate.rect;
-            let focused = focus == Some(gate.id);
-            open_clickable(&mut svg, gate.id, KIND_GATE, Some(kind_name(&gate.kind)));
-            let _ = write!(
-                svg,
-                r#"<rect x="{}" y="{}" width="{}" height="{}" rx="9" fill="{AMBER}" stroke="{}" stroke-width="{}"/><text x="{}" y="{}" fill="{GATE_TEXT}" font-size="11" font-weight="700">! {}</text></g>"#,
-                g.x,
-                g.y,
-                g.width,
-                g.height,
-                if focused { FOCUS } else { AMBER },
-                if focused { 2.5 } else { 0.0 },
-                g.x + 10.0,
-                g.y + 13.0,
-                escape(&gate.label)
+                escape(&edge.shown)
             );
         }
         svg.push_str("</svg>");
@@ -666,14 +785,285 @@ impl GraphLayout {
     }
 }
 
+/// Lays the badges of one box along the right part of its top edge, right to left. Beyond
+/// `MAX_GATES`, one "+N" badge stands for the rest. Labels are clipped to their share of
+/// `GATE_ROOM`.
+fn place_gates(mut gates: Vec<Gate>, rect: &WorldRect) -> Vec<Gate> {
+    if gates.len() > MAX_GATES {
+        let rest = gates.split_off(MAX_GATES);
+        let titles: Vec<&str> = rest.iter().map(|gate| gate.title.as_str()).collect();
+        gates.push(Gate {
+            id: rest[0].id,
+            kind: rest[0].kind.clone(),
+            title: titles.join(", "),
+            label: format!("+{}", rest.len()),
+            rect: WorldRect::default(),
+            more: true,
+        });
+    }
+    let more_width =
+        |gate: &Gate| gate.label.chars().count() as f32 * PILL_CHAR_WIDTH + MORE_PADDING;
+    let reserved: f32 = gates.iter().filter(|gate| gate.more).map(more_width).sum();
+    let labelled = gates.iter().filter(|gate| !gate.more).count().max(1) as f32;
+    let gaps = GATE_GAP * gates.len().saturating_sub(1) as f32;
+    let share = (GATE_ROOM - reserved - gaps) / labelled;
+    let chars = ((share - GATE_PADDING) / PILL_CHAR_WIDTH).floor().max(0.0) as usize;
+    let mut right = rect.right();
+    for gate in &mut gates {
+        let width = if gate.more {
+            more_width(gate)
+        } else {
+            gate.label = if chars < 2 {
+                String::new()
+            } else {
+                clip(&gate.title, chars)
+            };
+            gate.label.chars().count() as f32 * PILL_CHAR_WIDTH + GATE_PADDING
+        };
+        gate.rect = WorldRect {
+            x: right - width,
+            y: rect.y - GATE_HEIGHT + GATE_OVERLAP,
+            width,
+            height: GATE_HEIGHT,
+        };
+        right -= width + GATE_GAP;
+    }
+    gates
+}
+
+fn title_height(title: &str) -> f32 {
+    if title.is_empty() {
+        0.0
+    } else {
+        LANE_TITLE_HEIGHT
+    }
+}
+
+/// What arrow lines keep clear of (boxes, badges, lane titles) and where they may run.
+struct Runs<'a> {
+    blocked: &'a [WorldRect],
+    /// Each lane with the height of its title.
+    lanes: &'a [(WorldRect, f32)],
+    width: f32,
+}
+
+impl Runs<'_> {
+    /// The heights a horizontal line at `y` may move within: its lane below the title, or
+    /// the gap between two lanes, in both cases clear of the lane edges.
+    fn band(&self, y: f32) -> (f32, f32) {
+        for (lane, title) in self.lanes {
+            if y >= lane.y && y <= lane.bottom() {
+                return (lane.y + title + RUN_MARGIN, lane.bottom() - RUN_MARGIN);
+            }
+        }
+        for pair in self.lanes.windows(2) {
+            let (upper, lower) = (pair[0].0, pair[1].0);
+            if y > upper.bottom() && y < lower.y {
+                return (upper.bottom() + RUN_MARGIN, lower.y - RUN_MARGIN);
+            }
+        }
+        (y, y)
+    }
+}
+
+/// The side of a box an arrow starts or ends on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// An arrow's line and the box sides it starts and ends on.
+struct Route {
+    points: Vec<(f32, f32)>,
+    from: (WorldRect, Side),
+    to: (WorldRect, Side),
+}
+
+/// Whether a line's end at `point` sits on `side` of `rect`, clear of its corners.
+fn on_side(point: (f32, f32), rect: &WorldRect, side: Side) -> bool {
+    match side {
+        Side::Top | Side::Bottom => {
+            point.0 >= rect.x + PORT_INSET && point.0 <= rect.right() - PORT_INSET
+        }
+        Side::Left | Side::Right => {
+            point.1 >= rect.y + PORT_INSET && point.1 <= rect.bottom() - PORT_INSET
+        }
+    }
+}
+
+/// Length the segment `a`-`b` shares with lines of `earlier` arrows that run beside it,
+/// closer than `RUN_SPACING`, and end to end with less than `RUN_TOLERANCE` between.
+fn shared(a: (f32, f32), b: (f32, f32), earlier: &[Edge]) -> f32 {
+    let horizontal = a.1 == b.1;
+    let (level, start, end) = if horizontal {
+        (a.1, a.0.min(b.0), a.0.max(b.0))
+    } else {
+        (a.0, a.1.min(b.1), a.1.max(b.1))
+    };
+    let mut total = 0.0;
+    for pair in earlier.iter().flat_map(|edge| edge.points.windows(2)) {
+        let (c, d) = (pair[0], pair[1]);
+        if c == d || (c.1 == d.1) != horizontal {
+            continue;
+        }
+        let (other, other_start, other_end) = if horizontal {
+            (c.1, c.0.min(d.0), c.0.max(d.0))
+        } else {
+            (c.0, c.1.min(d.1), c.1.max(d.1))
+        };
+        let overlap = end.min(other_end) - start.max(other_start);
+        if (other - level).abs() < RUN_SPACING && overlap > -RUN_TOLERANCE {
+            total += overlap + RUN_TOLERANCE;
+        }
+    }
+    total
+}
+
+/// Moves each segment of an arrow off the lines of earlier arrows it would run on or right
+/// beside, and off boxes, badges and lane titles. A segment between two bends moves within
+/// its band (see `Runs::band`; vertical ones within the lanes' width), the first and last
+/// along their box side, which spreads several arrows over one side. Where no place is free,
+/// the segment takes the place it shares least, so a shared line is a last resort.
+fn separate_runs(route: &mut Route, earlier: &[Edge], runs: &Runs) {
+    let count = route.points.len();
+    for index in 0..count.saturating_sub(1) {
+        let (a, b) = (route.points[index], route.points[index + 1]);
+        if a == b {
+            continue;
+        }
+        let horizontal = a.1 == b.1;
+        let band = if horizontal {
+            runs.band(a.1)
+        } else {
+            (RUN_MARGIN, runs.width - RUN_MARGIN)
+        };
+        let mut ends = Vec::new();
+        if index == 0 {
+            ends.push((0, route.from));
+        }
+        if index + 2 == count {
+            ends.push((1, route.to));
+        }
+        let shift = |offset: f32| {
+            if horizontal {
+                ((a.0, a.1 + offset), (b.0, b.1 + offset))
+            } else {
+                ((a.0 + offset, a.1), (b.0 + offset, b.1))
+            }
+        };
+        let fits = |offset: f32| {
+            let (c, d) = shift(offset);
+            let level = if horizontal { c.1 } else { c.0 };
+            let placed = if ends.is_empty() {
+                level >= band.0 && level <= band.1
+            } else {
+                ends.iter()
+                    .all(|(end, (rect, side))| on_side(if *end == 0 { c } else { d }, rect, *side))
+            };
+            let line = WorldRect {
+                x: c.0.min(d.0),
+                y: c.1.min(d.1),
+                width: (c.0 - d.0).abs(),
+                height: (c.1 - d.1).abs(),
+            };
+            let clear = runs.blocked.iter().all(|other| {
+                ends.iter().any(|(_, (rect, _))| rect == other)
+                    || !overlaps(&line, other, RUN_MARGIN)
+            });
+            placed && clear
+        };
+        if fits(0.0) && shared(a, b, earlier) == 0.0 {
+            continue;
+        }
+        let offsets =
+            (1..=RUN_STEPS).flat_map(|step| [-(step as f32) * RUN_STEP, step as f32 * RUN_STEP]);
+        let best = std::iter::once(0.0)
+            .chain(offsets)
+            .filter(|offset| fits(*offset))
+            .map(|offset| {
+                let (c, d) = shift(offset);
+                (offset, shared(c, d, earlier))
+            })
+            .min_by(|x, y| x.1.total_cmp(&y.1));
+        if let Some((offset, _)) = best {
+            let (c, d) = shift(offset);
+            route.points[index] = c;
+            route.points[index + 1] = d;
+        }
+    }
+}
+
+/// Puts the pill on the arrow where it covers no box, badge or earlier pill: on its longest
+/// segment if it can, in the middle before nearer one end. Where the whole label fits
+/// nowhere (beside boxes the gap is narrow) the pill shows only its number; the whole label
+/// stays in its accessible name.
+fn place_pill(
+    points: &[(f32, f32)],
+    label: &str,
+    blocked: &[WorldRect],
+    earlier: &[Edge],
+) -> (String, WorldRect) {
+    let mut segments: Vec<_> = points.windows(2).map(|pair| (pair[0], pair[1])).collect();
+    segments.sort_by(|a, b| length(b).total_cmp(&length(a)));
+    let number = label.split_whitespace().next().unwrap_or("").to_owned();
+    let free = |pill: &WorldRect| {
+        blocked
+            .iter()
+            .chain(earlier.iter().map(|edge| &edge.pill))
+            .all(|other| !overlaps(pill, other, PILL_MARGIN))
+    };
+    for text in [label, number.as_str()] {
+        for ((x1, y1), (x2, y2)) in &segments {
+            for position in PILL_POSITIONS {
+                let center = (x1 + (x2 - x1) * position, y1 + (y2 - y1) * position);
+                let pill = pill_rect(center, text);
+                if free(&pill) {
+                    return (text.to_owned(), pill);
+                }
+            }
+        }
+    }
+    let ((x1, y1), (x2, y2)) = segments.first().copied().unwrap_or_default();
+    (
+        number.clone(),
+        pill_rect(((x1 + x2) / 2.0, (y1 + y2) / 2.0), &number),
+    )
+}
+
+fn length(segment: &((f32, f32), (f32, f32))) -> f32 {
+    let ((x1, y1), (x2, y2)) = *segment;
+    (x2 - x1).abs() + (y2 - y1).abs()
+}
+
+fn pill_rect(center: (f32, f32), text: &str) -> WorldRect {
+    let width = text.chars().count() as f32 * PILL_CHAR_WIDTH + PILL_PADDING;
+    WorldRect {
+        x: center.0 - width / 2.0,
+        y: center.1 - PILL_HEIGHT / 2.0,
+        width,
+        height: PILL_HEIGHT,
+    }
+}
+
+/// Whether `a`, grown by `margin` on every side, overlaps `b`.
+fn overlaps(a: &WorldRect, b: &WorldRect, margin: f32) -> bool {
+    a.x - margin < b.right()
+        && b.x < a.right() + margin
+        && a.y - margin < b.bottom()
+        && b.y < a.bottom() + margin
+}
+
 /// Arrow and pill color, and the arrowhead marker to match.
 fn edge_paint(edge: &Edge, focused: bool) -> (&'static str, &'static str) {
     if focused {
-        (FOCUS, "f")
+        (FOCUS, HEAD_FOCUS)
     } else if edge.dashed {
-        (DIM, "d")
+        (DIM, HEAD_MANUAL)
     } else {
-        (FLOW, "a")
+        (FLOW, HEAD)
     }
 }
 
@@ -690,13 +1080,35 @@ fn kind_name(kind: &ElementKind) -> &'static str {
     }
 }
 
-/// Opens the focusable `<g>` around one clickable shape; the caller closes it. CSS themes
-/// the shape through its classes: `prism-<kind>`, plus `prism-<modifier>` when given.
-fn open_clickable(svg: &mut String, id: Id, kind: &str, modifier: Option<&str>) {
+fn kind_label(kind: &ElementKind) -> &'static str {
+    match kind {
+        ElementKind::Text => "Text",
+        ElementKind::Step => "Step",
+        ElementKind::Finding => "Finding",
+        ElementKind::Question => "Question",
+    }
+}
+
+/// Opens the `<g>` around one clickable shape; the caller closes it. CSS themes the shape
+/// through its classes: `prism-<kind>`, plus `prism-<modifier>` when given. With a `label`
+/// it is a keyboard stop named by it; without, it answers pointers only.
+fn open_clickable(
+    svg: &mut String,
+    id: Id,
+    kind: &str,
+    modifier: Option<&str>,
+    label: Option<&str>,
+) {
     let modifier = modifier.map_or(String::new(), |name| format!(" prism-{name}"));
+    let focus = label.map_or(r#"tabindex="-1" aria-hidden="true""#.to_owned(), |label| {
+        format!(
+            r#"tabindex="0" role="button" aria-label="{}""#,
+            escape(label)
+        )
+    });
     let _ = write!(
         svg,
-        r#"<g class="prism-{kind}{modifier}" data-id="{id}" data-kind="{kind}" tabindex="0" role="button">"#
+        r#"<g class="prism-{kind}{modifier}" data-id="{id}" data-kind="{kind}" {focus}>"#
     );
 }
 
@@ -716,85 +1128,119 @@ fn escape(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Orthogonal route: vertical when the target is in another row, horizontal when beside.
-/// A vertical run that would cross another box detours through the gap beside the column.
+/// Orthogonal route between two boxes. To another row it leaves the bottom (or top) and
+/// turns once: in the gap below the row inside one lane, or in the middle of the gap between
+/// two lanes, never on a lane's edge; a run that would cross another box detours through the
+/// gap beside the column. Beside the target it runs from side to side; past a box in between
+/// it runs below the row, clear of the badges on top.
 fn route(
     from: &WorldRect,
     to: &WorldRect,
+    lanes: (&WorldRect, &WorldRect),
     lane_width: f32,
     obstacles: &[WorldRect],
-) -> Vec<(f32, f32)> {
-    let vertical = |start: &WorldRect, end: &WorldRect, downwards: bool| {
-        let (leave, enter) = if downwards {
-            (start.bottom(), end.y)
+) -> Route {
+    let (from_lane, to_lane) = lanes;
+    let blocked = |x: f32, top: f32, bottom: f32| {
+        obstacles.iter().any(|other| {
+            other != from
+                && other != to
+                && other.x < x
+                && x < other.right()
+                && other.bottom() > top
+                && other.y < bottom
+        })
+    };
+    let vertical = |downwards: bool| {
+        let (leave, enter, sign, sides) = if downwards {
+            (from.bottom(), to.y, 1.0, (Side::Bottom, Side::Top))
         } else {
-            (start.y, end.bottom())
+            (from.y, to.bottom(), -1.0, (Side::Top, Side::Bottom))
         };
-        let (top, bottom) = if downwards {
-            (leave, enter)
+        let turn = if from_lane == to_lane {
+            leave + sign * BOX_GAP_Y / 2.0
+        } else if downwards {
+            from_lane.bottom() + LANE_GAP / 2.0
         } else {
-            (enter, leave)
+            from_lane.y - LANE_GAP / 2.0
         };
-        let blocked = |x: f32| {
-            obstacles.iter().any(|other| {
-                other != start
-                    && other != end
-                    && other.x < x
-                    && x < other.right()
-                    && other.bottom() > top
-                    && other.y < bottom
-            })
-        };
-        let step = if downwards {
-            BOX_GAP_Y / 4.0
+        let (start_x, end_x) = (from.center_x(), to.center_x());
+        let points = if !blocked(start_x, leave.min(turn), leave.max(turn))
+            && !blocked(end_x, turn.min(enter), turn.max(enter))
+        {
+            vec![
+                (start_x, leave),
+                (start_x, turn),
+                (end_x, turn),
+                (end_x, enter),
+            ]
         } else {
-            -BOX_GAP_Y / 4.0
+            let step = sign * BOX_GAP_Y / 4.0;
+            let channel = if from.right() + BOX_GAP_X < lane_width {
+                from.right() + BOX_GAP_X / 2.0
+            } else {
+                from.x - BOX_GAP_X / 2.0
+            };
+            vec![
+                (start_x, leave),
+                (start_x, leave + step),
+                (channel, leave + step),
+                (channel, enter - step),
+                (end_x, enter - step),
+                (end_x, enter),
+            ]
         };
-        if !blocked(start.center_x()) && !blocked(end.center_x()) {
-            let mid = (leave + enter) / 2.0;
-            return vec![
-                (start.center_x(), leave),
-                (start.center_x(), mid),
-                (end.center_x(), mid),
-                (end.center_x(), enter),
-            ];
+        Route {
+            points,
+            from: (*from, sides.0),
+            to: (*to, sides.1),
         }
-        let channel = if start.right() + BOX_GAP_X < lane_width {
-            start.right() + BOX_GAP_X / 2.0
-        } else {
-            start.x - BOX_GAP_X / 2.0
-        };
-        vec![
-            (start.center_x(), leave),
-            (start.center_x(), leave + step),
-            (channel, leave + step),
-            (channel, enter - step),
-            (end.center_x(), enter - step),
-            (end.center_x(), enter),
-        ]
     };
     if to.y >= from.bottom() {
-        return vertical(from, to, true);
+        return vertical(true);
     }
     if to.bottom() <= from.y {
-        return vertical(from, to, false);
+        return vertical(false);
     }
+    let (left, right) = if to.x >= from.right() {
+        (from, to)
+    } else {
+        (to, from)
+    };
+    let between = obstacles.iter().any(|other| {
+        other.x >= left.right()
+            && other.right() <= right.x
+            && other.y < from.bottom().max(to.bottom())
+            && other.bottom() > from.y.min(to.y)
+    });
+    if between {
+        let below = from.bottom().max(to.bottom()) + BOX_GAP_Y / 4.0;
+        return Route {
+            points: vec![
+                (from.center_x(), from.bottom()),
+                (from.center_x(), below),
+                (to.center_x(), below),
+                (to.center_x(), to.bottom()),
+            ],
+            from: (*from, Side::Bottom),
+            to: (*to, Side::Bottom),
+        };
+    }
+    // Boxes of one row share their top edge: the line runs level, through the lower one's middle.
+    let y = from.y.max(to.y) + from.height.min(to.height) / 2.0;
     if to.x >= from.right() {
-        return vec![(from.right(), from.center_y()), (to.x, to.center_y())];
+        Route {
+            points: vec![(from.right(), y), (to.x, y)],
+            from: (*from, Side::Right),
+            to: (*to, Side::Left),
+        }
+    } else {
+        Route {
+            points: vec![(from.x, y), (to.right(), y)],
+            from: (*from, Side::Left),
+            to: (*to, Side::Right),
+        }
     }
-    vec![(from.x, from.center_y()), (to.right(), to.center_y())]
-}
-
-fn longest_segment(points: &[(f32, f32)]) -> (f32, f32, f32, f32) {
-    points
-        .windows(2)
-        .map(|segment| (segment[0].0, segment[0].1, segment[1].0, segment[1].1))
-        .max_by(|a, b| {
-            let la = (a.2 - a.0).abs() + (a.3 - a.1).abs();
-            let lb = (b.2 - b.0).abs() + (b.3 - b.1).abs();
-            la.total_cmp(&lb)
-        })
-        .unwrap_or((0.0, 0.0, 0.0, 0.0))
 }
 
 fn segment_distance(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {

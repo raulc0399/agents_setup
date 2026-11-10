@@ -3,14 +3,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use prism_app_host::arrangement::CloseWindow;
+use prism_app_host::diagram::{Diagram, SVG_EXTENSION, diagram, export_file_name};
 use prism_app_host::registry::{Command, Content, HostEvent};
 use prism_app_host::{AppState, EventSink, Host, HostConfig};
+use prism_core::model::{Document, Id};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{
     AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent, Wry,
 };
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 /// The one event name the UI listens to; the payload is a tagged `HostEvent`.
@@ -20,6 +24,7 @@ const WINDOW_SIZE: (f64, f64) = (1100.0, 760.0);
 const WINDOW_MIN_SIZE: (f64, f64) = (560.0, 400.0);
 const QUIT_MENU_ID: &str = "quit";
 const QUIT_ACCELERATOR: &str = "CmdOrCtrl+Q";
+const SVG_FILTER_NAME: &str = "SVG image";
 
 /// Set once the app quits: windows then close without turning their tabs into closed tabs,
 /// so the next start restores every window.
@@ -95,6 +100,34 @@ fn show_window(app: AppHandle, window: String) -> Result<(), String> {
 #[tauri::command]
 fn set_view(host: State<'_, Host>, key: String, view: serde_json::Value) {
     host.set_view(&key, view);
+}
+
+/// Lays out the document as the tab lists it, on a blocking thread: a large diagram neither
+/// holds up the main thread nor the async runtime.
+#[tauri::command]
+async fn diagram_layout(document: Document, visible: BTreeSet<Id>) -> Result<Diagram, String> {
+    tauri::async_runtime::spawn_blocking(move || diagram(&document, &visible))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Asks where to save the SVG the UI prepared and writes it there. Returns the path, or
+/// nothing when the user cancelled. Async: the blocking dialog must not run on the main thread.
+#[tauri::command]
+async fn export_svg(app: AppHandle, title: String, svg: String) -> Result<Option<String>, String> {
+    let Some(chosen) = app
+        .dialog()
+        .file()
+        .set_file_name(export_file_name(&title))
+        .add_filter(SVG_FILTER_NAME, &[SVG_EXTENSION])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = chosen.into_path().map_err(|error| error.to_string())?;
+    std::fs::write(&path, svg)
+        .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
+    Ok(Some(path.display().to_string()))
 }
 
 fn open_window(app: &AppHandle, host: &Host, id: &str) -> tauri::Result<WebviewWindow> {
@@ -176,6 +209,7 @@ fn quit(app: &AppHandle) {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Quitting::default())
         .menu(menu)
         .on_menu_event(|app, event| {
@@ -227,7 +261,9 @@ fn main() {
             reopen_tab,
             move_tab,
             show_window,
-            set_view
+            set_view,
+            diagram_layout,
+            export_svg
         ])
         .build(tauri::generate_context!())
         .expect("the Prism app starts")

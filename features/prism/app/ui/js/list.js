@@ -217,7 +217,8 @@ export class ListView {
   }
 }
 
-function questionBlock(question) {
+/** A shared question with its delivery state and answer, as cards and the diagram panel show it. */
+export function questionBlock(question) {
   const typed = typedQuestion(question);
   const state = question.answer ? 'answered' : (OUTCOME_LABELS[question.outcome.state] ?? question.outcome.state);
   return h(

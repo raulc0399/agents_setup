@@ -1,6 +1,7 @@
 #!/bin/sh
 # Drives the UI in headless Chromium with a fake backend: runs the behaviour checks, then
-# takes screenshots of every scenario in light and dark at desktop width.
+# takes screenshots of every scenario in light and dark at desktop width. Diagrams are laid
+# out by prism-core through the `diagram` example of prism-app-host, built first.
 # Usage: app/ui-tests/run.sh [output directory]   (default: app/target/ui-screenshots)
 set -eu
 
@@ -8,14 +9,24 @@ APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-"$APP_DIR/target/ui-screenshots"}
 CHROMIUM=${CHROMIUM:-chromium}
 SIZE=1280,800
-SCENARIOS="empty port-error no-tabs list focused ask ended disconnected sessions menu error"
+CHECKS="checks diagram-checks"
+SCENARIOS="empty port-error no-tabs list focused ask ended disconnected sessions menu error diagram diagram-panel diagram-zoomed"
+# A narrow window: the diagram's panel goes below the canvas.
+NARROW_SIZE=600,760
+NARROW_CHECKS="narrow-checks"
+NARROW_SCENARIOS="diagram-panel"
 
 READY_ATTEMPTS=50
 
 mkdir -p "$OUT"
+(cd "$APP_DIR" && CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} cargo build --quiet --locked -p prism-app-host --example diagram)
+# Wherever cargo builds (CARGO_TARGET_DIR, a config file): it says so in its metadata.
+TARGET_DIR=$(cd "$APP_DIR" && cargo metadata --format-version 1 --no-deps --locked \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+DIAGRAM="$TARGET_DIR/debug/examples/diagram"
 # A free port: bind to port 0 and read what the system chose.
 PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
-python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$APP_DIR" >/dev/null 2>&1 &
+python3 "$APP_DIR/ui-tests/server.py" "$PORT" "$APP_DIR" "$DIAGRAM" >/dev/null 2>&1 &
 SERVER=$!
 trap 'kill $SERVER' EXIT
 attempt=0
@@ -28,20 +39,45 @@ until curl -sf "http://127.0.0.1:$PORT/ui-tests/harness.html" >/dev/null; do
   sleep 0.1
 done
 
+# browse <window size> <chromium arguments>
 browse() {
-  "$CHROMIUM" --headless --no-sandbox --disable-gpu --hide-scrollbars --window-size=$SIZE \
+  size=$1
+  shift
+  "$CHROMIUM" --headless --no-sandbox --disable-gpu --hide-scrollbars --window-size="$size" \
     --virtual-time-budget=3000 "$@"
 }
 
-RESULT=$(browse --dump-dom "http://127.0.0.1:$PORT/ui-tests/harness.html?scenario=checks" 2>/dev/null \
-  | sed -n 's:.*<output id="result" hidden="">\(.*\)</output>.*:\1:p')
-echo "checks: ${RESULT:-no result}"
+PASSED=true
+# check <window size> <scenario>
+check() {
+  RESULT=$(browse "$1" --dump-dom "http://127.0.0.1:$PORT/ui-tests/harness.html?scenario=$2" 2>/dev/null \
+    | sed -n 's:.*<output id="result" hidden="">\(.*\)</output>.*:\1:p')
+  echo "$2: ${RESULT:-no result}"
+  if [ "$RESULT" != "PASS" ]; then
+    PASSED=false
+  fi
+}
+
+# screenshots <window size> <file suffix> <scenario>
+screenshots() {
+  url="http://127.0.0.1:$PORT/ui-tests/harness.html?scenario=$3"
+  browse "$1" --screenshot="$OUT/$3$2-light.png" "$url" 2>/dev/null
+  browse "$1" --force-dark-mode --blink-settings=preferredColorScheme=0 \
+    --screenshot="$OUT/$3$2-dark.png" "$url" 2>/dev/null
+}
+
+for checks in $CHECKS; do
+  check "$SIZE" "$checks"
+done
+for checks in $NARROW_CHECKS; do
+  check "$NARROW_SIZE" "$checks"
+done
 
 for scenario in $SCENARIOS; do
-  url="http://127.0.0.1:$PORT/ui-tests/harness.html?scenario=$scenario"
-  browse --screenshot="$OUT/$scenario-light.png" "$url" 2>/dev/null
-  browse --force-dark-mode --blink-settings=preferredColorScheme=0 \
-    --screenshot="$OUT/$scenario-dark.png" "$url" 2>/dev/null
+  screenshots "$SIZE" "" "$scenario"
+done
+for scenario in $NARROW_SCENARIOS; do
+  screenshots "$NARROW_SIZE" "-narrow" "$scenario"
 done
 echo "screenshots: $OUT"
-[ "$RESULT" = "PASS" ]
+[ "$PASSED" = true ]

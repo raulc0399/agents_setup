@@ -38,6 +38,16 @@
   --kind-question: #a3289f;
   --kind-link: #2563eb;
   --kind-group: #b46a0b;
+
+  /* Diagram roles, per the Diagrams rules: teal and blue lanes, blue flow, amber gates. */
+  --canvas: #fafbfc;
+  --lane-a: var(--kind-step);
+  --lane-b: var(--kind-link);
+  --flow: var(--kind-link);
+  --manual: var(--faint);
+  --gate: #e8a020;
+  --gate-text: #1b1b1b;
+  --pill-text: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -74,6 +84,10 @@
     --kind-question: #d783ff;
     --kind-link: #6e9fff;
     --kind-group: #f0b44c;
+
+    --canvas: #12151a;
+    --gate: #f0b44c;
+    --pill-text: #0d1117;
   }
 }
 
@@ -683,6 +697,351 @@ button {
   margin-right: auto;
   color: var(--faint);
   font-size: 11px;
+}
+
+/* View switch */
+
+.segmented {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--chrome);
+}
+
+.segmented button {
+  height: 24px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+}
+
+.segmented button:hover {
+  color: var(--text);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-weight: 550;
+}
+
+/* Diagram: the canvas pans and zooms through the SVG's viewBox; the panel shows one item. */
+
+.diagram-view {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  min-height: 0;
+}
+
+.diagram-frame {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.diagram-canvas {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--canvas);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+
+.diagram-canvas:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+
+.diagram-canvas.dragging {
+  cursor: grabbing;
+}
+
+.diagram-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  font-family: var(--font);
+}
+
+.diagram-message {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  padding: 32px;
+  color: var(--muted);
+  text-align: center;
+  pointer-events: none;
+}
+
+.diagram-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.diagram-controls .button {
+  min-width: 28px;
+  justify-content: center;
+  border-color: transparent;
+}
+
+.diagram-controls .zoom {
+  min-width: 44px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.diagram-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 16px 18px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.panel-tag {
+  --kind: var(--kind-text);
+  display: flex;
+  gap: 6px;
+  color: var(--kind);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.panel-tag.kind-step {
+  --kind: var(--kind-step);
+}
+
+.panel-tag.kind-finding {
+  --kind: var(--kind-finding);
+}
+
+.panel-tag.kind-question {
+  --kind: var(--kind-question);
+}
+
+.panel-tag.kind-link {
+  --kind: var(--kind-link);
+}
+
+.panel-tag.kind-group {
+  --kind: var(--kind-group);
+}
+
+.panel-tag .number {
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.panel-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.diagram-panel .card-source,
+.diagram-panel .card-question {
+  margin-left: 0;
+}
+
+.diagram-panel .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.diagram-panel .hint {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+/* Shapes from prism-core: these rules replace the colors its presentation attributes paint. */
+
+.diagram-svg .prism-background {
+  fill: var(--canvas);
+}
+
+.diagram-svg [data-id] {
+  cursor: pointer;
+  outline: none;
+}
+
+.diagram-svg .prism-lane {
+  --lane: var(--lane-a);
+}
+
+.diagram-svg .prism-lane.prism-alt {
+  --lane: var(--lane-b);
+}
+
+.diagram-svg .prism-lane .prism-shape {
+  fill: var(--lane);
+  fill-opacity: 0.06;
+  stroke: var(--lane);
+  stroke-opacity: 0.4;
+}
+
+.diagram-svg .prism-lane .prism-title {
+  fill: var(--lane);
+}
+
+.diagram-svg .prism-box {
+  --kind: var(--kind-text);
+}
+
+.diagram-svg .prism-box.prism-step {
+  --kind: var(--kind-step);
+}
+
+.diagram-svg .prism-box.prism-finding {
+  --kind: var(--kind-finding);
+}
+
+.diagram-svg .prism-box.prism-question {
+  --kind: var(--kind-question);
+}
+
+.diagram-svg .prism-box .prism-shape {
+  fill: var(--surface);
+  stroke: var(--kind);
+  stroke-width: 1.5;
+}
+
+.diagram-svg .prism-box:hover .prism-shape {
+  stroke-width: 2.5;
+}
+
+.diagram-svg .prism-box .prism-stripe {
+  fill: var(--kind);
+}
+
+.diagram-svg .prism-name,
+.diagram-svg .prism-body {
+  fill: var(--text);
+}
+
+.diagram-svg .prism-subtitle {
+  fill: var(--muted);
+}
+
+.diagram-svg .prism-arrow .prism-line {
+  stroke: var(--flow);
+}
+
+.diagram-svg .prism-arrow.prism-manual .prism-line {
+  stroke: var(--manual);
+}
+
+.diagram-svg #prism-head path {
+  fill: var(--flow);
+}
+
+.diagram-svg #prism-head-manual path {
+  fill: var(--manual);
+}
+
+.diagram-svg #prism-head-focus path {
+  fill: var(--focus);
+}
+
+.diagram-svg .prism-pill .prism-shape {
+  fill: var(--flow);
+}
+
+.diagram-svg .prism-pill.prism-manual .prism-shape {
+  fill: var(--manual);
+}
+
+.diagram-svg .prism-pill .prism-label {
+  fill: var(--pill-text);
+}
+
+.diagram-svg .prism-gate .prism-shape {
+  fill: var(--gate);
+  stroke: var(--gate);
+}
+
+.diagram-svg .prism-gate .prism-label {
+  fill: var(--gate-text);
+}
+
+/* The focused item, in every shape that shows it. */
+
+.diagram-svg .prism-lane.focused .prism-shape {
+  stroke: var(--focus);
+  stroke-opacity: 1;
+  stroke-width: 2;
+}
+
+.diagram-svg .prism-box.focused .prism-shape {
+  stroke: var(--focus);
+  stroke-width: 3;
+}
+
+.diagram-svg .prism-arrow.focused .prism-line {
+  stroke: var(--focus);
+  stroke-width: 3;
+}
+
+.diagram-svg .prism-arrow.focused .prism-line[marker-end] {
+  marker-end: url(#prism-head-focus);
+}
+
+.diagram-svg .prism-arrow.focused .prism-line[marker-start] {
+  marker-start: url(#prism-head-focus);
+}
+
+.diagram-svg .prism-pill.focused .prism-shape {
+  fill: var(--focus);
+}
+
+.diagram-svg .prism-gate.focused .prism-shape {
+  stroke: var(--focus);
+  stroke-width: 2.5;
+}
+
+/* Narrow windows: the panel goes below the canvas. */
+
+@media (max-width: 760px) {
+  .diagram-view {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 40%);
+  }
+
+  .diagram-panel {
+    border-top: 1px solid var(--border);
+    border-left: none;
+  }
 }
 
 /* Empty states */
