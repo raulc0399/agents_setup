@@ -143,7 +143,7 @@ sh scripts/check-development.sh
 ```
 
 The script checks the exact Rust version, formatter, linter, compiler, archiver,
-tmux, and at least one of the Codex and Claude Code CLIs. It reports pkg-config separately because bundled
+and at least one of the Codex and Claude Code CLIs. It reports pkg-config separately because bundled
 SQLite does not require it. It exits nonzero when a required tool is missing.
 Once command checks pass, it compiles, archives, links and runs C/libc and
 Rust/linker probes in a temporary directory, then removes its own probe files.
@@ -160,7 +160,8 @@ fallback also needs Zig and cargo-zigbuild; they are development tooling only.
 this host. Reassess native discovery packages if crate dependencies change.
 
 Using a prebuilt Prism binary does not require Rust, Cargo, rustfmt, Clippy, or
-a compiler. It requires tmux, a compatible interactive terminal, and Codex CLI
-or Claude Code CLI with its native Prism package activated. Dynamic library requirements
+a compiler. It requires Codex CLI or Claude Code CLI with its native Prism
+package activated, and the Prism desktop app on the host to show the workspace;
+tmux is not required. Dynamic library requirements
 must be checked against the released binary. Node/npm are tooling used for the
 observed CLI installation; they are not established Prism runtime requirements.

@@ -1,15 +1,10 @@
 //! Authenticated, conversation-bound operations used by native CLI extensions.
 use crate::actions::{ContentAction, PublishRequest};
-use crate::adapters::{
-    AgentAdapter, NativeEvent,
-    claude::ClaudeAdapter,
-    codex::{CodexAdapter, RpcError as CodexRpcError},
-};
+use crate::adapters::{AgentAdapter, NativeEvent, claude::ClaudeAdapter};
 use crate::applink::{AppLink, LinkConfig};
 use crate::model::{AgentKind, DeliveryMode, DeliveryOutcome, Id, MAX_PAYLOAD_BYTES};
-use crate::session::{LiveBinding, TmuxClient, process_start_time, read_binding, write_binding};
+use crate::session::{LiveBinding, read_binding, verify_binding, write_binding};
 use crate::store::Store;
-use crate::ui::ConnectionInfo;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,9 +23,6 @@ pub const PROTOCOL_VERSION: u16 = 1;
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const BINDING_VERIFY_RETRIES: u32 = 5;
-const NATIVE_RETRY_INITIAL: Duration = Duration::from_secs(1);
-const NATIVE_RETRY_MAX: Duration = Duration::from_secs(30);
-const MAX_NATIVE_VERSION_CHARS: usize = 256;
 const RESPONSE_LIMIT: usize = 4 * MAX_PAYLOAD_BYTES;
 const LIST_LIMIT: usize = 100;
 const QUESTION_PREVIEW_CHARS: usize = 512;
@@ -58,15 +50,21 @@ pub enum Operation {
     Action(ActionParams),
     Questions(QuestionParams),
     Answer(AnswerParams),
-    /// Shared questions not yet placed in the CLI prompt box. The native mod polls this, so
-    /// unlike the tools it never opens the Prism pane.
+    /// Shared questions not yet placed in the CLI prompt box. The native mod polls this every
+    /// second, so it only reads.
     Pending(PendingParams),
+    /// The link to the desktop app, for the mod's `/prism` command; read-only like `pending`.
+    Status(StatusParams),
     Lifecycle(LifecycleEvent),
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingParams {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusParams {}
 
 const PENDING_LIMIT: usize = 16;
 
@@ -132,7 +130,7 @@ pub fn wait_for_binding(path: &Path) -> Result<LiveBinding> {
             }
             Err(error) => {
                 return Err(error).context(
-                    "no verified Prism binding; launch or resume with prism --agent codex|claude",
+                    "no verified Prism binding; call a Prism tool from the conversation to attach it",
                 );
             }
         }
@@ -177,7 +175,7 @@ fn authenticate(binding: &LiveBinding, token: &str) -> Result<()> {
     Ok(())
 }
 
-/// Only explicit public content and shared questions are exposed; never ViewState.
+/// Only explicit public content and shared questions are exposed; never private view state.
 pub fn apply_operation(
     store: &mut Store,
     binding: &LiveBinding,
@@ -293,6 +291,7 @@ pub fn apply_operation(
                 &params.text,
             )?)?)
         }
+        Operation::Status(_) => bail!("the app link status is not a content operation"),
         Operation::Lifecycle(_) => bail!("lifecycle events are not content operations"),
     }
 }
@@ -365,143 +364,15 @@ impl BridgeClient {
     }
 }
 
-/// Bridge-owned native observation, scoped to the bound conversation.
-enum NativeObserver {
-    Codex(CodexObserver),
-    Claude(ClaudeAdapter),
-}
-
-impl NativeObserver {
-    fn connect(binding: &LiveBinding, conversation: &str) -> Result<Self> {
-        match binding.agent {
-            AgentKind::Codex => Ok(Self::Codex(CodexObserver {
-                adapter: None,
-                connecting: None,
-                retry_at: Instant::now(),
-                retry_delay: NATIVE_RETRY_INITIAL,
-            })),
-            AgentKind::Claude => Ok(Self::Claude(ClaudeAdapter::new(
-                conversation,
-                binding.generation,
-            )?)),
-        }
-    }
-
-    fn connected(&self) -> bool {
-        match self {
-            Self::Codex(observer) => observer.adapter.is_some(),
-            Self::Claude(_) => true,
-        }
-    }
-}
-
-struct CodexObserver {
-    adapter: Option<Box<CodexAdapter>>,
-    connecting: Option<std::thread::JoinHandle<Result<CodexAdapter>>>,
-    retry_at: Instant,
-    retry_delay: Duration,
-}
-
-impl CodexObserver {
-    fn connect(binding: &LiveBinding) -> Result<CodexAdapter> {
-        let socket = binding
-            .server_endpoint
-            .strip_prefix("unix://")
-            .context("native server must use a Unix socket")?;
-        let adapter = CodexAdapter::connect(
-            Path::new(socket),
-            binding
-                .conversation
-                .as_deref()
-                .context("native thread missing")?,
-            binding.generation,
-            IO_TIMEOUT,
-        )?;
-        ensure!(
-            adapter.server_pid == binding.server_pid,
-            "native server process changed"
-        );
-        let version: String = adapter
-            .server_user_agent
-            .chars()
-            .take(MAX_NATIVE_VERSION_CHARS)
-            .collect();
-        eprintln!("prism: Codex observer connected; app-server userAgent={version:?}");
-        Ok(adapter)
-    }
-
-    fn disconnect(&mut self, reason: &str) {
-        self.adapter = None;
-        self.retry_at = Instant::now() + self.retry_delay;
-        eprintln!(
-            "prism: Codex observer disconnected ({reason}); retry in {:?}",
-            self.retry_delay
-        );
-        self.retry_delay = (self.retry_delay * 2).min(NATIVE_RETRY_MAX);
-    }
-
-    fn poll(&mut self, binding: &LiveBinding) -> Option<String> {
-        if self
-            .connecting
-            .as_ref()
-            .is_some_and(|task| task.is_finished())
-        {
-            let result = self
-                .connecting
-                .take()
-                .expect("finished connection")
-                .join()
-                .unwrap_or_else(|_| {
-                    Err(anyhow::anyhow!("Codex observer connection worker failed"))
-                });
-            match result {
-                Ok(adapter) => self.adapter = Some(Box::new(adapter)),
-                Err(error) => {
-                    if matches!(error.downcast_ref::<CodexRpcError>(), Some(CodexRpcError::ThreadClosed { server_pid }) if *server_pid == binding.server_pid)
-                    {
-                        return Some(error.to_string());
-                    }
-                    self.disconnect(&error.to_string());
-                }
-            }
-        }
-        if let Some(adapter) = &mut self.adapter {
-            let result = adapter.poll_events();
-            if adapter.thread_closed() {
-                return adapter.retirement_reason().map(str::to_owned);
-            }
-            let reason = adapter
-                .retirement_reason()
-                .map(str::to_owned)
-                .or_else(|| result.err().map(|error| error.to_string()));
-            if let Some(reason) = reason {
-                self.disconnect(&reason);
-            } else {
-                self.retry_delay = NATIVE_RETRY_INITIAL;
-            }
-        }
-        if self.adapter.is_none() && self.connecting.is_none() && Instant::now() >= self.retry_at {
-            // A stalled handshake/resume must not block bridge health or pane lifecycle checks.
-            let binding = binding.clone();
-            match std::thread::Builder::new()
-                .name("codex-observer".into())
-                .spawn(move || Self::connect(&binding))
-            {
-                Ok(task) => self.connecting = Some(task),
-                Err(error) => self.disconnect(&error.to_string()),
-            }
-        }
-        None
-    }
-}
-
 struct Service {
     binding_path: PathBuf,
-    executable: PathBuf,
     store: Store,
-    observer: Option<NativeObserver>,
-    /// The native reason for retirement, kept even when the CLI pane dies before the next poll.
+    /// Claude's session observer; Codex lifecycle is the lifetime of its MCP process.
+    observer: Option<ClaudeAdapter>,
+    /// The native reason for retirement, kept even when the CLI exits before the next poll.
     native_retirement: Option<String>,
+    /// `None` when the link thread could not start; `status` then reports no app link.
+    link: Option<AppLink>,
 }
 
 impl Service {
@@ -539,13 +410,16 @@ impl Service {
             ensure!(binding.agent == AgentKind::Claude, LIFECYCLE_IS_NATIVE);
         }
         if matches!(call.operation, Operation::Pending(_)) {
-            // The mod polls every second: answer from the store without the tmux check,
-            // the binding rewrite, or the pane that the tools bring along.
+            // The mod polls every second: answer from the store without the CLI process
+            // check or the binding rewrite that the tools bring along.
             let data = apply_operation(&mut self.store, &binding, call.operation)?;
             return Ok(json!({"data":data}));
         }
-        let tmux = TmuxClient::socket(&binding.tmux.socket_path);
-        tmux.verify_binding(&binding)?;
+        if matches!(call.operation, Operation::Status(_)) {
+            let app = self.link.as_ref().map(AppLink::status);
+            return Ok(json!({"data":{"app":app}}));
+        }
+        verify_binding(&binding)?;
         write_binding(&self.binding_path, &binding)?;
         binding = read_binding(&self.binding_path)?;
         authorize(&mut binding, token, &call)?;
@@ -566,15 +440,10 @@ impl Service {
             return Ok(json!({"data":{"retiring":true}}));
         }
         let data = apply_operation(&mut self.store, &binding, call.operation)?;
-        // Publication is already committed. Pane failure must not roll it back or replay it.
-        let pane = match tmux.ensure_ui(&mut binding, &self.binding_path, &self.executable) {
-            Ok(pane) => json!({"id":pane.pane_id}),
-            Err(error) => json!({"error":error.to_string()}),
-        };
-        Ok(json!({"data":data,"pane":pane}))
+        Ok(json!({"data":data}))
     }
 
-    /// Only Claude reports lifecycle over the bridge; Codex lifecycle is observed natively.
+    /// Only Claude reports lifecycle over the bridge; Codex lifecycle is its MCP process lifetime.
     fn observe_lifecycle(&mut self, event: &LifecycleEvent) -> Result<()> {
         let LifecycleEvent::SessionEnd { reason } = event else {
             bail!("only session end is a native lifecycle observation");
@@ -588,7 +457,7 @@ impl Service {
             "lifecycle reason must be a short lowercase identifier"
         );
         // The bridge loop creates the pre-bound Claude observer before it accepts any call.
-        let Some(NativeObserver::Claude(adapter)) = &mut self.observer else {
+        let Some(adapter) = &mut self.observer else {
             bail!(LIFECYCLE_IS_NATIVE);
         };
         adapter.observe_session_end(reason);
@@ -597,7 +466,8 @@ impl Service {
     }
 }
 
-fn retire(path: &Path, store: &mut Store, reason: &str) -> Result<()> {
+/// Retires the binding and invalidates its generation's in-flight work in the store.
+pub(crate) fn retire(path: &Path, store: &mut Store, reason: &str) -> Result<()> {
     let mut binding = read_binding(path)?;
     if binding.retired {
         return Ok(());
@@ -612,10 +482,10 @@ fn retire(path: &Path, store: &mut Store, reason: &str) -> Result<()> {
     Ok(())
 }
 
-fn healthy_binding(path: &Path) -> Result<(LiveBinding, bool)> {
+fn healthy_binding(path: &Path) -> Result<()> {
     let binding = read_binding(path)?;
     ensure!(!binding.retired, "Binding retired; explicitly resume");
-    TmuxClient::socket(&binding.tmux.socket_path).verify_binding(&binding)?;
+    verify_binding(&binding)?;
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .unix_socket(socket_path(path)?)
@@ -646,40 +516,12 @@ fn healthy_binding(path: &Path) -> Result<(LiveBinding, bool)> {
             && response["version"] == PROTOCOL_VERSION,
         "bridge identity changed"
     );
-    let native_connected =
-        binding.agent != AgentKind::Codex || response["native_connected"].as_bool().unwrap_or(true);
-    Ok((binding, native_connected))
+    Ok(())
 }
 
-/// Launcher readiness does not depend on the optional Codex lifecycle observer.
+/// The bridge of this binding answers health checks for its live CLI.
 pub fn is_ready(path: &Path) -> bool {
     healthy_binding(path).is_ok()
-}
-
-pub fn connection_info(path: &Path) -> ConnectionInfo {
-    match healthy_binding(path) {
-        Ok((binding, true)) => ConnectionInfo {
-            generation: binding.generation,
-            connected: true,
-            send_modes: vec![DeliveryMode::Share],
-            message: format!(
-                "Share explicitly, then ask {} to retrieve the Prism question",
-                binding.agent.label()
-            ),
-        },
-        Ok((binding, false)) => ConnectionInfo {
-            generation: binding.generation,
-            connected: false,
-            send_modes: vec![],
-            message: "Codex observer disconnected; reconnecting".into(),
-        },
-        Err(error) => ConnectionInfo {
-            generation: 0,
-            connected: false,
-            send_modes: vec![],
-            message: error.to_string(),
-        },
-    }
 }
 
 struct DeadlineReader<'a> {
@@ -845,9 +687,8 @@ impl Drop for Cleanup {
     }
 }
 
-/// Returns the native retirement reason once the observer reports that the conversation ended.
-/// A transient tmux query failure must not retire a live binding and tear down the session;
-/// only consecutive failures count as a lost binding.
+/// A transient failure to verify the CLI process must not retire a live binding and tear down
+/// the session; only consecutive failures count as a lost binding.
 pub fn binding_still_live(verified: bool, consecutive_failures: &mut u32) -> bool {
     if verified {
         *consecutive_failures = 0;
@@ -857,23 +698,22 @@ pub fn binding_still_live(verified: bool, consecutive_failures: &mut u32) -> boo
     *consecutive_failures < BINDING_VERIFY_RETRIES
 }
 
+/// Returns the native retirement reason once the Claude observer reports that the
+/// conversation ended. Codex has no observer: its binding ends with its MCP process.
 fn poll_native(
-    observer: &mut Option<NativeObserver>,
+    observer: &mut Option<ClaudeAdapter>,
     binding: &LiveBinding,
 ) -> Result<Option<String>> {
-    if binding.attached && binding.agent == AgentKind::Codex {
+    if binding.agent != AgentKind::Claude {
         return Ok(None);
     }
     let Some(thread) = &binding.conversation else {
         return Ok(None);
     };
     if observer.is_none() {
-        *observer = Some(NativeObserver::connect(binding, thread)?);
+        *observer = Some(ClaudeAdapter::new(thread, binding.generation)?);
     }
-    let adapter = match observer.as_mut().expect("observer initialized") {
-        NativeObserver::Codex(observer) => return Ok(observer.poll(binding)),
-        NativeObserver::Claude(adapter) => adapter,
-    };
+    let adapter = observer.as_mut().expect("observer initialized");
     for event in adapter.poll_events()? {
         if let NativeEvent::Retired { reason } = event {
             return Ok(Some(reason));
@@ -931,10 +771,10 @@ pub fn run_with_link(binding_path: &Path, link: LinkConfig) -> Result<()> {
     let socket = socket_path(binding_path)?;
     let mut service = Service {
         binding_path: binding_path.to_owned(),
-        executable: std::env::current_exe()?,
         store: Store::open(store_path(&binding))?,
         observer: None,
         native_retirement: None,
+        link: None,
     };
     let server = bind_listener(&socket)?;
     let mut cleanup = Cleanup {
@@ -942,7 +782,7 @@ pub fn run_with_link(binding_path: &Path, link: LinkConfig) -> Result<()> {
         signals: Vec::new(),
     };
     // The link is optional: without its thread the bridge serves the tools as before.
-    let link = match AppLink::start(binding_path, link) {
+    service.link = match AppLink::start(binding_path, link) {
         Ok(link) => Some(link),
         Err(error) => {
             eprintln!("prism: app link unavailable ({error})");
@@ -968,9 +808,7 @@ pub fn run_with_link(binding_path: &Path, link: LinkConfig) -> Result<()> {
             if current.retired {
                 break;
             }
-            let verified = TmuxClient::socket(&current.tmux.socket_path)
-                .verify_binding(&current)
-                .is_ok();
+            let verified = verify_binding(&current).is_ok();
             if !binding_still_live(verified, &mut verify_failures) {
                 break;
             }
@@ -995,15 +833,9 @@ pub fn run_with_link(binding_path: &Path, link: LinkConfig) -> Result<()> {
                 if request.health {
                     let current = read_binding(binding_path)?;
                     authenticate(&current, &request.token)?;
-                    TmuxClient::socket(&current.tmux.socket_path).verify_binding(&current)?;
-                    let native_connected = current.attached
-                        || current.conversation.is_none()
-                        || service
-                            .observer
-                            .as_ref()
-                            .is_some_and(NativeObserver::connected);
+                    verify_binding(&current)?;
                     return Ok(
-                        json!({"version":PROTOCOL_VERSION,"binding_id":current.binding_id,"generation":current.generation,"native_connected":native_connected}),
+                        json!({"version":PROTOCOL_VERSION,"binding_id":current.binding_id,"generation":current.generation}),
                     );
                 }
                 service.handle(&request.token, serde_json::from_slice(&request.body)?)
@@ -1018,29 +850,14 @@ pub fn run_with_link(binding_path: &Path, link: LinkConfig) -> Result<()> {
         &mut service.store,
         service.native_retirement.as_deref().unwrap_or(DISCONNECTED),
     );
-    if let Some(link) = link {
+    if let Some(link) = service.link.take() {
         link.close(service.native_retirement.as_deref().unwrap_or(DISCONNECTED));
     }
     drop(server);
     drop(cleanup);
-    // Only launcher-started Codex owns a private server; attached CLIs belong to the user.
-    if !binding.attached
-        && binding.agent == AgentKind::Codex
-        && process_start_time(binding.server_pid).ok().as_deref()
-            == Some(binding.server_start_time.as_str())
-    {
-        // This server was created exclusively for this launcher binding.
-        unsafe {
-            libc::kill(binding.server_pid as i32, libc::SIGTERM);
-        }
-    }
-    if binding.attached {
-        // The lease is still held: only the bridge that owned this runtime may release it.
-        let mut tagged = read_binding(binding_path).unwrap_or_else(|_| binding.clone());
-        tagged.generation = binding.generation;
-        let _ = TmuxClient::socket(&binding.tmux.socket_path).release_attached(&tagged);
-        let _ = crate::session::remove_socket_directory(binding_path);
-    }
+    // The lease is still held: only the bridge that owned this runtime may remove its sockets.
+    // The attached CLI belongs to the user and is never signalled.
+    let _ = crate::session::remove_socket_directory(binding_path);
     result.and(retirement)
 }
 
@@ -1142,268 +959,42 @@ mod tests {
         assert!(response.len() < HEADER_LIMIT);
     }
 
-    #[test]
-    fn codex_observer_connection_failure_keeps_binding_live() {
-        let mut fixture = Fixture::new();
-        fixture.binding.bind_conversation("thread").unwrap();
-        let result = poll_codex_connection(&mut fixture.service.observer, &fixture.binding);
-        assert!(matches!(result, Ok(None)), "{result:?}");
-        assert!(!fixture.binding.retired);
-        let Some(NativeObserver::Codex(observer)) = &fixture.service.observer else {
-            panic!("Codex observer missing");
-        };
-        assert!(observer.adapter.is_none());
-        assert!(observer.connecting.is_none());
-        assert!(observer.retry_at > Instant::now());
-    }
-
-    fn poll_codex_connection(
-        observer: &mut Option<NativeObserver>,
-        binding: &LiveBinding,
-    ) -> Result<Option<String>> {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let result = poll_native(observer, binding)?;
-            if result.is_some()
-                || matches!(observer, Some(NativeObserver::Codex(observer)) if observer.connecting.is_none())
-            {
-                return Ok(result);
-            }
-            assert!(
-                Instant::now() < deadline,
-                "observer connection did not finish"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn codex_test_connection(
-        listener: UnixListener,
-        before_resume: Option<Value>,
-    ) -> tungstenite::WebSocket<UnixStream> {
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut socket = tungstenite::accept(stream).unwrap();
-        while let Ok(tungstenite::Message::Text(text)) = socket.read() {
-            let request: Value = serde_json::from_str(&text).unwrap();
-            if request["method"] == "thread/resume"
-                && let Some(event) = &before_resume
-            {
-                socket
-                    .send(tungstenite::Message::Text(event.to_string().into()))
-                    .unwrap();
-                return socket;
-            }
-            let result = match request["method"].as_str().unwrap() {
-                "initialize" => json!({"userAgent":"test/0.167.0"}),
-                "initialized" => continue,
-                "server/diagnostics" => json!({"process":{"id":std::process::id()}}),
-                "thread/resume" => json!({"thread":{"id":"thread"}}),
-                method => panic!("unexpected method {method}"),
-            };
-            socket
-                .send(tungstenite::Message::Text(
-                    json!({"id":request["id"],"result":result})
-                        .to_string()
-                        .into(),
-                ))
-                .unwrap();
-            if request["method"] == "thread/resume" {
-                return socket;
-            }
-        }
-        panic!("observer disconnected before resume");
-    }
-
-    fn codex_observer_event(event: Value) -> Option<String> {
-        let mut fixture = Fixture::new();
-        fixture.binding.bind_conversation("thread").unwrap();
-        let socket_path = fixture._project.path().join("native.sock");
-        fixture.binding.server_endpoint = format!("unix://{}", socket_path.display());
-        let listener = UnixListener::bind(socket_path).unwrap();
-        let task = std::thread::spawn(move || {
-            let mut socket = codex_test_connection(listener, None);
-            if !event.is_null() {
-                socket
-                    .send(tungstenite::Message::Text(event.to_string().into()))
-                    .unwrap();
-            }
-            socket.close(None).unwrap();
-        });
-        poll_native(&mut fixture.service.observer, &fixture.binding).unwrap();
-        task.join().unwrap();
-        let result = poll_codex_connection(&mut fixture.service.observer, &fixture.binding);
-        result.unwrap()
-    }
-
-    #[test]
-    fn codex_observer_reconnects_after_backoff_without_rebinding() {
-        let mut fixture = Fixture::new();
-        fixture.binding.bind_conversation("thread").unwrap();
-        let path = fixture._project.path().join("native.sock");
-        fixture.binding.server_endpoint = format!("unix://{}", path.display());
-        let generation = fixture.binding.generation;
-        let observer = &mut fixture.service.observer;
-        assert!(
-            poll_codex_connection(observer, &fixture.binding)
-                .unwrap()
-                .is_none()
-        );
-        let listener = UnixListener::bind(path).unwrap();
-        assert!(poll_native(observer, &fixture.binding).unwrap().is_none());
-        let Some(NativeObserver::Codex(state)) = observer else {
-            panic!("missing observer");
-        };
-        assert!(state.connecting.is_none(), "must wait for backoff");
-        state.retry_at = Instant::now();
-        let task = std::thread::spawn(move || codex_test_connection(listener, None));
-        poll_native(observer, &fixture.binding).unwrap();
-        let _socket = task.join().unwrap();
-        assert!(
-            poll_codex_connection(observer, &fixture.binding)
-                .unwrap()
-                .is_none()
-        );
-        assert!(observer.as_ref().unwrap().connected());
-        assert_eq!(fixture.binding.generation, generation);
-        assert_eq!(fixture.binding.conversation.as_deref(), Some("thread"));
-    }
-
-    #[test]
-    fn codex_observer_close_during_resume_checks_server_identity() {
-        for server_pid in [std::process::id(), u32::MAX] {
-            let mut fixture = Fixture::new();
-            fixture.binding.bind_conversation("thread").unwrap();
-            fixture.binding.server_pid = server_pid;
-            let path = fixture._project.path().join("native.sock");
-            fixture.binding.server_endpoint = format!("unix://{}", path.display());
-            let listener = UnixListener::bind(path).unwrap();
-            let task = std::thread::spawn(move || {
-                codex_test_connection(
-                    listener,
-                    Some(json!({"method":"thread/closed","params":{"threadId":"thread"}})),
-                )
-            });
-            poll_native(&mut fixture.service.observer, &fixture.binding).unwrap();
-            let _socket = task.join().unwrap();
-            let result =
-                poll_codex_connection(&mut fixture.service.observer, &fixture.binding).unwrap();
-            assert_eq!(result.is_some(), server_pid == std::process::id());
-        }
-    }
-
-    #[test]
-    fn codex_observer_handshake_does_not_block_lifecycle_polling() {
-        let mut fixture = Fixture::new();
-        fixture.binding.bind_conversation("thread").unwrap();
-        let path = fixture._project.path().join("native.sock");
-        fixture.binding.server_endpoint = format!("unix://{}", path.display());
-        let listener = UnixListener::bind(path).unwrap();
-        poll_native(&mut fixture.service.observer, &fixture.binding).unwrap();
-        let (stream, _) = listener.accept().unwrap();
-        let started = Instant::now();
-        assert!(
-            poll_native(&mut fixture.service.observer, &fixture.binding)
-                .unwrap()
-                .is_none()
-        );
-        assert!(started.elapsed() < Duration::from_millis(200));
-        drop(stream);
-        assert!(
-            poll_codex_connection(&mut fixture.service.observer, &fixture.binding)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn codex_observer_socket_close_does_not_retire_binding() {
-        assert!(codex_observer_event(Value::Null).is_none());
-    }
-
-    #[test]
-    fn codex_observer_other_thread_does_not_retire_binding() {
-        assert!(
-            codex_observer_event(
-                json!({"method":"thread/started","params":{"thread":{"id":"other"}}})
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn codex_observer_unsubscribe_does_not_retire_binding() {
-        assert!(
-            codex_observer_event(
-                json!({"method":"thread/unsubscribed","params":{"threadId":"thread"}})
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn codex_observer_bound_thread_close_retires_binding() {
-        assert!(
-            codex_observer_event(json!({"method":"thread/closed","params":{"threadId":"thread"}}))
-                .is_some()
-        );
-    }
-
     struct Fixture {
         _project: tempfile::TempDir,
-        name: String,
         binding: LiveBinding,
         service: Service,
     }
 
     impl Fixture {
+        /// The test process stands in for the attached Codex MCP process.
         fn new() -> Self {
             let project = tempfile::TempDir::new().unwrap();
             let runtime = crate::session::RuntimeDirectory::create(project.path()).unwrap();
-            let name = format!("prism-service-test-{}", Id::new_v4());
-            let tmux = TmuxClient::named(&name);
-            let cli = tmux
-                .launch_cli(project.path(), Path::new("/usr/bin/cat"), &[], None)
-                .unwrap();
             let binding = LiveBinding::new(
                 project.path(),
                 AgentKind::Codex,
-                "unix:///unused".into(),
+                format!("codex-cli://{}", std::process::id()),
                 std::process::id(),
-                tmux.identity().unwrap(),
-                cli,
             )
             .unwrap();
-            tmux.tag_cli(&binding).unwrap();
             runtime.write_binding(&binding).unwrap();
             let service = Service {
                 binding_path: runtime.binding_path(),
-                executable: project.path().join("missing-executable"),
                 store: Store::open(store_path(&binding)).unwrap(),
                 observer: None,
                 native_retirement: None,
+                link: None,
             };
             Self {
                 _project: project,
-                name,
                 binding,
                 service,
             }
         }
     }
 
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", &self.name, "kill-server"])
-                .output();
-        }
-    }
-
     #[test]
-    fn publication_survives_pane_failure_and_lost_response_retry() {
+    fn publication_survives_lost_response_retry() {
         let mut fixture = Fixture::new();
         let thread = Id::new_v4().to_string();
         let request = PublishRequest {
@@ -1425,7 +1016,7 @@ mod tests {
             .service
             .handle(&fixture.binding.token, call())
             .unwrap();
-        assert!(result["pane"]["error"].is_string());
+        assert!(result.get("pane").is_none());
         assert_eq!(result["data"]["revision"], 1);
         assert_eq!(
             fixture

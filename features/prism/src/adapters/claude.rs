@@ -17,7 +17,7 @@ pub struct ClaudeAdapter {
 }
 
 impl ClaudeAdapter {
-    /// The caller must authenticate the launcher binding before observing its session.
+    /// The caller must authenticate the binding before observing its session.
     pub fn new(session_id: &str, generation: u64) -> Result<Self> {
         let id = Uuid::parse_str(session_id);
         if generation == 0 || !id.is_ok_and(|id| !id.is_nil() && id.to_string() == session_id) {

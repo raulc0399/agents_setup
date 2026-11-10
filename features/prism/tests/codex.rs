@@ -12,9 +12,10 @@ fn native_package_uses_bound_mcp_and_supported_manifest() {
         serde_json::from_str(&fs::read_to_string(root.join(".mcp.json")).unwrap()).unwrap();
     assert_eq!(manifest["mcpServers"], "./.mcp.json");
     assert_eq!(mcp["mcpServers"]["prism"]["command"], "prism");
+    // The MCP process attaches by its own PID; only the app link overrides reach its bridge.
     assert_eq!(
         mcp["mcpServers"]["prism"]["env_vars"],
-        serde_json::json!(["PRISM_BINDING_FILE", "TMUX", "TMUX_PANE"])
+        serde_json::json!(["PRISM_APP_FILE", "PRISM_APP_HOST"])
     );
     assert!(manifest.get("hooks").is_none());
     assert!(root.join("skills/prism/SKILL.md").is_file());

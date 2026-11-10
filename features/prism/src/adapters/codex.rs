@@ -125,7 +125,7 @@ pub struct CodexAdapter {
 }
 
 impl CodexAdapter {
-    /// The caller must authenticate the launcher binding before connecting.
+    /// The caller must authenticate the binding before connecting.
     pub fn connect(
         path: &Path,
         thread_id: &str,
@@ -188,14 +188,6 @@ impl CodexAdapter {
 
     pub fn thread_id(&self) -> &str {
         &self.thread_id
-    }
-
-    pub(crate) fn thread_closed(&self) -> bool {
-        self.thread_closed
-    }
-
-    pub(crate) fn retirement_reason(&self) -> Option<&str> {
-        self.retired.as_deref()
     }
 
     fn push_event(&mut self, event: NativeEvent) {

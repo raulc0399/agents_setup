@@ -7,8 +7,6 @@ pub mod store;
 pub mod attachment;
 pub mod session;
 
-pub mod ui;
-
 pub mod adapters;
 
 pub mod applink;

@@ -1,10 +1,11 @@
-//! Attach native plugin calls to their existing tmux conversation without owning the CLI.
+//! Attach native plugin calls to their running CLI without owning it.
 use crate::bridge;
 use crate::model::AgentKind;
 use crate::session::{
-    LiveBinding, RuntimeDirectory, TmuxClient, process_start_time, read_binding,
-    remove_socket_directory, write_binding,
+    LiveBinding, RuntimeDirectory, process_start_time, read_binding, remove_socket_directory,
+    write_binding,
 };
+use crate::store::Store;
 use anyhow::{Context, Result, bail, ensure};
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -14,31 +15,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-pub const TMUX_INSTRUCTION: &str = "Prism needs tmux. Start codex or claude inside tmux, then ask to open Prism in that conversation.";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_POLL: Duration = Duration::from_millis(50);
-const MAX_PROCESS_ANCESTORS: usize = 128;
-
-fn belongs_to_pane(mut pid: u32, pane_pid: u32) -> Result<bool> {
-    for _ in 0..MAX_PROCESS_ANCESTORS {
-        if pid == pane_pid {
-            return Ok(true);
-        }
-        if pid <= 1 {
-            return Ok(false);
-        }
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-        pid = stat
-            .rsplit_once(')')
-            .context("invalid process ancestry")?
-            .1
-            .split_whitespace()
-            .nth(1)
-            .context("missing parent process")?
-            .parse()?;
-    }
-    bail!("process ancestry exceeds limit")
-}
+const STALE_SESSION: &str = "native conversation changed";
 
 struct PendingRuntime(PathBuf);
 
@@ -51,26 +30,13 @@ impl Drop for PendingRuntime {
     }
 }
 
-/// The caller supplies only native session identity; pane authority comes from process ancestry.
+/// The caller supplies only native session identity; the CLI is the owner process, identified
+/// by its PID and start time.
 pub fn ensure_attached(agent: AgentKind, conversation: &str, owner_pid: u32) -> Result<PathBuf> {
     let thread = Uuid::parse_str(conversation).context("native conversation ID is invalid")?;
     ensure!(
         !thread.is_nil() && thread.to_string() == conversation,
         "native conversation ID is not canonical"
-    );
-    let pane = std::env::var("TMUX_PANE").context(TMUX_INSTRUCTION)?;
-    let environment = std::env::var("TMUX").context(TMUX_INSTRUCTION)?;
-    let mut fields = environment.rsplitn(3, ',');
-    let _session = fields.next().context(TMUX_INSTRUCTION)?;
-    let server_pid: u32 = fields.next().context(TMUX_INSTRUCTION)?.parse()?;
-    let socket = Path::new(fields.next().context(TMUX_INSTRUCTION)?);
-    let tmux = TmuxClient::socket(socket);
-    let identity = tmux.identity()?;
-    ensure!(identity.pid == server_pid, "tmux server identity changed");
-    let cli = tmux.pane_identity(&pane)?;
-    ensure!(
-        belongs_to_pane(std::process::id(), cli.pid)? && belongs_to_pane(owner_pid, cli.pid)?,
-        "Prism caller does not belong to the supplied tmux pane"
     );
     let owner_birth = process_start_time(owner_pid)?;
     let project = std::env::current_dir()?.canonicalize()?;
@@ -91,66 +57,83 @@ pub fn ensure_attached(agent: AgentKind, conversation: &str, owner_pid: u32) -> 
             Err(error) => return Err(error.into()),
         }
     }
+    // Every runtime is visited, so pruning does not depend on the directory order.
+    let mut existing = None;
     for entry in fs::read_dir(root)? {
-        let path = entry?.path().join("binding.json");
+        let directory = entry?.path();
+        let path = directory.join("binding.json");
         let Ok(binding) = read_binding(&path) else {
             continue;
         };
-        if binding.tmux != identity || binding.cli != cli {
+        if binding.retired {
+            prune_retired(&directory);
             continue;
         }
-        let alive = process_start_time(binding.server_pid)
-            .is_ok_and(|birth| birth == binding.server_start_time);
-        if !binding.retired && alive {
-            ensure!(
-                binding.attached
-                    && binding.agent == agent
-                    && binding.server_pid == owner_pid
-                    && binding.server_start_time == owner_birth
-                    && binding.conversation.as_deref() == Some(conversation),
-                "This tmux pane is already attached to another live conversation"
-            );
-            if !bridge::is_ready(&path) {
-                // The bridge ended without retiring this binding. Its lease lets only one
-                // bridge serve a binding, so starting another is safe if the old one hangs.
-                start_bridge(&path)
-                    .context("Prism bridge is not responding and could not be restarted")?;
-            }
-            return Ok(path);
+        // The owner is alive, so a binding with its PID and start time belongs to this CLI.
+        if binding.server_pid != owner_pid || binding.server_start_time != owner_birth {
+            continue;
         }
-        if binding.attached {
-            // Retirement increments the generation; the pane retains the preceding tag.
-            let mut tagged = binding.clone();
-            if tagged.retired {
-                tagged.generation = tagged.generation.saturating_sub(1);
-            }
-            let _ = tmux.release_attached(&tagged);
+        if binding.agent == agent && binding.conversation.as_deref() == Some(conversation) {
+            existing = Some(path);
+            continue;
         }
+        // A Claude process runs one session at a time, so its other binding belongs to an
+        // earlier session whose `session.end` never arrived. A Codex MCP process serves one
+        // thread; another thread must not take over its binding.
+        ensure!(
+            agent == AgentKind::Claude && binding.agent == AgentKind::Claude,
+            "This CLI is already attached to another live conversation"
+        );
+        let mut store = Store::open(bridge::store_path(&binding))?;
+        bridge::retire(&path, &mut store, STALE_SESSION)?;
+    }
+    if let Some(path) = existing {
+        if !bridge::is_ready(&path) {
+            // The bridge ended without retiring this binding. Its lease lets only one
+            // bridge serve a binding, so starting another is safe if the old one hangs.
+            start_bridge(&path)
+                .context("Prism bridge is not responding and could not be restarted")?;
+        }
+        return Ok(path);
     }
     let mut binding = LiveBinding::new(
         &project,
         agent.clone(),
         format!("{}-cli://{owner_pid}", agent.cli_name()),
         owner_pid,
-        identity,
-        cli,
     )?;
-    binding.attached = true;
     binding.bind_conversation(conversation)?;
     let path = runtime.binding_path();
     write_binding(&path, &binding)?;
-    tmux.tag_cli(&binding)?;
     // Keep the binding and log for diagnosis once bridge startup has been attempted.
     pending.0 = PathBuf::new();
     let result = start_bridge(&path);
     if result.is_err() {
-        let _ = tmux.release_attached(&binding);
         let _ = binding.retire();
         let _ = write_binding(&path, &binding);
         let _ = remove_socket_directory(&path);
     }
     result?;
     Ok(path)
+}
+
+/// Removes a retired runtime directory once no bridge holds its lease; a bridge that is still
+/// ending keeps it, and so does a runtime without a lease file. Pruning is housekeeping, so a
+/// failure leaves the directory for a later attachment.
+fn prune_retired(directory: &Path) {
+    let Ok(lease) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join("bridge.lock"))
+    else {
+        return;
+    };
+    if lease.try_lock().is_err() {
+        return;
+    }
+    let _ = remove_socket_directory(&directory.join("binding.json"));
+    let _ = fs::remove_dir_all(directory);
 }
 
 fn start_bridge(path: &Path) -> Result<()> {
@@ -163,7 +146,7 @@ fn start_bridge(path: &Path) -> Result<()> {
         .open(path.with_file_name("bridge.log"))?;
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(["attached-bridge", "--binding"])
+        .args(["bridge", "--binding"])
         .arg(path)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
@@ -196,10 +179,4 @@ fn start_bridge(path: &Path) -> Result<()> {
         }
         std::thread::sleep(STARTUP_POLL);
     }
-}
-
-pub fn run_bridge(path: &Path) -> Result<()> {
-    let binding = read_binding(path)?;
-    ensure!(binding.attached, "expected an attached conversation");
-    bridge::run(path)
 }

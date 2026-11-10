@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const UNREGISTERED_INSTRUCTION: &str = "Prism needs tmux. Start codex or claude inside tmux, then ask to open Prism in that conversation.";
+const UNREGISTERED_INSTRUCTION: &str = "Prism could not attach to this conversation. Check that prism is on PATH, then call a Prism tool or /prism again.";
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/claude")
@@ -100,7 +100,8 @@ fn module_wires_every_tool_the_command_and_the_exact_instruction() {
         assert!(skill.contains(&format!("mcp__prism__{name}")));
     }
     assert!(skill.contains("/prism"));
-    assert!(skill.contains("inside tmux"));
+    // tmux is no longer required, and the skill must not ask for it.
+    assert!(!skill.contains("tmux"));
     // A skill named `prism` claims `/prism:prism` and the CLI refuses the mod's `/prism` command.
     assert!(skill.starts_with("---\nname: prism-workspace\n"));
     assert!(module.contains("e.agentId !== undefined"));

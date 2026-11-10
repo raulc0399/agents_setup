@@ -1,5 +1,10 @@
 # Claude implementation handover
 
+> Superseded 2026-11-10 by batch 7 of `docs/app-plan.md`: the terminal UI, the
+> tmux pane handling and the `prism --agent` launcher described here are removed;
+> the Prism desktop app shows the workspace. Current state: `README.md`,
+> `plugins/claude/README.md` and `docs/validation.md`.
+
 > Status 2026-11-09: implemented. See `docs/claude-continuation.md` for the
 > implementation record and `docs/validation.md` for the real Claude loop.
 

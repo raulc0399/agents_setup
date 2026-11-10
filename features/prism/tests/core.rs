@@ -1,7 +1,6 @@
 use prism::actions::*;
 use prism::model::*;
 use prism::store::Store;
-use std::collections::{BTreeMap, BTreeSet};
 
 fn key(conversation: &str) -> WorkspaceKey {
     WorkspaceKey {
@@ -60,56 +59,6 @@ fn setup() -> (Store, Id, PublishRequest, PublishResult) {
 }
 
 #[test]
-fn private_ui_state_is_bounded_workspace_scoped_and_persistent() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("state.db");
-    let mut store = Store::open(&path).unwrap();
-    let workspace = store.workspace(&key("thread-1")).unwrap().id;
-    let other = store.workspace(&key("thread-2")).unwrap().id;
-    let state = serde_json::json!({"active": "private-tab", "split": true});
-    store.save_ui_state(workspace, &state).unwrap();
-    assert_eq!(store.ui_state(other).unwrap(), None);
-    assert!(store.documents(workspace).unwrap().is_empty());
-    assert!(store.save_ui_state(Id::new_v4(), &state).is_err());
-    assert!(store.ui_state(Id::new_v4()).is_err());
-    assert!(
-        store
-            .save_ui_state(
-                workspace,
-                &serde_json::json!("x".repeat(MAX_PAYLOAD_BYTES + 1))
-            )
-            .is_err()
-    );
-    drop(store);
-    let store = Store::open(&path).unwrap();
-    assert_eq!(store.ui_state(workspace).unwrap(), Some(state));
-}
-
-#[test]
-fn diagram_positions_support_relationships_beyond_element_limit() {
-    let (mut store, workspace, request, result) = setup();
-    let mut view = ViewState {
-        id: Id::new_v4(),
-        document_id: result.document_id,
-        kind: ViewKind::Diagram,
-        filter: String::new(),
-        hidden: BTreeSet::new(),
-        positions: (0..MAX_ELEMENTS)
-            .map(|_| (Id::new_v4(), Position { x: 0, y: 0 }))
-            .collect(),
-        selection: None,
-        draft: String::new(),
-    };
-    view.positions
-        .insert(request.relationships[0].id, Position { x: 1, y: 1 });
-    store.save_view(workspace, &view).unwrap();
-    assert_eq!(
-        store.views(workspace).unwrap()[0].positions.len(),
-        MAX_ELEMENTS + 1
-    );
-}
-
-#[test]
 fn schema_one_migration_preserves_existing_content() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.db");
@@ -124,15 +73,11 @@ fn schema_one_migration_preserves_existing_content() {
         .execute_batch("DROP TABLE private_ui; PRAGMA user_version=1;")
         .unwrap();
     drop(connection);
-    let mut store = Store::open(&path).unwrap();
+    let store = Store::open(&path).unwrap();
     assert_eq!(
         store.document(workspace, published.document_id).unwrap(),
         before
     );
-    assert_eq!(store.ui_state(workspace).unwrap(), None);
-    store
-        .save_ui_state(workspace, &serde_json::json!({"tabs": []}))
-        .unwrap();
     drop(store);
     let connection = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(
@@ -140,6 +85,14 @@ fn schema_one_migration_preserves_existing_content() {
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
         2
+    );
+    // Schema 2 keeps the table an older binary expects, though nothing uses it any more.
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM private_ui", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
     );
     connection.pragma_update(None, "user_version", 3).unwrap();
     assert!(matches!(Store::open(&path), Err(Error::SchemaVersion(3))));
@@ -345,7 +298,7 @@ fn identical_conversation_ids_under_different_agents_are_separate_workspaces() {
 }
 
 #[test]
-fn workspace_identity_and_private_views_survive_restart() {
+fn workspace_identity_survives_restart() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.db");
     let mut store = Store::open(&path).unwrap();
@@ -360,34 +313,12 @@ fn workspace_identity_and_private_views_survive_restart() {
     other_project_key.project = "/other-project".into();
     assert_ne!(store.workspace(&other_project_key).unwrap().id, workspace);
     assert!(store.document(other, result.document_id).is_err());
-    let view = ViewState {
-        id: Id::new_v4(),
-        document_id: result.document_id,
-        kind: ViewKind::Diagram,
-        selection: Some(Selection {
-            document_id: result.document_id,
-            revision: 1,
-            ids: vec![request.elements[0].id],
-        }),
-        positions: [(request.elements[0].id, Position { x: 4, y: 8 })]
-            .into_iter()
-            .collect(),
-        hidden: BTreeSet::new(),
-        filter: "private-filter".into(),
-        draft: "private-question".into(),
-    };
-    store.save_view(workspace, &view).unwrap();
-    let inspected = serde_json::to_string(&store.documents(workspace).unwrap()).unwrap();
-    assert!(!inspected.contains("private-question"));
-    assert!(!inspected.contains("private-filter"));
     store
         .publish(workspace, &edit(&request, &result, 1))
         .unwrap();
     drop(store);
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.workspace(&key("exact-thread")).unwrap().id, workspace);
-    assert_eq!(store.views(workspace).unwrap(), vec![view]);
-    assert!(store.views(other).unwrap().is_empty());
     assert_eq!(
         store
             .document(workspace, result.document_id)
@@ -649,42 +580,6 @@ fn bounds_duplicate_ids_and_terminal_controls_are_handled() {
 }
 
 #[test]
-fn independent_views_do_not_change_semantic_acceptance() {
-    let (mut store, workspace, request, result) = setup();
-    let id = request.elements[0].id;
-    store
-        .apply(
-            workspace,
-            result.document_id,
-            1,
-            &ContentAction::Accept { ids: vec![id] },
-        )
-        .unwrap();
-    let mut view = ViewState {
-        id: Id::new_v4(),
-        document_id: result.document_id,
-        kind: ViewKind::List,
-        selection: None,
-        positions: BTreeMap::new(),
-        hidden: BTreeSet::new(),
-        filter: String::new(),
-        draft: "first".into(),
-    };
-    store.save_view(workspace, &view).unwrap();
-    view.id = Id::new_v4();
-    view.draft = "second".into();
-    view.kind = ViewKind::Diagram;
-    store.save_view(workspace, &view).unwrap();
-    let document = store.document(workspace, result.document_id).unwrap();
-    assert_eq!(document.revision, 2);
-    assert_eq!(
-        document.elements[&id].accepted_revision,
-        Some(document.elements[&id].semantic_revision)
-    );
-    assert_eq!(store.views(workspace).unwrap().len(), 2);
-}
-
-#[test]
 fn publication_result_failure_rolls_back_content_transaction() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.db");
@@ -815,62 +710,6 @@ fn unknown_delivery_requires_new_request_for_retry() {
     assert_eq!(
         store.question(workspace, original_id).unwrap().outcome,
         unknown
-    );
-}
-
-#[test]
-fn atomic_send_replay_preserves_a_newer_private_draft() {
-    let (mut store, workspace, publication, result) = setup();
-    let request = PrepareQuestion {
-        request_id: Id::new_v4(),
-        generation: 1,
-        selection: Selection {
-            document_id: result.document_id,
-            revision: 1,
-            ids: vec![publication.elements[0].id],
-        },
-        text: "Explain this".into(),
-        mode: DeliveryMode::Share,
-    };
-    let mut view = ViewState {
-        id: Id::new_v4(),
-        document_id: result.document_id,
-        kind: ViewKind::List,
-        selection: Some(request.selection.clone()),
-        positions: BTreeMap::new(),
-        hidden: BTreeSet::new(),
-        filter: String::new(),
-        draft: request.text.clone(),
-    };
-    store.save_view(workspace, &view).unwrap();
-    let sent = store
-        .prepare_question_and_clear_draft(workspace, &request, view.id)
-        .unwrap();
-    assert!(store.views(workspace).unwrap()[0].draft.is_empty());
-    view.draft = "New private draft".into();
-    store.save_view(workspace, &view).unwrap();
-    assert_eq!(
-        store
-            .prepare_question_and_clear_draft(workspace, &request, view.id)
-            .unwrap(),
-        sent
-    );
-    assert_eq!(
-        store.views(workspace).unwrap()[0].draft,
-        "New private draft"
-    );
-    assert_eq!(store.questions(workspace).unwrap().len(), 1);
-    let mut stale = request.clone();
-    stale.request_id = Id::new_v4();
-    assert!(
-        store
-            .prepare_question_and_clear_draft(workspace, &stale, view.id)
-            .is_err()
-    );
-    assert_eq!(store.questions(workspace).unwrap().len(), 1);
-    assert_eq!(
-        store.views(workspace).unwrap()[0].draft,
-        "New private draft"
     );
 }
 

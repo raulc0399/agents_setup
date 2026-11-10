@@ -1,18 +1,18 @@
 use prism::bridge::{
-    BridgeCall, InspectParams, Operation, PROTOCOL_VERSION, authorize, connection_info, socket_path,
+    BridgeCall, InspectParams, Operation, PROTOCOL_VERSION, authorize, is_ready, socket_path,
 };
 use prism::model::AgentKind;
-use prism::session::{LiveBinding, RuntimeDirectory, TmuxClient};
+use prism::session::{LiveBinding, RuntimeDirectory};
 use std::os::unix::net::UnixListener;
-use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 struct Fixture {
     project: TempDir,
     runtime: RuntimeDirectory,
-    name: String,
+    /// The attached CLI: a child process, so a test can check that Prism leaves it running.
+    cli: Child,
     binding: LiveBinding,
 }
 impl Fixture {
@@ -23,40 +23,27 @@ impl Fixture {
     fn with_agent(agent: AgentKind) -> Self {
         let project = TempDir::new().unwrap();
         let runtime = RuntimeDirectory::create(project.path()).unwrap();
-        let name = format!("prism-bridge-test-{}", Uuid::new_v4());
-        let tmux = TmuxClient::named(&name);
-        let pane = tmux
-            .launch_cli(project.path(), Path::new("/usr/bin/cat"), &[], None)
-            .unwrap();
-        // Claude records the CLI pane process itself; Codex records its private server.
-        let (endpoint, server_pid) = match agent {
-            AgentKind::Codex => ("unix:///unused".to_owned(), std::process::id()),
-            AgentKind::Claude => (format!("claude-cli://{}", pane.pane_id), pane.pid),
-        };
+        let cli = Command::new("sleep").arg("60").spawn().unwrap();
         let binding = LiveBinding::new(
             project.path(),
-            agent,
-            endpoint,
-            server_pid,
-            tmux.identity().unwrap(),
-            pane,
+            agent.clone(),
+            format!("{}-cli://{}", agent.cli_name(), cli.id()),
+            cli.id(),
         )
         .unwrap();
-        tmux.tag_cli(&binding).unwrap();
         runtime.write_binding(&binding).unwrap();
         Self {
             project,
             runtime,
-            name,
+            cli,
             binding,
         }
     }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-L", &self.name, "kill-server"])
-            .output();
+        let _ = self.cli.kill();
+        let _ = self.cli.wait();
     }
 }
 
@@ -66,30 +53,7 @@ fn stale_socket_is_not_a_connected_bridge() {
     let listener =
         UnixListener::bind(socket_path(&fixture.runtime.binding_path()).unwrap()).unwrap();
     drop(listener);
-    assert!(!connection_info(&fixture.runtime.binding_path()).connected);
-}
-
-#[test]
-fn codex_mcp_refuses_foreign_thread_before_contacting_bridge() {
-    let mut fixture = Fixture::new();
-    fixture
-        .binding
-        .bind_conversation(&Uuid::new_v4().to_string())
-        .unwrap();
-    fixture.runtime.write_binding(&fixture.binding).unwrap();
-    let response = prism::mcp::handle(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"prism_inspect","arguments":{},"_meta":{"threadId":Uuid::new_v4().to_string()}}}), Some(&fixture.runtime.binding_path())).unwrap();
-    assert_eq!(response["result"]["isError"], true);
-    assert!(
-        response["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("bound Codex thread")
-    );
-    assert!(
-        !prism::session::read_binding(&fixture.runtime.binding_path())
-            .unwrap()
-            .retired
-    );
+    assert!(!is_ready(&fixture.runtime.binding_path()));
 }
 
 #[test]
@@ -129,9 +93,8 @@ fn authentication_precedes_binding_and_retirement() {
 fn operations_preserve_replay_and_expose_only_explicit_shares() {
     use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
     use prism::bridge::{AnswerParams, PendingParams, QuestionParams, apply_operation};
-    use prism::model::{DeliveryMode, ElementKind, Id, Selection, ViewKind, ViewState};
+    use prism::model::{DeliveryMode, ElementKind, Id, Selection};
     use prism::store::Store;
-    use std::collections::{BTreeMap, BTreeSet};
     let mut fixture = Fixture::new();
     fixture
         .binding
@@ -177,27 +140,6 @@ fn operations_preserve_replay_and_expose_only_explicit_shares() {
         revision: 1,
         ids: vec![request.elements[0].id],
     };
-    store
-        .save_view(
-            workspace.id,
-            &ViewState {
-                id: Id::new_v4(),
-                document_id: document,
-                kind: ViewKind::List,
-                selection: Some(selection.clone()),
-                positions: BTreeMap::new(),
-                hidden: BTreeSet::new(),
-                filter: "private-filter".into(),
-                draft: "private-draft".into(),
-            },
-        )
-        .unwrap();
-    store
-        .save_ui_state(
-            workspace.id,
-            &serde_json::json!({"private":"private-layout"}),
-        )
-        .unwrap();
     let private = PrepareQuestion {
         request_id: Id::new_v4(),
         generation: 1,
@@ -230,14 +172,7 @@ fn operations_preserve_replay_and_expose_only_explicit_shares() {
         let result = apply_operation(&mut store, &fixture.binding, operation)
             .unwrap()
             .to_string();
-        for secret in [
-            "private-filter",
-            "private-draft",
-            "private-layout",
-            "native-only-question",
-        ] {
-            assert!(!result.contains(secret));
-        }
+        assert!(!result.contains("native-only-question"));
     }
     assert!(
         apply_operation(
@@ -352,13 +287,13 @@ fn health_requires_an_authenticated_matching_live_service() {
     use std::io::{Read, Write};
     use std::time::Duration;
     let fixture = Fixture::new();
-    for (wrong_generation, native_connected) in [(false, true), (true, true), (false, false)] {
+    for wrong_generation in [false, true] {
         let socket = socket_path(&fixture.runtime.binding_path()).unwrap();
         let listener = UnixListener::bind(&socket).unwrap();
         let token = fixture.binding.token.clone();
         let id = fixture.binding.binding_id;
         let server = std::thread::spawn(move || {
-            for stream in listener.incoming().take(2) {
+            for stream in listener.incoming().take(1) {
                 let mut stream = stream.unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
@@ -372,7 +307,7 @@ fn health_requires_an_authenticated_matching_live_service() {
                 let header = String::from_utf8(header).unwrap().to_lowercase();
                 assert!(header.starts_with("get /health http/1.1"));
                 assert!(header.contains(&format!("authorization: bearer {token}")));
-                let body = serde_json::json!({"version":PROTOCOL_VERSION,"binding_id":id,"generation":if wrong_generation { 2 } else { 1 },"native_connected":native_connected}).to_string();
+                let body = serde_json::json!({"version":PROTOCOL_VERSION,"binding_id":id,"generation":if wrong_generation { 2 } else { 1 }}).to_string();
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -381,57 +316,9 @@ fn health_requires_an_authenticated_matching_live_service() {
                 .unwrap();
             }
         });
-        let info = connection_info(&fixture.runtime.binding_path());
-        assert_eq!(info.connected, !wrong_generation && native_connected);
-        if info.connected {
-            assert_eq!(info.send_modes, vec![prism::model::DeliveryMode::Share]);
-        }
-        assert_eq!(
-            prism::bridge::is_ready(&fixture.runtime.binding_path()),
-            !wrong_generation
-        );
+        assert_eq!(is_ready(&fixture.runtime.binding_path()), !wrong_generation);
         server.join().unwrap();
         std::fs::remove_file(socket).unwrap();
-    }
-}
-
-#[test]
-fn health_message_names_the_bound_agent() {
-    use std::io::{Read, Write};
-    use std::time::Duration;
-    for (agent, label) in [(AgentKind::Codex, "Codex"), (AgentKind::Claude, "Claude")] {
-        let fixture = Fixture::with_agent(agent);
-        let socket = socket_path(&fixture.runtime.binding_path()).unwrap();
-        let listener = UnixListener::bind(&socket).unwrap();
-        let id = fixture.binding.binding_id;
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut header = Vec::new();
-            while !header.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                stream.read_exact(&mut byte).unwrap();
-                header.push(byte[0]);
-            }
-            let body =
-                serde_json::json!({"version":PROTOCOL_VERSION,"binding_id":id,"generation":1})
-                    .to_string();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        });
-        let info = connection_info(&fixture.runtime.binding_path());
-        server.join().unwrap();
-        assert!(info.connected);
-        assert_eq!(
-            info.message,
-            format!("Share explicitly, then ask {label} to retrieve the Prism question")
-        );
     }
 }
 
@@ -500,7 +387,7 @@ fn claude_session_end_retires_the_binding_and_preserves_shared_questions() {
     };
     let bridge = std::thread::spawn(move || prism::bridge::run_with_link(&bridge_path, link));
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !connection_info(&binding_path).connected {
+    while !is_ready(&binding_path) {
         assert!(Instant::now() < deadline, "bridge did not start");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -517,17 +404,10 @@ fn claude_session_end_retires_the_binding_and_preserves_shared_questions() {
     assert!(result.get("pane").is_none());
     let error = bridge.join().unwrap().unwrap_err().to_string();
     assert!(error.contains("clear"), "{error}");
-    // The Claude pane is the user's CLI: retirement must leave it running.
-    let panes = Command::new("tmux")
-        .args(["-L", &fixture.name, "list-panes", "-a", "-F", "#{pane_id}"])
-        .output()
-        .unwrap();
+    // The CLI belongs to the user: retirement must leave it running.
     assert!(
-        String::from_utf8(panes.stdout)
-            .unwrap()
-            .lines()
-            .any(|id| id == fixture.binding.cli.pane_id),
-        "Claude CLI pane must survive retirement"
+        fixture.cli.try_wait().unwrap().is_none(),
+        "Claude CLI must survive retirement"
     );
     let retired = prism::session::read_binding(&binding_path).unwrap();
     assert!(retired.retired);
@@ -653,6 +533,6 @@ fn transient_binding_verification_failures_do_not_retire_the_bridge() {
     for _ in 0..4 {
         assert!(prism::bridge::binding_still_live(false, &mut failures));
     }
-    // The fifth consecutive failure is treated as a real loss of the tmux binding.
+    // The fifth consecutive failure is treated as a real loss of the bound CLI.
     assert!(!prism::bridge::binding_still_live(false, &mut failures));
 }

@@ -11,7 +11,7 @@ fn oversized_line_is_drained_before_next_request() {
             input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n");
         }
         let mut output = Vec::new();
-        serve(Cursor::new(input), &mut output, None).unwrap();
+        serve(Cursor::new(input), &mut output).unwrap();
         let replies: Vec<Value> = String::from_utf8(output)
             .unwrap()
             .lines()
@@ -58,23 +58,17 @@ fn invalid_json_rpc_envelope_is_rejected() {
         json!({"jsonrpc":"2.0","id":{},"method":"ping"}),
         json!([]),
     ] {
-        assert_eq!(handle(&request, None).unwrap()["error"]["code"], -32600);
+        assert_eq!(handle(&request).unwrap()["error"]["code"], -32600);
     }
 }
 
 #[test]
 fn protocol_negotiation_and_notifications_are_compatible() {
     for version in ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"] {
-        let response = handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":version}}), None).unwrap();
+        let response = handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":version}})).unwrap();
         assert_eq!(response["result"]["protocolVersion"], version);
     }
-    assert!(
-        handle(
-            &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            None
-        )
-        .is_none()
-    );
+    assert!(handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none());
     assert_eq!(tools()["tools"].as_array().unwrap().len(), 5);
     for name in ["prism_inspect", "prism_questions"] {
         assert!(operation(name, json!({})).is_ok());
@@ -83,7 +77,7 @@ fn protocol_negotiation_and_notifications_are_compatible() {
 
 #[test]
 fn missing_native_thread_cannot_attach() {
-    let result = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"prism_inspect","arguments":{}}}), None).unwrap();
+    let result = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"prism_inspect","arguments":{}}})).unwrap();
     assert_eq!(result["result"]["isError"], true);
     assert!(
         result["result"]["content"][0]["text"]
@@ -97,7 +91,7 @@ fn missing_native_thread_cannot_attach() {
 fn stdio_recovers_from_bad_json_without_replying_to_notifications() {
     let input = b"invalid\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n";
     let mut output = Vec::new();
-    serve(Cursor::new(input), &mut output, None).unwrap();
+    serve(Cursor::new(input), &mut output).unwrap();
     let replies: Vec<Value> = String::from_utf8(output)
         .unwrap()
         .lines()

@@ -300,3 +300,20 @@ supplies the native caller identity; no pane or credential comes from model
 arguments. An isolated ordinary Codex 0.167.0 TUI successfully opened the Prism
 pane through `prism_inspect`, preserving its original conversation and pane.
 See `docs/validation.md` and `tests/attachment.py` for the checks and limitations.
+
+### Attachment without tmux (2026-11-10)
+
+Batch 7 of `docs/app-plan.md` removed the `prism --agent` launcher with its
+supervisor and private app-server, the terminal UI pane and the tmux checks
+described above. The plugin's `.mcp.json` forwards only `PRISM_APP_FILE` and
+`PRISM_APP_HOST`, the app link overrides that the bridge started by the MCP
+process reads: `PRISM_BINDING_FILE` only carried launcher bindings, and
+`TMUX`/`TMUX_PANE` are no longer read. The first tool call attaches the MCP process itself, recorded by
+process ID and start time; the binding stays live while that process runs, and
+a different thread calling through the same MCP process is refused. The bridge
+no longer runs the Codex app-server observer, which only ever connected to the
+launcher's private app-server; `src/adapters/codex.rs` is unchanged apart from
+two accessors that only that observer used. The desktop app shows the workspace
+instead of the pane. `tests/attachment.rs` covers lazy attachment, reuse, bridge
+restart after a crash, foreign-thread refusal, pruning of retired runtimes and
+retirement when the MCP process exits.

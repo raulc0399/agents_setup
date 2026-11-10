@@ -1,7 +1,7 @@
 [
   {
     "name": "publish",
-    "description": "Publish or revise requested visual content and open Prism beside this registered Claude conversation. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Retrying the same request ID requires the identical payload.",
+    "description": "Publish or revise requested visual content in Prism for this Claude conversation; the Prism app shows it. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Retrying the same request ID requires the identical payload.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -164,7 +164,7 @@
   },
   {
     "name": "inspect",
-    "description": "Inspect published Prism content in this exact Claude conversation. Omit document_id to list at most 100 document summaries; repeat with returned next_cursor until null. Private view selections and drafts are never returned.",
+    "description": "Inspect published Prism content in this exact Claude conversation. Omit document_id to list at most 100 document summaries; repeat with returned next_cursor until null. Private view state such as selections, hidden items and filters is never returned.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -246,7 +246,7 @@
   },
   {
     "name": "questions",
-    "description": "Retrieve questions the user explicitly shared from Prism into this Claude conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this conversation, then publish requested visual revisions. This never reads private drafts.",
+    "description": "Retrieve questions the user explicitly shared from Prism into this Claude conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this conversation, then publish requested visual revisions. Questions not shared for retrieval are never returned.",
     "inputSchema": {
       "type": "object",
       "properties": {

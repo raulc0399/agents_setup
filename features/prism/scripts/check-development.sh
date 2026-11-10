@@ -25,7 +25,6 @@ check_command rustfmt --version
 check_command cargo-clippy --version
 check_command "$prism_cc" --version
 check_command "$prism_ar" --version
-check_command tmux -V
 
 # Either coding CLI can host Prism; require at least one.
 if command -v codex >/dev/null 2>&1 || command -v claude >/dev/null 2>&1; then
@@ -68,4 +67,4 @@ printf 'fn main() { println!("Rust compiler and linker: OK"); }\n' > "$probe_dir
 rustc -C "linker=$prism_cc" --crate-name prism_development_probe "$probe_dir/linker.rs" -o "$probe_dir/linker"
 "$probe_dir/linker"
 
-printf 'Development prerequisites passed; native session integration and interactive terminal behavior require separate checks.\n'
+printf 'Development prerequisites passed; native session integration requires separate checks.\n'

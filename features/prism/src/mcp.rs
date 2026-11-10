@@ -6,7 +6,6 @@ use crate::model::{Id, MAX_PAYLOAD_BYTES};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
-use std::path::Path;
 
 // Tool text nests a bounded bridge JSON response inside another JSON string.
 const MAX_RESPONSE_BYTES: usize = 8 * MAX_PAYLOAD_BYTES + 64 * 1024;
@@ -36,10 +35,10 @@ pub fn tools() -> Value {
         &["id", "title", "members"],
     );
     json!({"tools":[
-        {"name":"prism_publish","description":"Publish or revise requested visual content and open Prism beside this registered Codex conversation. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Retrying the same request ID requires the identical payload.","inputSchema":object(json!({"request_id":id_schema(),"document_id":optional_id(),"expected_revision":{"type":["integer","null"],"minimum":0},"title":{"type":"string","maxLength":512},"elements":{"type":"array","items":element,"maxItems":2000},"relationships":{"type":"array","items":relation,"maxItems":4000},"groups":{"type":"array","items":group,"maxItems":500}}), &["request_id","document_id","expected_revision","title","elements","relationships","groups"])},
-        {"name":"prism_inspect","description":"Inspect published Prism content in this exact conversation. Omit document_id to list at most 100 document summaries; repeat with returned next_cursor until null. Private view selections and drafts are never returned.","inputSchema":object(json!({"document_id":optional_id(),"cursor":optional_id()}), &[])},
+        {"name":"prism_publish","description":"Publish or revise requested visual content in Prism for this Codex conversation; the Prism app shows it. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Retrying the same request ID requires the identical payload.","inputSchema":object(json!({"request_id":id_schema(),"document_id":optional_id(),"expected_revision":{"type":["integer","null"],"minimum":0},"title":{"type":"string","maxLength":512},"elements":{"type":"array","items":element,"maxItems":2000},"relationships":{"type":"array","items":relation,"maxItems":4000},"groups":{"type":"array","items":group,"maxItems":500}}), &["request_id","document_id","expected_revision","title","elements","relationships","groups"])},
+        {"name":"prism_inspect","description":"Inspect published Prism content in this exact conversation. Omit document_id to list at most 100 document summaries; repeat with returned next_cursor until null. Private view state such as selections, hidden items and filters is never returned.","inputSchema":object(json!({"document_id":optional_id(),"cursor":optional_id()}), &[])},
         {"name":"prism_action","description":"Apply explicitly requested acceptance or archive to shared content IDs at the expected revision. Acceptance is content feedback, never permission to implement or run tools.","inputSchema":object(json!({"document_id":id_schema(),"expected_revision":{"type":"integer","minimum":0},"action":object(json!({"action":{"enum":["accept","archive"]},"ids":{"type":"array","items":id_schema(),"minItems":1,"maxItems":6500,"uniqueItems":true}}), &["action","ids"])}), &["document_id","expected_revision","action"])},
-        {"name":"prism_questions","description":"Retrieve questions the user explicitly shared from Prism into this conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this CLI, then publish requested visual revisions. This never reads private drafts.","inputSchema":object(json!({"request_id":optional_id(),"cursor":optional_id()}), &[])},
+        {"name":"prism_questions","description":"Retrieve questions the user explicitly shared from Prism into this conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this CLI, then publish requested visual revisions. Questions not shared for retrieval are never returned.","inputSchema":object(json!({"request_id":optional_id(),"cursor":optional_id()}), &[])},
         {"name":"prism_answer","description":"Record the reply you gave in this conversation to a Prism question, so Prism shows it beside the item. Use the request ID from the [prism:<id>] marker in the prompt. Record only after answering; a later call replaces the recorded text.","inputSchema":object(json!({"request_id":id_schema(),"text":{"type":"string","maxLength":65536}}), &["request_id","text"])}
     ]})
 }
@@ -108,26 +107,19 @@ pub fn operation(name: &str, arguments: Value) -> Result<Operation> {
     })
 }
 
-fn tool_result(request: &Value, binding_path: Option<&Path>) -> Result<Value> {
+fn tool_result(request: &Value) -> Result<Value> {
     let thread = native_thread(request)?;
     let name = request["params"]["name"]
         .as_str()
         .context("tool name missing")?;
     let operation = operation(name, request["params"]["arguments"].clone())?;
 
-    let attached;
-    let binding_path = match binding_path {
-        Some(path) => path,
-        None => {
-            attached = crate::attachment::ensure_attached(
-                crate::model::AgentKind::Codex,
-                &thread,
-                std::process::id(),
-            )?;
-            &attached
-        }
-    };
-    let binding = crate::session::read_binding(binding_path)?;
+    let binding_path = crate::attachment::ensure_attached(
+        crate::model::AgentKind::Codex,
+        &thread,
+        std::process::id(),
+    )?;
+    let binding = crate::session::read_binding(&binding_path)?;
     ensure!(
         binding.agent == crate::model::AgentKind::Codex,
         "Prism MCP requires a Codex binding"
@@ -139,10 +131,10 @@ fn tool_result(request: &Value, binding_path: Option<&Path>) -> Result<Value> {
             .is_none_or(|bound| bound == thread),
         "Only the bound Codex thread may use this Prism binding; child and unrelated threads must not reuse it"
     );
-    BridgeClient::new(binding_path)?.call(&thread, operation)
+    BridgeClient::new(&binding_path)?.call(&thread, operation)
 }
 
-pub fn handle(request: &Value, binding_path: Option<&Path>) -> Option<Value> {
+pub fn handle(request: &Value) -> Option<Value> {
     let valid_id = request
         .get("id")
         .is_none_or(|id| id.is_string() || id.is_number() || id.is_null());
@@ -169,7 +161,7 @@ pub fn handle(request: &Value, binding_path: Option<&Path>) -> Option<Value> {
         }
         "ping" => json!({}),
         "tools/list" => tools(),
-        "tools/call" => match tool_result(request, binding_path) {
+        "tools/call" => match tool_result(request) {
             Ok(value) => {
                 json!({"content":[{"type":"text","text":value.to_string()}],"isError":false})
             }
@@ -186,11 +178,7 @@ pub fn handle(request: &Value, binding_path: Option<&Path>) -> Option<Value> {
     Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
 }
 
-pub fn serve<R: BufRead, W: Write>(
-    mut input: R,
-    mut output: W,
-    binding_path: Option<&Path>,
-) -> Result<()> {
+pub fn serve<R: BufRead, W: Write>(mut input: R, mut output: W) -> Result<()> {
     loop {
         let mut bytes = Vec::new();
         let count = std::io::Read::take(&mut input, MAX_PAYLOAD_BYTES as u64 + 1)
@@ -207,7 +195,7 @@ pub fn serve<R: BufRead, W: Write>(
             )
         } else {
             match serde_json::from_slice::<Value>(&bytes) {
-                Ok(request) => handle(&request, binding_path),
+                Ok(request) => handle(&request),
                 Err(_) => Some(
                     json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid JSON"}}),
                 ),

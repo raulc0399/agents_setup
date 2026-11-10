@@ -153,13 +153,14 @@ these facts.
   `claude plugin install prism@prism-local`, `claude plugin list` (read from the
   directory), `claude plugin uninstall prism@prism-local`,
   `claude plugin marketplace remove prism-local`.
-- End to end (`tests/claude_lifecycle.py`, real `prism` launcher and real CLI in
-  print mode, no authentication, no model request): the launcher pre-binds the
-  `--session-id` it passes, `server_pid` is the CLI pane process, `/prism`
-  reaches the bridge through the mod and opens the UI pane to the right, a
-  foreign `thread_id` is rejected and retires the binding, and a
-  `lifecycle session_end` call (from the mod's `session.end` hook or directly)
-  retires the binding while the CLI pane stays alive.
+- End to end (`tests/attachment.py`, real CLI in print mode, no tmux, no
+  authentication, no model request): `/prism` attaches through `prism attach`,
+  the binding records the Claude CLI process (`server_pid`, the parent of
+  `prism attach`) with its start time, the command reports the published
+  documents and the app link (retrying, pairing file not found, in the test),
+  and the print run's `session.end` retires the binding while the CLI process
+  stays alive. The launcher-based `tests/claude_lifecycle.py` was removed with
+  the launcher in batch 7 of `docs/app-plan.md`.
 
 ### Delivery gate status
 

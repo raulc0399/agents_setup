@@ -1,14 +1,14 @@
 //! The bridge's link to the desktop app, against a fake app listening in this process.
 use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
-use prism::applink::{AppLink, LinkConfig};
+use prism::applink::{AppLink, LinkConfig, LinkState};
 use prism::bridge::{
-    AnswerParams, BridgeClient, LifecycleEvent, Operation, PendingParams, store_path,
+    AnswerParams, BridgeClient, LifecycleEvent, Operation, PendingParams, StatusParams, store_path,
 };
 use prism::model::{
     AgentKind, ContentAction, DeliveryMode, DeliveryOutcome, Document, ElementKind, Id, Question,
     Selection,
 };
-use prism::session::{LiveBinding, RuntimeDirectory, TmuxClient, read_binding, write_binding};
+use prism::session::{LiveBinding, RuntimeDirectory, read_binding, write_binding};
 use prism::store::Store;
 use prism_core::pairing::Pairing;
 use prism_core::protocol::{
@@ -19,7 +19,7 @@ use std::io::ErrorKind;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -41,7 +41,8 @@ type BridgeThread = JoinHandle<anyhow::Result<()>>;
 
 struct Fixture {
     project: TempDir,
-    tmux: String,
+    /// The attached Claude CLI.
+    cli: Child,
     binding_path: PathBuf,
     binding: LiveBinding,
     conversation: String,
@@ -60,25 +61,18 @@ impl Fixture {
         fixture
     }
 
-    /// The binding as the old launcher writes it before the first tool call.
+    /// A binding whose conversation is not bound yet.
     fn unbound() -> Self {
         let project = TempDir::new().unwrap();
         let runtime = RuntimeDirectory::create(project.path()).unwrap();
-        let tmux = format!("prism-applink-test-{}", Uuid::new_v4());
-        let client = TmuxClient::named(&tmux);
-        let pane = client
-            .launch_cli(project.path(), Path::new("/usr/bin/cat"), &[], None)
-            .unwrap();
+        let cli = Command::new("sleep").arg("60").spawn().unwrap();
         let binding = LiveBinding::new(
             project.path(),
             AgentKind::Claude,
-            format!("claude-cli://{}", pane.pane_id),
-            pane.pid,
-            client.identity().unwrap(),
-            pane,
+            format!("claude-cli://{}", cli.id()),
+            cli.id(),
         )
         .unwrap();
-        client.tag_cli(&binding).unwrap();
         runtime.write_binding(&binding).unwrap();
         let app = TcpListener::bind("127.0.0.1:0").unwrap();
         app.set_nonblocking(true).unwrap();
@@ -87,7 +81,7 @@ impl Fixture {
         write_pairing(&pairing, app.local_addr().unwrap().port(), &token);
         Self {
             project,
-            tmux,
+            cli,
             binding_path: runtime.binding_path(),
             binding,
             conversation: Uuid::new_v4().to_string(),
@@ -266,9 +260,8 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-L", &self.tmux, "kill-server"])
-            .output();
+        let _ = self.cli.kill();
+        let _ = self.cli.wait();
     }
 }
 
@@ -897,19 +890,14 @@ fn answer_and_prompt_box_reports_arrive_as_updates() {
 
 #[test]
 fn commands_are_refused_for_an_unverified_or_retired_binding() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let (document, element) = fixture.store_publish("Refused", 1, "Body");
     let (store, workspace) = fixture.store();
     let link = AppLink::start(&fixture.binding_path, fixture.config()).unwrap();
     let (mut socket, ..) = fixture.connect();
-    // The CLI pane no longer carries this binding's generation.
-    let output = Command::new("tmux")
-        .args(["-L", &fixture.tmux, "set-option", "-p", "-t"])
-        .arg(&fixture.binding.cli.pane_id)
-        .args(["@prism_generation", "99"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
+    // The bound CLI process exited.
+    fixture.cli.kill().unwrap();
+    fixture.cli.wait().unwrap();
     let ask = Id::new_v4();
     send(
         &mut socket,
@@ -1014,6 +1002,82 @@ fn link_waits_for_the_conversation_and_keeps_the_bound_time_across_restarts() {
     let (socket, second, ..) = fixture.connect();
     assert_eq!(second, first);
     close(link, socket);
+}
+
+#[test]
+fn status_reports_the_app_link_and_its_pairing_file() {
+    let fixture = Fixture::new();
+    let missing = fixture.project.path().join("missing-app.json");
+    let config = LinkConfig {
+        pairing_file: Some(missing.clone()),
+        ..fixture.config()
+    };
+    let link = AppLink::start(&fixture.binding_path, config).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while link.status().state != LinkState::Retrying {
+        assert!(
+            Instant::now() < deadline,
+            "the link did not report its retry"
+        );
+        std::thread::sleep(ACCEPT_POLL);
+    }
+    let status = link.status();
+    assert_eq!(status.pairing_file, Some(missing));
+    assert!(!status.pairing_found);
+    assert_eq!(status.port, None);
+    assert_eq!(status.host, "127.0.0.1");
+    assert!(status.error.unwrap().contains("no pairing file"));
+    link.close("bridge stopped");
+
+    // The bridge serves the same status to the mod's `/prism` through `status`.
+    let bridge = fixture.start_bridge();
+    let (socket, ..) = fixture.connect();
+    let deadline = Instant::now() + WAIT;
+    let app = loop {
+        let app = fixture.call(Operation::Status(StatusParams {}))["data"]["app"].clone();
+        if app["state"] == "connected" {
+            break app;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the link did not report its connection"
+        );
+        std::thread::sleep(ACCEPT_POLL);
+    };
+    assert_eq!(app["port"], fixture.app.local_addr().unwrap().port());
+    assert_eq!(app["pairing_found"], true);
+    assert_eq!(app["pairing_file"], fixture.pairing.to_str().unwrap());
+    assert!(app["since_ms"].as_u64().unwrap() > 0);
+    assert!(app["error"].is_null());
+    fixture.stop(bridge, socket);
+}
+
+#[test]
+fn status_is_connecting_during_the_first_attempt_and_waiting_while_unbound() {
+    let fixture = Fixture::new();
+    let link = AppLink::start(&fixture.binding_path, fixture.config()).unwrap();
+    // The app takes the TCP connection but never answers the WebSocket handshake.
+    let stalled = fixture.accept_raw();
+    let status = link.status();
+    assert_eq!(status.state, LinkState::Connecting);
+    assert_eq!(status.port, Some(fixture.app.local_addr().unwrap().port()));
+    assert!(status.pairing_found);
+    assert!(status.error.is_none());
+    drop(stalled);
+    link.close("bridge stopped");
+
+    let unbound = Fixture::unbound();
+    let link = AppLink::start(&unbound.binding_path, unbound.config()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while link.status().state != LinkState::Waiting {
+        assert!(
+            Instant::now() < deadline,
+            "the link did not report the unbound binding"
+        );
+        std::thread::sleep(ACCEPT_POLL);
+    }
+    assert!(!unbound.connects_within(QUIET));
+    link.close("bridge stopped");
 }
 
 /// Closes a link while the app is connected: the app hears `closed` with the reason.

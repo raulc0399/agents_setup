@@ -1,20 +1,23 @@
 # Prism
 
 Prism 0.1.0 is a project-local visual workspace beside an existing Codex or
-Claude Code conversation in tmux. It provides lists, diagrams, acceptance,
-archive/undo, private questions, and multiple views of shared content. Both CLIs
-share one application; each has its own native package under `plugins/`.
+Claude Code conversation. It provides lists, diagrams, acceptance, archive/undo,
+private questions, and multiple views of shared content. Both CLIs share one
+bridge application; each has its own native package under `plugins/`. The Prism
+desktop app (`app/`, see [the app plan](docs/app-plan.md)) runs on the host and
+shows each conversation in a tab.
 
 ## Requirements
 
-- Linux with `/proc`, tmux, and a terminal supporting UTF-8 and alternate screens.
+- Linux with `/proc` for the CLI, its plugin and the bridge; the desktop app on
+  macOS or Windows reachable as `host.docker.internal` (see the app plan).
 - For Codex: authenticated Codex CLI with native plugins and Unix app-server
   connections. The tested native contract is **Codex CLI/app-server 0.167.0**.
 - For Claude: authenticated Claude Code CLI with native mods (hooks modules).
   The tested native contract is **Claude Code 2.1.319**; its mod API is labelled
   early access by Anthropic.
-- Tested on **tmux 3.3a**, Debian 12 aarch64, Node 24.22.2. Other
-  versions/platforms are not certified.
+- Tested on Debian 12 aarch64, Node 24.22.2. Other versions/platforms are not
+  certified.
 - To build: Rust **1.99.1**, a C compiler/linker and libc headers. SQLite is
   bundled. See [development setup](docs/development-setup.md) for this
   container's user-local Zig compiler setup.
@@ -69,34 +72,37 @@ new ones in the prompt box. Installed mods activate in new sessions without `--p
 
 ## Open Prism from a conversation
 
-Start a tmux session, then run your normal CLI from the project:
+Start the Prism desktop app on the host, then run your normal CLI from the
+project:
 
 ```sh
 cd /path/to/project
-tmux
 codex
 # Or: claude
 ```
 
 Discuss your task normally. When needed, ask “show this plan in Prism”. The
-native plugin attaches to the current conversation and opens Prism in a pane to
-the right. Later calls reuse it; closing the Prism pane lets the next call reopen
-it. Claude also provides `/prism` to open the pane without a model turn.
-The original CLI stays running in its original pane throughout.
+native plugin attaches to the current conversation and starts its bridge, which
+connects to the app; the app shows the conversation in a tab. Later calls reuse
+the attachment. Claude also provides `/prism`, which reports the published
+documents and the app connection (connecting, connected, retrying since when
+and whether the pairing file was found, or superseded by a later session) without a model
+turn. The original CLI keeps running untouched throughout.
 
-Outside tmux, Prism asks you to start the CLI inside tmux; it cannot split an
-ordinary terminal. Install the plugin before starting the CLI so its native
-tools are loaded. No `prism --agent ...` launcher or conversation restart is
-required to open Prism from an already-running CLI with the plugin loaded.
+Install the plugin before starting the CLI so its native tools are loaded. No
+conversation restart is required to open Prism from an already-running CLI
+with the plugin loaded. Without the app the tools keep working; the bridge
+retries quietly until the app runs. After updating Prism, restart running Claude
+sessions (`/exit`, then `claude -c`): the mod loads only at session start, and an
+older mod does not match a newer `prism` binary.
 
-Pane routing uses inherited tmux identity plus verified process ancestry, never
-a model-provided pane or a recently active terminal. Codex supplies the native
-thread ID through MCP metadata; Claude reads its own session ID in the mod.
-The application keeps sockets in private `/tmp` directories and binds all content
-to that exact project, agent and conversation.
-
-The older explicit launcher remains available for existing integrations. Its
-bindings are still accepted, but the native plugins no longer require it.
+The binding identifies the CLI by its process ID and start time, never by a
+model-provided value. Codex supplies the native thread ID through MCP metadata;
+Claude reads its own session ID in the mod. The application keeps sockets in
+private `/tmp` directories and binds all content to that exact project, agent
+and conversation. The app finds the bridge through the pairing file it writes to
+`~/.claude/prism/app.json` and `~/.codex/prism/app.json`; `PRISM_APP_FILE`
+overrides the path.
 
 ## Work with content
 
@@ -108,113 +114,60 @@ that conflict with later changes instead of overwriting them. Elements appear
 in publication order; reordering them in a later publication is not a semantic
 edit.
 
-The list shows one card per item; the focused card expands with its text, its
-questions and the pills `[ask] [hide] [drop]`. **Ask** (`Enter` or the pill)
-shares the focused item as a quoted reference. With Claude Code, the native mod
-places it in the CLI prompt box within a second as
+In the app, the list shows one card per item; the focused card expands with its
+text, its questions and the actions ask, hide and drop. **Ask** shares the focused
+item, or the text selected inside it, as a quoted reference. With Claude Code,
+the native mod places it in the CLI prompt box within a second as
 `Item 2: <title>` plus `> quoted lines` and a `[prism:<request id>]` marker; you
-type your question after it and press Enter there. Drag inside the expanded card
-or the diagram panel first to quote only that text. Claude records its reply
+type your question after it and press Enter there. Claude records its reply
 with `mcp__prism__answer`, and the card shows it. Codex has no prompt box
 access: ask it to retrieve the shared question with `prism_questions`. Share does
-not start a model turn or prove an answer began. **Drop** is the shared archive
-(`x`); **hide** (`h`) only affects this view.
-
-The older editor remains: select content, press `e`, write a question, then
-`Ctrl-S` to share it. If the content changed since you selected it, the editor
-reports a stale selection and keeps your draft; reselect and share again.
-Unsent selections and drafts are excluded from the Prism tools. This is tool
-exposure control; another process running as your user can read local files.
-
-## Diagrams
-
-`v` switches a view between list and diagram. In iTerm2 and WezTerm the diagram
-is drawn as an image (iTerm2 inline image protocol): groups become lanes,
-elements boxes with a bold name and a short subtitle, relationships arrows with
-numbered label pills, `manual: true` relationships dashed, and a finding or
-question linked to exactly one box an amber gate badge on that box. Zoom 1 fits
-the whole diagram; `+`, `-` and `0` or Ctrl-wheel zoom, the wheel and
-Shift-arrows pan, and boxes show their full text when zoomed in. Clicking a box,
-arrow, pill or badge focuses it; the panel below shows its text with the same
-pills, and a drag there selects text for **ask**. `s` writes the diagram as
-`.prism/export/<title>.svg`.
-
-Prism detects the terminal from tmux's client type or `TERM_PROGRAM`; it never
-queries the terminal over stdio. The image is sized in cells, so the real font
-size is not needed; `PRISM_CELL_PIXELS=WxH` changes the raster resolution per
-cell (default 10x20 when the terminal reports no pixel size). Inside tmux the
-image needs `allow-passthrough`, which Prism enables on the pane it creates.
-tmux does not know about the image: after tmux repaints the pane, press `Ctrl-L`.
-In other terminals, or with `PRISM_TEXT_DIAGRAM=1`, the text diagram (cards in
-three lanes) is used; Kitty and Sixel output are not implemented.
-
-## Controls
-
-| Key | Action |
-| --- | --- |
-| Arrows / `j`, `k` | Focus content |
-| `Enter` / `[ask]` | Ask about the focused item, or about the text dragged inside it |
-| Space / click | Toggle selection |
-| `A` / `r` | Select visible content / clear selection |
-| `a` / `x` / `u` | Accept / drop (shared archive) / undo; without a selection they act on the focused item |
-| `h` / `H` | Hide focused or selected content in this view / show hidden content |
-| `/` | Edit current view's filter |
-| `v` | Switch list/diagram |
-| `+` / `-` / `0`, Ctrl-wheel | Zoom diagram in, out, fit |
-| Wheel, Shift-wheel, `Shift` + arrows | Pan diagram |
-| `s` / `Ctrl-L` | Export the diagram as SVG / repaint the screen |
-| `Alt` + arrows | Move focused card (text diagram only) |
-| `Tab` / `Shift-Tab` | Change view tab |
-| `Ctrl-T` / `Ctrl-W` / `Ctrl-R` | Duplicate view / close tab / reopen closed tab (at the view limit it swaps with the active tab) |
-| `Ctrl-\` (sent as `Ctrl-4` by most terminals) / `F6` | Toggle split / focus other split |
-| `e` / `Esc` | Edit a question in Prism / leave editor |
-| `Ctrl-S` / `Ctrl-N` | Share the edited question / cycle offered delivery modes (currently Share only) |
-| `[` / `]`, `PgUp` / `PgDn` | Detail pages / detail scrolling |
-| `?` / `q` / `Ctrl-C` | Help / exit UI |
-
-At most 32 tabs can be open in one UI. Views keep independent selections, drafts, filters and layout while sharing
-content and acceptance. Closing a tab never archives content. Opening the same
-conversation restores its saved views. The `?` screen lists current controls.
+not start a model turn or prove an answer began. **Drop** is the shared archive;
+**hide** and the filter only affect that tab. The diagram draws groups as lanes,
+elements as boxes, relationships as arrows with numbered pills, `manual: true`
+relationships dashed and gate findings as amber badges; it pans, zooms and
+exports SVG. The app's status bar lists the keys of the current view. Hidden
+items, filters, zoom and selection live in the app's own data directory and are
+excluded from the Prism tools.
 
 ## Storage, upgrades and recovery
 
 Each canonical project stores content in `.prism/state.db` (SQLite WAL).
 Workspace identity includes the project, agent and exact conversation UUID.
 New conversations receive separate content. Private runtime directories under
-`.prism/run/` contain bindings and logs. Sockets live in `/tmp/prism-<launch-id>/`
-and are removed on normal supervisor exit; abandoned socket directories are pruned
-on later launches for that project. Directory mode is 0700 and binding mode is 0600. Tokens never belong in command arguments or published
+`.prism/run/` contain bindings and logs. Sockets live in `/tmp/prism-<runtime-id>/`
+and are removed when the bridge ends. Directory mode is 0700 and binding mode is 0600. Tokens never belong in command arguments or published
 content. Do not share binding files or runtime logs as public diagnostics.
 
 Schema 2 adds private UI arrangement with an in-place transactional migration
-from schema 1; content, questions and views are preserved. Unknown newer schemas
-are refused. Stop live Prism processes before copying `.prism/` for a backup;
+from schema 1; content, questions and views are preserved. The terminal UI's
+view tables stay in schema 2 unused, so older `prism` binaries still open the
+store. Unknown newer schemas are refused. Stop live Prism processes before copying `.prism/` for a backup;
 include SQLite's WAL/SHM files if copying a live database. Prism writes
 `.prism/.gitignore` containing `*`, so the directory stays out of version
 control in every project; an existing file there is never overwritten.
 
-Closing the native connection retires the binding and releases the Prism pane;
-the attached CLI is never terminated. Codex attachment follows its MCP process
-lifetime; it does not observe app-server thread events. Claude reports session
-changes through `session.end`. A different live Codex thread cannot reuse the
-same pane's binding. Persisted content remains available, and unknown question
-outcomes are never resent automatically.
+Closing the native connection retires the binding and the app marks the tab
+ended; the attached CLI is never terminated. Codex attachment follows its MCP
+process lifetime; it does not observe app-server thread events. Claude reports
+session changes through `session.end`. A different live Codex thread cannot
+reuse the same MCP process's binding. Persisted content remains available, and
+unknown question outcomes are never resent automatically.
 
-If pane creation fails after publication, the tool returns the committed revision
-and pane error separately. Retry the identical publication with the same request
-ID; it replays the result without duplicating the revision. Changed payloads need
-a fresh request ID. Socket paths under `/tmp` do not grow with the project path.
+If a tool response is lost after publication, retry the identical publication
+with the same request ID; it replays the result without duplicating the
+revision. Changed payloads need a fresh request ID. Socket paths under `/tmp` do
+not grow with the project path.
 
-Diagnostics: `prism --help`, `codex --version`, `claude --version`, `tmux -V`,
-`codex plugin list --marketplace prism-local --json`, `claude plugin list`, and
-the specific binding's `bridge.log` (or `supervisor.log` and `codex.log` for the older launcher). An unavailable bridge
+Diagnostics: `prism --help`, `codex --version`, `claude --version`,
+`codex plugin list --marketplace prism-local --json`, `claude plugin list`, `/prism`
+in Claude, and the specific binding's `bridge.log`. An unavailable bridge
 disables Share even if a stale socket remains. Do not delete the project
 database to repair a runtime connection.
 
 ## Remove
 
-Exit the CLI session and Prism UI, then run the commands for the
-packages you installed:
+Exit the CLI session, then run the commands for the packages you installed:
 
 ```sh
 codex plugin remove prism@prism-local
@@ -231,10 +184,9 @@ is a separate explicit action; Prism does not remove it during uninstall.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 python3 -m unittest discover -s tests -p probe_codex_test.py
-PRISM_BINARY=target/debug/prism python3 tests/claude_lifecycle.py
 PRISM_BINARY=target/debug/prism python3 tests/attachment.py
 ```
 
@@ -244,12 +196,12 @@ are recorded in [validation evidence](docs/validation.md).
 Python native probes additionally require `websockets==15.0.1` in a virtual
 environment. Real-model probes use isolated Codex homes and can consume model
 usage; their options are documented in [Codex integration evidence](docs/codex-integration.md).
-`tests/claude_lifecycle.py` and `tests/probe_claude.py` use the installed
+`tests/attachment.py` and `tests/probe_claude.py` use the installed
 `claude` CLI in print mode with an isolated `CLAUDE_CONFIG_DIR`, need no login
 and make no model request.
 
-Dependency versions are pinned in `Cargo.lock`. Ratatui, Crossterm, rusqlite and
-libsqlite3-sys declare MIT; the other direct Rust dependencies declare MIT and/or
+Dependency versions are pinned in `Cargo.lock`. rusqlite and libsqlite3-sys
+declare MIT; the other direct Rust dependencies declare MIT and/or
 Apache-2.0. Bundled SQLite is public domain. For all resolved dependencies,
 including target-specific transitive crates, inspect their `license`,
 `license_file`, and `manifest_path` with `cargo metadata --locked --format-version 1`;

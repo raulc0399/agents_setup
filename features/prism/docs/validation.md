@@ -10,6 +10,12 @@ Codex release result (f476550): **100 Rust tests, 16 Python probe regressions,
 `cargo install --locked --path . --root "$HOME/.local"` installed Prism 0.1.0;
 `prism@prism-local` 0.1.0 is installed and enabled in the user's Codex home.
 
+Batch 7 of `docs/app-plan.md` (2026-11-10) removed the terminal UI, the tmux
+requirement and the `prism --agent` launcher; the Prism desktop app replaces the
+pane. The real Codex and Claude loops and the tmux attachment check below were
+made with those parts and stay as the record of what they showed; see
+"Attachment without tmux" for the current checks.
+
 Claude integration result (2026-11-09): **116 Rust tests** (7 Claude adapter
 contract tests, 4 Claude package tests, lifecycle and agent-separation tests),
 **16 Codex probe regressions, 9 Codex lifecycle tests, 4 Claude lifecycle
@@ -24,32 +30,26 @@ From `features/prism/`, with the compiler environment in
 
 ```sh
 cargo fmt --all --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 cargo build --locked
 python3 -m venv /tmp/prism-validation-venv
 /tmp/prism-validation-venv/bin/pip install websockets==15.0.1
 /tmp/prism-validation-venv/bin/python -m unittest discover -s tests -p probe_codex_test.py
-PRISM_BINARY=target/debug/prism /tmp/prism-validation-venv/bin/python tests/launcher_lifecycle.py
 /tmp/prism-validation-venv/bin/python tests/probe_codex.py
-PRISM_BINARY=target/debug/prism python3 tests/claude_lifecycle.py
+PRISM_BINARY=target/debug/prism python3 tests/attachment.py
 python3 tests/probe_claude.py
 ```
 
-`launcher_lifecycle.py` uses a temporary project, a fake native WebSocket server,
-and its own tmux server. It tests real Prism processes and terminal behavior,
-without model usage. Native protocol evidence comes separately from
-`probe_codex.py` and the real-model loop below. The default native probe creates
-its own Codex home/server and does not make model requests.
+Native protocol evidence comes from `probe_codex.py` and the real-model loops
+below. The default native probe creates its own Codex home/server and does not
+make model requests.
 
-`claude_lifecycle.py` uses the real launcher, the real installed `claude` CLI in
-print mode (`--plugin-dir plugins/claude`, isolated `CLAUDE_CONFIG_DIR`, no login,
-no model request) and its own tmux server. It proves the pre-bound
-`--session-id`, the CLI pane as the recorded native process, the mod's `/prism`
-reaching the bridge and opening the UI pane to the right, foreign session
-rejection, lifecycle retirement with the CLI pane kept alive, and explicit
-`--resume` forwarding. `probe_claude.py` records the native mod runtime facts in
-`docs/claude-integration.md`.
+`attachment.py` uses a temporary project, real Prism processes and the real
+installed `claude` CLI in print mode (`--plugin-dir plugins/claude`, isolated
+`CLAUDE_CONFIG_DIR`, no login, no model request), without tmux and without
+model usage; see "Attachment without tmux". `probe_claude.py` records the native
+mod runtime facts in `docs/claude-integration.md`.
 
 ## Real Codex loop
 
@@ -71,11 +71,8 @@ The model was `gpt-6.1-sol`; this check consumes model usage.
 | Installed release resume | Exact resume restored revision 7/private drafts; a second live exact resume was rejected. A fresh fully typed Share survived CLI exit and was retrieved unchanged through native MCP after another exact resume. |
 | Stable revision | The same model conversation called `prism_publish` with the existing document/node IDs and expected revision 6; revision 7 retained the omitted source and relationship. |
 
-To reproduce, publish a small list/diagram from the launcher-bound Codex TUI;
-select content, accept/archive/undo, then explicitly Share a question and ask
-Codex to retrieve it. Reselect after shared mutations: actions clear the previous
-revision's selection. Enter the question editor before typing; an unselected
-view correctly refuses `e`. Use fresh request UUIDs for changed publications.
+This loop used the launcher and the terminal UI, both removed in batch 7; it is
+not reproducible as written.
 
 The native probe also confirms installed-plugin MCP discovery and metadata,
 private socket mode, actual server identity, and expected rejection of a fresh
@@ -112,7 +109,8 @@ check consumes Claude usage.
 
 Interactive approval ownership in default (non-auto) permission mode and
 busy-queue cancellation were not exercised; they gate only the disabled native
-send modes, not Share.
+send modes, not Share. This loop used the launcher, the tmux pane and the
+terminal UI, all removed in batch 7.
 
 ## On-demand tmux attachment (2026-11-09)
 
@@ -121,10 +119,11 @@ Prism call verifies inherited tmux identity against Linux process ancestry,
 creates the bridge, and opens the UI to the right without launching another CLI.
 Attached bindings never authorize termination of the user's CLI or its pane.
 
-`tests/attachment.py` verifies lazy attachment, publication, pane reuse/reopening,
-refusal of unrelated processes and conflicting conversations, duplicate bridge
-ownership, outside-tmux instructions, and real Claude `/prism` through its native
-process API. Its four tests passed without model requests.
+The tmux version of `tests/attachment.py` verified lazy attachment, publication,
+pane reuse/reopening, refusal of unrelated processes and conflicting
+conversations, duplicate bridge ownership, outside-tmux instructions, and real
+Claude `/prism` through its native process API. Its four tests passed without
+model requests.
 
 A separate isolated real Codex 0.167.0 TUI, started normally with the native Prism
 plugin, called `prism_inspect` after its one-time tool approval. The call returned
@@ -135,3 +134,32 @@ The isolated tmux server and temporary Codex home were removed afterwards.
 The attachment tracks Codex's MCP process lifetime, not app-server thread events;
 it rejects a different live thread claiming the same pane. Claude session-end
 hooks retire their attachment. Native Start/Steer/Queue remain disabled.
+
+## Attachment without tmux (2026-11-10)
+
+The binding identifies the attached CLI by process ID and start time: the
+Claude CLI (the parent of `prism attach`) or the Codex MCP process. No tmux,
+pane or launcher is involved; the desktop app shows the workspace.
+
+Result: **143 Rust tests** across the workspace (bridge and `prism-core`),
+formatting, Clippy with warnings denied and the release build passed;
+`cargo tree -p prism` lists none of the removed terminal-UI dependencies.
+`tests/attachment.rs` runs the real binary without model requests, and
+`tests/attachment.py` passed its Claude test:
+
+- Codex MCP (`attachment.rs`): the first tool call attaches lazily, records the
+  MCP process and prunes retired runtimes whose lease is free; later calls reuse
+  the binding; a second bridge for it is refused; a bridge killed without
+  retiring its binding is restarted by the next call; another thread through the
+  same MCP process is refused without retiring the binding; the binding retires
+  when the MCP process exits.
+- Claude `prism attach` (`attachment.rs`): a second session of the same Claude
+  process retires the stale binding of the first, and the next attachment prunes
+  its runtime once its bridge ended.
+- Claude print mode (`attachment.py`, skipped without `claude` on PATH): `/prism` attaches, records the Claude process, reports the
+  published documents and the app link (retrying, pairing file not found, in
+  the test), and `session.end` retires the binding while the CLI keeps running.
+
+The real loop against the desktop app (publish, ask, answer, drop, undo,
+`/clear`, resume) needs the app running on the host and a Claude restart so the
+changed mod loads; it was not run in this batch.

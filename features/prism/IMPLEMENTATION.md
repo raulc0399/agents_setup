@@ -202,3 +202,19 @@ findings are handed to the Codex agent in `docs/codex-handover.md`.
   client isolation, optional portable fixtures and empty-rollout guidance. Formal
   re-review is blocked by missing run metadata; worker handoff explicitly reports
   `.reviews/prism-impl-2026-11-09/run.db` does not exist.
+
+### Desktop app batch 7 (2026-11-10)
+
+- Batch 7 of `docs/app-plan.md` removed the terminal UI (`src/ui/`, its tests and
+  `examples/`), the tmux pane handling and the `prism --agent` launcher with its
+  supervisor, private Codex app-server and the bridge's Codex observer. The
+  sections above that describe them are the history of this log; the Prism
+  desktop app in `app/` shows the workspace instead.
+- Bindings record the attached CLI process (Claude, or the Codex MCP process) by
+  process ID and start time; `session::verify_binding` checks only that.
+- The bridge's read-only `status` operation reports the app link to the Claude
+  mod's `/prism`.
+- Attachment prunes retired runtimes whose bridge lease is free, and a new Claude
+  session retires a stale binding of the same Claude process; a Codex MCP
+  process still refuses another thread. `tests/attachment.rs` runs the real
+  binary for these paths.

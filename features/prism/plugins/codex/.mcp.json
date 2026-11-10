@@ -3,7 +3,7 @@
     "prism": {
       "command": "prism",
       "args": ["mcp"],
-      "env_vars": ["PRISM_BINDING_FILE", "TMUX", "TMUX_PANE"]
+      "env_vars": ["PRISM_APP_FILE", "PRISM_APP_HOST"]
     }
   }
 }

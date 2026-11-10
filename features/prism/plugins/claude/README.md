@@ -20,22 +20,27 @@ frontmatter name are `prism-workspace`: a skill named `prism` would claim
 tools refuse calls from subagents; only the main conversation publishes. The mod registers the tools
 `mcp__prism__publish`, `mcp__prism__inspect`, `mcp__prism__action`,
 `mcp__prism__questions` and `mcp__prism__answer` plus the `/prism` command, which
-opens or refreshes the Prism pane without a model turn. Once a conversation is
+reports the published documents and the Prism app connection without a model
+turn. Once a conversation is
 attached, the mod polls shared questions every second and appends each new one
 to the prompt box as `Item N: <title>`, quoted lines and a `[prism:<request id>]`
 marker; the user sends it. The skill tells Claude to answer in the conversation
 and record the reply with `mcp__prism__answer`.
 
-Start `claude` normally inside tmux and discuss your task. When needed, use
-`/prism` or ask Claude to show the plan in Prism. The mod reads the native session
-ID and attaches through `prism attach`; process ancestry verifies the exact tmux
-pane. Prism opens to the right and later calls reuse that pane, without restarting
-Claude. Outside tmux, the mod asks you to start the CLI inside tmux.
+Start `claude` normally and discuss your task. When needed, use `/prism` or ask
+Claude to show the plan in Prism. The mod reads the native session ID and
+attaches through `prism attach`, which identifies the Claude process by its
+process ID and start time. The bridge connects to the Prism desktop app, which
+shows the conversation in a tab; later calls reuse the attachment, without
+restarting Claude. `/prism` reports whether the link to the app is connecting,
+connected, retrying (since when, and whether the pairing file was found) or
+superseded by a later session; a superseded session shows in the app again after
+`/exit` and `claude -c`. After updating Prism, restart running Claude sessions
+the same way, because the mod loads only at session start.
 
 The protected binding authenticates subsequent calls. `/clear`, `/resume`,
 `/logout` and exit retire it through `session.end`; a later session attaches on
-demand. Prism never terminates the attached CLI. Existing launcher bindings
-remain compatible through `PRISM_BINDING_FILE`. User approvals remain in Claude.
+demand. Prism never terminates the attached CLI. User approvals remain in Claude.
 
 Native question sending stays disabled because Claude's prompt receipt carries
 no request-to-turn correlation. Explicit sharing in Prism and retrieval with

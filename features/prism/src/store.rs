@@ -34,6 +34,9 @@ impl Store {
         if !(0..=SCHEMA_VERSION).contains(&version) {
             return Err(Error::SchemaVersion(version));
         }
+        // `private_views` and `private_ui` held the terminal UI's view state, which now lives
+        // in the desktop app. Nothing reads or writes them; they stay so that schema 2 remains
+        // the same for an older `prism` binary that opens this project's store.
         if version == 0 {
             transaction.execute_batch(
                 "CREATE TABLE workspaces (
@@ -300,88 +303,6 @@ impl Store {
         Ok(current)
     }
 
-    pub fn save_view(&mut self, workspace: Id, view: &ViewState) -> Result<()> {
-        if view.id.is_nil() {
-            return Err(Error::Invalid("view ID must not be nil".into()));
-        }
-        bounded(&view.draft, MAX_TEXT_BYTES, "draft")?;
-        bounded(&view.filter, MAX_TITLE_BYTES, "filter")?;
-        let content = serialized(view)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let document = read_document(&transaction, workspace, view.document_id)?;
-        if view.positions.len() > MAX_SELECTION || view.hidden.len() > MAX_SELECTION {
-            return Err(Error::Invalid("view record limit exceeded".into()));
-        }
-        if let Some(selection) = &view.selection
-            && (selection.document_id != document.id
-                || selection.revision > document.revision
-                || selection.ids.len() > MAX_SELECTION)
-        {
-            return Err(Error::Invalid("invalid saved selection".into()));
-        }
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT document_id FROM private_views WHERE workspace_id=?1 AND id=?2",
-                params![workspace.to_string(), view.id.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing.is_some_and(|id| id != view.document_id.to_string()) {
-            return Err(Error::Invalid(
-                "view cannot change its document identity".into(),
-            ));
-        }
-        transaction.execute(
-            "INSERT INTO private_views(workspace_id, document_id, id, content) VALUES(?1, ?2, ?3, ?4)
-             ON CONFLICT(workspace_id, id) DO UPDATE SET content=excluded.content",
-            params![workspace.to_string(), view.document_id.to_string(), view.id.to_string(), content],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn views(&self, workspace: Id) -> Result<Vec<ViewState>> {
-        require_workspace(&self.connection, workspace)?;
-        let mut statement = self
-            .connection
-            .prepare("SELECT content FROM private_views WHERE workspace_id=?1 ORDER BY id")?;
-        let rows = statement.query_map([workspace.to_string()], |row| row.get::<_, String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
-    }
-
-    /// UI arrangement is private and is never returned by agent-facing inspection.
-    pub fn save_ui_state(&mut self, workspace: Id, state: &serde_json::Value) -> Result<()> {
-        let content = serialized(state)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        require_workspace(&transaction, workspace)?;
-        transaction.execute(
-            "INSERT INTO private_ui(workspace_id, content) VALUES(?1, ?2)
-             ON CONFLICT(workspace_id) DO UPDATE SET content=excluded.content",
-            params![workspace.to_string(), content],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn ui_state(&self, workspace: Id) -> Result<Option<serde_json::Value>> {
-        require_workspace(&self.connection, workspace)?;
-        let content: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT content FROM private_ui WHERE workspace_id=?1",
-                [workspace.to_string()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        content
-            .map(|value| Ok(serde_json::from_str(&value)?))
-            .transpose()
-    }
-
     pub fn prepare_question(
         &mut self,
         workspace: Id,
@@ -391,47 +312,6 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (question, _) = insert_question(&transaction, workspace, request)?;
-        transaction.commit()?;
-        Ok(question)
-    }
-
-    /// A send and its private draft clear succeed together; retries cannot clear newer input.
-    pub fn prepare_question_and_clear_draft(
-        &mut self,
-        workspace: Id,
-        request: &PrepareQuestion,
-        view_id: Id,
-    ) -> Result<Question> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (question, created) = insert_question(&transaction, workspace, request)?;
-        if created {
-            let content: Option<String> = transaction
-                .query_row(
-                    "SELECT content FROM private_views WHERE workspace_id=?1 AND id=?2",
-                    params![workspace.to_string(), view_id.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let mut view: ViewState = serde_json::from_str(
-                &content.ok_or_else(|| Error::NotFound("private view".into()))?,
-            )?;
-            if view.document_id != request.selection.document_id || view.draft != request.text {
-                return Err(Error::Invalid(
-                    "private draft changed before send; refresh it".into(),
-                ));
-            }
-            view.draft.clear();
-            transaction.execute(
-                "UPDATE private_views SET content=?3 WHERE workspace_id=?1 AND id=?2",
-                params![
-                    workspace.to_string(),
-                    view_id.to_string(),
-                    serialized(&view)?
-                ],
-            )?;
-        }
         transaction.commit()?;
         Ok(question)
     }

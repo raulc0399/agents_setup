@@ -9,18 +9,21 @@
 //! backoff and logs each distinct failure once to the bridge's own log, never to the CLI.
 //!
 //! Commits are noticed through SQLite's `data_version`, which changes whenever another
-//! connection commits to `.prism/state.db`: the bridge's tool operations, the Claude mod's
-//! prompt-box report and the separate terminal UI process all commit that way. On a change
+//! connection commits to `.prism/state.db`: the bridge's tool operations and the Claude mod's
+//! prompt-box report both commit that way. On a change
 //! the thread compares the content with what it last sent and sends the difference as
 //! `update`, so commits made between two polls arrive in one `update`. Commands from the app
 //! commit through the thread's own store and are followed by the same comparison before their
 //! `reply`.
+//!
+//! The thread also keeps a `LinkStatus` that the bridge reports through its read-only `status`
+//! operation, which the Claude mod's `/prism` command shows.
 use crate::actions::{self, PrepareQuestion};
 use crate::bridge::{ActionParams, Operation, apply_operation, store_path};
 use crate::model::{
     AgentKind, ContentAction, DeliveryMode, Document, Id, Question, Selection, WorkspaceKey,
 };
-use crate::session::{LiveBinding, TmuxClient, read_binding, write_binding};
+use crate::session::{LiveBinding, read_binding, unix_time_ms, verify_binding, write_binding};
 use crate::store::{BUSY_TIMEOUT_SECONDS, Store};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use prism_core::pairing::{
@@ -30,7 +33,7 @@ use prism_core::protocol::{
     self, APP_PROTOCOL, AppMessage, BridgeMessage, CliProcess, CommandError, MAX_MESSAGE_BYTES,
     Prover, Refusal, Session,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -38,6 +41,7 @@ use std::io::{self, ErrorKind, Read};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tungstenite::protocol::WebSocketConfig;
@@ -108,33 +112,82 @@ impl LinkConfig {
     }
 }
 
+/// Where the link stands, as the `status` operation reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    /// The first attempt is in progress.
+    Connecting,
+    /// The conversation is not bound yet, so there is nothing to announce.
+    Waiting,
+    Connected,
+    /// The last attempt failed; the link tries again after its backoff.
+    Retrying,
+    /// The app gave this conversation's tab to a later binding; the link no longer dials.
+    Superseded,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LinkStatus {
+    pub state: LinkState,
+    /// When the link entered `state`, in milliseconds since the Unix epoch.
+    pub since_ms: u64,
+    /// The host the link dials, and the app's port once a pairing file was read.
+    pub host: String,
+    pub port: Option<u16>,
+    /// The pairing file of the last attempt, and whether it existed.
+    pub pairing_file: Option<PathBuf>,
+    pub pairing_found: bool,
+    /// The latest failure while `Retrying`.
+    pub error: Option<String>,
+}
+
 /// The bridge's handle on the link thread.
 pub struct AppLink {
     close: Sender<String>,
     thread: JoinHandle<()>,
+    status: Arc<Mutex<LinkStatus>>,
 }
 
 impl AppLink {
     pub fn start(binding_path: &Path, config: LinkConfig) -> io::Result<Self> {
         let (close, closing) = mpsc::channel();
+        let status = Arc::new(Mutex::new(LinkStatus {
+            state: LinkState::Connecting,
+            since_ms: unix_time_ms(),
+            host: config.host.clone(),
+            port: None,
+            pairing_file: None,
+            pairing_found: false,
+            error: None,
+        }));
         let mut link = Link {
             binding_path: binding_path.to_owned(),
             config,
             closing,
             last_failure: None,
             recovered: false,
+            status: status.clone(),
         };
         let thread = std::thread::Builder::new()
             .name("app-link".into())
             .spawn(move || link.run())?;
-        Ok(Self { close, thread })
+        Ok(Self {
+            close,
+            thread,
+            status,
+        })
+    }
+
+    pub fn status(&self) -> LinkStatus {
+        lock_status(&self.status).clone()
     }
 
     /// Sends `closed` with `reason` when connected and waits at most `CLOSE_WAIT` for the
     /// thread. A thread still resolving the host or in a handshake is left to end on its own
     /// timeouts, so it never holds up the bridge's exit.
     pub fn close(self, reason: &str) {
-        let Self { close, thread } = self;
+        let Self { close, thread, .. } = self;
         let _ = close.send(reason.to_owned());
         // A thread that took the reason but could not send it then sees the channel closed.
         drop(close);
@@ -171,6 +224,12 @@ struct Link {
     last_failure: Option<String>,
     /// A connection was logged after `last_failure`.
     recovered: bool,
+    status: Arc<Mutex<LinkStatus>>,
+}
+
+/// The status stays readable even if a thread panicked while holding it.
+fn lock_status(status: &Mutex<LinkStatus>) -> std::sync::MutexGuard<'_, LinkStatus> {
+    status.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Link {
@@ -187,6 +246,7 @@ impl Link {
             let wait = match ended {
                 Ended::Stopped => return,
                 Ended::Superseded => {
+                    self.set_state(LinkState::Superseded, None);
                     eprintln!(
                         "prism: app link superseded by a later binding of this conversation; not reconnecting"
                     );
@@ -194,7 +254,10 @@ impl Link {
                     let _ = self.closing.recv();
                     return;
                 }
-                Ended::Unbound => self.config.poll_interval,
+                Ended::Unbound => {
+                    self.set_state(LinkState::Waiting, None);
+                    self.config.poll_interval
+                }
                 Ended::Lost {
                     authenticated,
                     error,
@@ -202,6 +265,7 @@ impl Link {
                     if authenticated {
                         delay = self.config.retry_initial;
                     }
+                    self.set_state(LinkState::Retrying, Some(format!("{error:#}")));
                     self.report(&error);
                     let wait = delay;
                     delay = (delay * 2).min(self.config.retry_max);
@@ -213,6 +277,17 @@ impl Link {
                 Ok(_) | Err(RecvTimeoutError::Disconnected) => return,
             }
         }
+    }
+
+    /// `since_ms` moves only when the state changes, so a retrying link reports when its
+    /// failures began.
+    fn set_state(&self, state: LinkState, error: Option<String>) {
+        let mut status = lock_status(&self.status);
+        if status.state != state {
+            status.state = state;
+            status.since_ms = unix_time_ms();
+        }
+        status.error = error;
     }
 
     /// Logs a failure only when it differs from the previous one, so an absent app or pairing
@@ -249,7 +324,14 @@ impl Link {
             .config
             .pairing_path(&binding.agent)
             .context("no home directory for the pairing file")?;
-        let pairing = read_pairing(&pairing_path)?;
+        let pairing = read_pairing(&pairing_path);
+        {
+            let mut status = lock_status(&self.status);
+            status.pairing_found = pairing_path.is_file();
+            status.port = pairing.as_ref().ok().map(|pairing| pairing.port);
+            status.pairing_file = Some(pairing_path);
+        }
+        let pairing = pairing?;
         if self.stopping() {
             return Ok(Ended::Stopped);
         }
@@ -320,6 +402,7 @@ impl Link {
         )?;
         connection.send_snapshot()?;
         *authenticated = true;
+        self.set_state(LinkState::Connected, None);
         self.report_connected(address);
         connection.serve(&self.closing, self.config.poll_interval)
     }
@@ -504,7 +587,7 @@ impl Connection {
         }
     }
 
-    /// The checks the tools make: the binding is live, verified against tmux, and still bound
+    /// The checks the tools make: the binding is live, its CLI process verified, and still bound
     /// to the conversation this connection speaks for.
     fn verified_binding(&self) -> Result<LiveBinding, CommandError> {
         let binding = read_binding(&self.binding_path).map_err(failed)?;
@@ -513,9 +596,7 @@ impl Connection {
                 "binding retired; explicitly resume the conversation",
             ));
         }
-        TmuxClient::socket(&binding.tmux.socket_path)
-            .verify_binding(&binding)
-            .map_err(failed)?;
+        verify_binding(&binding).map_err(failed)?;
         if binding.workspace_key().ok().as_ref() != Some(&self.key) {
             return Err(failed("the binding now speaks for another conversation"));
         }
@@ -560,8 +641,8 @@ impl Connection {
         Ok(())
     }
 
-    /// Undoes the latest undoable action, like the terminal UI; a resent undo that already
-    /// committed reports `stale_revision`.
+    /// Undoes the latest undoable action; a resent undo that already committed reports
+    /// `stale_revision`.
     fn undo(&mut self, document_id: Id, expected_revision: u64) -> Result<(), CommandError> {
         self.verified_binding()?;
         self.store
@@ -674,18 +755,11 @@ fn command_error(error: anyhow::Error) -> CommandError {
     }
 }
 
-/// Attached bindings and Claude record the CLI process itself as their native process; a
-/// launcher-started Codex records its private app-server, so its CLI is the pane process.
+/// The binding records the attached CLI process as its native process.
 fn cli_process(binding: &LiveBinding) -> CliProcess {
-    if binding.attached || binding.agent == AgentKind::Claude {
-        return CliProcess {
-            pid: binding.server_pid,
-            start_time: binding.server_start_time.clone(),
-        };
-    }
     CliProcess {
-        pid: binding.cli.pid,
-        start_time: binding.cli.start_time.clone(),
+        pid: binding.server_pid,
+        start_time: binding.server_start_time.clone(),
     }
 }
 

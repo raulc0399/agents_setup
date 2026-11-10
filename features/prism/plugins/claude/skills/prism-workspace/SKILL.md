@@ -25,16 +25,17 @@ automatically extract conversation content or open another agent conversation.
 - Relationships accept `manual: true` for manual or review steps; diagrams
   draw them dashed. Groups become lanes in diagrams, so group by where things
   run (device, service, operator) when drawing architecture or data flow.
-- The `/prism` command opens or refreshes the Prism pane without a model turn;
-  tell the user about it when they only want to see the current workspace.
+- The `/prism` command reports the published documents and whether the Prism
+  app is connected, without a model turn; tell the user about it when they only
+  want to check the current workspace.
 - Prism tools refuse calls from subagents; call them from the main conversation.
 - Native caller identity is the current Claude session ID, read by the mod
-  itself. Never supply conversation, pane, server identity or binding
+  itself. Never supply conversation, process, server identity or binding
   credentials as model arguments.
-- Start the normal CLI inside tmux. The first Prism tool attaches to this
-  conversation and opens the application to its right; later calls reuse it.
+- Start the normal CLI. The first Prism tool attaches to this conversation, and
+  the Prism desktop app shows its workspace in a tab; later calls reuse it.
 - If attachment fails, show the tool's exact instruction. Never relaunch the
-  CLI through Prism, guess another pane, or start a replacement conversation.
+  CLI through Prism, guess another binding, or start a replacement conversation.
 - Native sending from Prism is disabled for Claude: ask the user to explicitly
   share the question in Prism, then retrieve it with `mcp__prism__questions`.
   Never claim a queued or unknown delivery started, and never retry an unknown
@@ -42,5 +43,5 @@ automatically extract conversation content or open another agent conversation.
 
 Prism's shared Rust application owns content operations and persistence. This
 plugin supplies native tool discovery, the `/prism` command and lifecycle
-reporting; it grants no hook trust and does not establish pane authority by
-itself.
+reporting; it grants no hook trust and does not establish attachment authority
+by itself.
