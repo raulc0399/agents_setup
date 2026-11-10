@@ -205,6 +205,11 @@ Batch 2 must land before 3, 4 and 5 start; 3 and 4 can then run in parallel.
 6. **Port**: 7717.
 7. **No Node** (2026-11-09): the frontend is plain HTML, CSS and JavaScript without a
    bundler; the app is built with `cargo tauri build` only.
+8. **Shared state only** (2026-11-10): all content and document state (publish, close,
+   drop, accept, questions, answers) goes through the bridge into `.prism/state.db`, so the
+   agent and every app view see the same thing; no app-local document state. Prism shows the
+   conversation: we discuss what the agent publishes, and another agent can execute it.
+   Only presentation (view mode, zoom, pan, filter) stays in the app.
 
 ## Risks
 
