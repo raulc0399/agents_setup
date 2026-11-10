@@ -925,7 +925,7 @@ async function actionChecks(backend, app) {
 /**
  * The view per document and the side pane: a document with arrows or groups opens in the
  * diagram, one without in a list without a switch; V's choice is saved per document; the
- * pane holds the view's controls in both views; arrows of one lane pair differ in color.
+ * pane holds the view's controls in both views; a path keeps one arrow color, a branch differs.
  */
 async function viewChecks(backend) {
   const failures = [];
@@ -970,16 +970,16 @@ async function viewChecks(backend) {
   expect(await waitFor(() => boxes().length === 6), 'all boxes again');
   expect(document.activeElement === document.querySelector('.diagram-canvas'), 'Esc leaves the filter for the diagram');
 
-  // Arrows between the same two lanes differ in color; line, head and pill agree.
+  // A path keeps its color and a branch takes a new one; line, head and pill agree.
   showDocument('Release flow');
   expect(await waitFor(() => svg()?.querySelector(`[data-id="${link(5)}"]`)), 'the release flow opens in the diagram too');
   const colorClass = (kind, id) => [...svg().querySelector(`[data-kind="${kind}"][data-id="${id}"]`).classList].find((name) => name.startsWith('prism-arrow-c'));
   const stroke = (id) => getComputedStyle(svg().querySelector(`[data-kind="arrow"][data-id="${id}"] .prism-line`)).stroke;
   const pillFill = (id) => getComputedStyle(svg().querySelector(`[data-kind="pill"][data-id="${id}"] .prism-shape`)).fill;
   const classes = [1, 2, 3, 4, 5].map((number) => colorClass('arrow', link(number)));
-  expect(JSON.stringify(classes) === JSON.stringify(['prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c1']), `staging to live has two colors, the other pairs one arrow each: ${classes}`);
+  expect(JSON.stringify(classes) === JSON.stringify(['prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c0', 'prism-arrow-c1']), `the path keeps one color, the branch from validation a new one: ${classes}`);
   expect([1, 2, 3, 4, 5].every((number) => colorClass('pill', link(number)) === classes[number - 1]), 'pills carry their arrow color');
-  expect(stroke(link(4)) !== stroke(link(5)), `the two arrows from staging to live differ: ${stroke(link(4))}, ${stroke(link(5))}`);
+  expect(stroke(link(4)) !== stroke(link(5)), `the path and the branch differ: ${stroke(link(4))}, ${stroke(link(5))}`);
   expect([4, 5].every((number) => pillFill(link(number)) === stroke(link(number))), 'each pill takes its line color');
   const head = getComputedStyle(svg().querySelector('#prism-head-c1 path')).fill;
   expect(head === stroke(link(5)), `the arrowhead too: ${head}`);

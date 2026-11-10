@@ -688,32 +688,45 @@ fn arrow_colors(svg: &str) -> Vec<(Id, usize)> {
         .collect()
 }
 
-#[test]
-fn arrows_of_one_lane_pair_take_the_colors_in_turn() {
-    // Eight arrows inside the one lane of ungrouped boxes, in ID order.
-    let (mut document, mut visible) = steps(9);
-    let ids: Vec<u128> = (70..78).collect();
-    for (offset, id) in ids.iter().enumerate() {
-        let from = offset as u128 + 1;
-        let (key, relationship) = link(*id, from, from + 1, "next", offset == 1);
+/// Ungrouped boxes 1..=`boxes` joined by arrows 70, 71, ... with the given ends, in order.
+fn arrows(boxes: u128, ends: &[(u128, u128)], manual: u128) -> (Document, BTreeSet<Id>) {
+    let (mut document, mut visible) = steps(boxes);
+    for (id, (from, to)) in (70..).zip(ends) {
+        let (key, relationship) = link(id, *from, *to, "next", id == manual);
         document.relationships.insert(key, relationship);
         visible.insert(key);
     }
+    (document, visible)
+}
+
+#[test]
+fn arrows_of_one_path_share_a_color() {
+    // Connecting 1, Waiting 2, Connected 3, Retrying 4, Superseded 5, Closed 6.
+    let ends = [
+        (1, 2),
+        (2, 1),
+        (1, 3),
+        (1, 4),
+        (4, 3),
+        (3, 4),
+        (3, 5),
+        (3, 6),
+    ];
+    let (document, visible) = arrows(6, &ends, 72);
     let layout = GraphLayout::new(&document, &visible, Detail::Subtitles);
     let svg = layout.svg(None, &BTreeSet::new());
     let colors = arrow_colors(&svg);
-    let expected: Vec<(Id, usize)> = ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (Id::from_u128(*id), index % ARROW_COLORS.len()))
+    let expected: Vec<(Id, usize)> = (70..)
+        .zip([0, 0, 1, 2, 2, 2, 1, 3])
+        .map(|(id, color)| (Id::from_u128(id), color))
         .collect();
     assert_eq!(
         colors, expected,
-        "distinct up to six, then the cycle repeats"
+        "a pair shares a color, a path continues it, a branch takes a new one"
     );
     assert_eq!(
         colors.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        layout.ids()[9..],
+        layout.ids()[6..],
         "numbered in focus order"
     );
     let again = GraphLayout::new(&document, &visible, Detail::Subtitles);
@@ -725,7 +738,7 @@ fn arrows_of_one_lane_pair_take_the_colors_in_turn() {
 
     // Line, head and pill carry the color as presentation attributes; dashes stay.
     let (groups, _) = split(&svg);
-    let manual = Id::from_u128(ids[1]);
+    let manual = Id::from_u128(72);
     let arrow = groups
         .iter()
         .find(|group| group.kind == KIND_ARROW && group.id == manual)
@@ -754,20 +767,17 @@ fn arrows_of_one_lane_pair_take_the_colors_in_turn() {
 }
 
 #[test]
-fn each_lane_pair_counts_its_own_arrows_in_either_direction() {
-    let (mut document, mut visible) = three_lanes();
-    // Device to Staging, and back: one pair.
-    let (key, relationship) = link(65, 4, 1, "back", false);
-    document.relationships.insert(key, relationship);
-    visible.insert(key);
-    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
-    let colors: BTreeMap<u128, usize> = arrow_colors(&svg)
-        .into_iter()
-        .map(|(id, color)| (id.as_u128(), color))
+fn arrows_leaving_one_box_differ_while_a_color_is_free() {
+    // Into box 1 from 8, then out of it to 2..=7: the first continues, the rest branch.
+    let ends: Vec<(u128, u128)> = std::iter::once((8, 1))
+        .chain((2..=7).map(|to| (1, to)))
         .collect();
-    // Device: 60; Device-Staging: 61, 65; Staging: 62; Staging-Live: 63, 64.
-    assert_eq!(
-        colors,
-        BTreeMap::from([(60, 0), (61, 0), (62, 0), (63, 0), (64, 1), (65, 1)])
-    );
+    let (document, visible) = arrows(8, &ends, 0);
+    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+    let leaving: BTreeSet<usize> = arrow_colors(&svg)
+        .into_iter()
+        .filter(|(id, _)| id.as_u128() != 70)
+        .map(|(_, color)| color)
+        .collect();
+    assert_eq!(leaving.len(), ARROW_COLORS.len());
 }

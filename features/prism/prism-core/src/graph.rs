@@ -86,7 +86,7 @@ const FOCUS: &str = "#ffffff";
 const STEP: &str = "#4cc9f0";
 const AMBER: &str = "#f59e0b";
 const LANE_COLORS: [&str; 2] = ["#2dd4bf", "#6e9fff"];
-/// Arrows within one lane, or between the same two lanes, take these colors in turn.
+/// Arrows take these colors by path (see `path_colors`).
 pub const ARROW_COLORS: [&str; 6] = [
     "#94a3b8", "#f472b6", "#2dd4bf", "#fb923c", "#b794f6", "#a3e635",
 ];
@@ -474,8 +474,7 @@ impl GraphLayout {
             .filter(|item| !consumed_edges.contains(&item.id))
             .collect();
         sorted.sort_by_key(|item| (item.semantic_revision, item.id));
-        // Arrows per lane pair, unordered: the next arrow of a pair takes the next color.
-        let mut pair_counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut ends = Vec::new();
         for (index, relationship) in sorted.into_iter().enumerate() {
             let (Some(from), Some(to)) =
                 (rects.get(&relationship.from), rects.get(&relationship.to))
@@ -495,12 +494,7 @@ impl GraphLayout {
             };
             let (shown, pill) = place_pill(&points, &label, &blocked, &layout.edges);
             let name = |id: &Id| single_line(&document.elements[id].title);
-            let (from_lane, to_lane) = (lane_of[&relationship.from], lane_of[&relationship.to]);
-            let count = pair_counts
-                .entry((from_lane.min(to_lane), from_lane.max(to_lane)))
-                .or_default();
-            let color = *count % ARROW_COLORS.len();
-            *count += 1;
+            ends.push((relationship.from, relationship.to));
             layout.edges.push(Edge {
                 id: relationship.id,
                 points,
@@ -510,8 +504,12 @@ impl GraphLayout {
                 dashed: relationship.manual,
                 direction: relationship.direction.clone(),
                 pill,
-                color,
+                // Set by path below, once all arrows are known.
+                color: 0,
             });
+        }
+        for (edge, color) in layout.edges.iter_mut().zip(path_colors(&ends)) {
+            edge.color = color;
         }
         let height = layout.lanes.last().map_or(0.0, |lane| lane.rect.bottom());
         layout.bounds = WorldRect {
@@ -1077,6 +1075,62 @@ fn overlaps(a: &WorldRect, b: &WorldRect, margin: f32) -> bool {
         && b.x < a.right() + margin
         && a.y - margin < b.bottom()
         && b.y < a.bottom() + margin
+}
+
+/// Color indices into `ARROW_COLORS` for arrows given by their ends, in `ids()` order, so
+/// that a path keeps one color. Arrows between the same two boxes, in either direction,
+/// share a color. An arrow without one continues the color of the first arrow into its
+/// start whose color no arrow out of that start has yet; otherwise it takes a new color.
+fn path_colors(ends: &[(Id, Id)]) -> Vec<usize> {
+    let mut colors: Vec<Option<usize>> = vec![None; ends.len()];
+    for (index, &(from, to)) in ends.iter().enumerate() {
+        if colors[index].is_some() {
+            continue;
+        }
+        let leaving: Vec<usize> = ends
+            .iter()
+            .zip(&colors)
+            .filter(|((start, _), _)| *start == from)
+            .filter_map(|(_, color)| *color)
+            .collect();
+        let continued = ends
+            .iter()
+            .zip(&colors)
+            .filter(|((_, end), _)| *end == from)
+            .filter_map(|(_, color)| *color)
+            .find(|color| !leaving.contains(color));
+        let color = continued.unwrap_or_else(|| new_color(ends, &colors, (from, to)));
+        for (other, end) in ends.iter().enumerate() {
+            if *end == (from, to) || *end == (to, from) {
+                colors[other] = Some(color);
+            }
+        }
+    }
+    colors
+        .into_iter()
+        .map(|color| color.expect("every arrow is colored with its pair"))
+        .collect()
+}
+
+/// The first color no arrow has yet; once all are taken, the least used (the first of
+/// those on a tie) among the arrows touching either end.
+fn new_color(ends: &[(Id, Id)], colors: &[Option<usize>], (from, to): (Id, Id)) -> usize {
+    let palette = 0..ARROW_COLORS.len();
+    if let Some(free) = palette
+        .clone()
+        .find(|color| !colors.contains(&Some(*color)))
+    {
+        return free;
+    }
+    let touching: Vec<usize> = ends
+        .iter()
+        .zip(colors)
+        .filter(|((start, end), _)| [start, end].iter().any(|id| **id == from || **id == to))
+        .filter_map(|(_, color)| *color)
+        .collect();
+    palette
+        .min_by_key(|color| touching.iter().filter(|used| *used == color).count())
+        .expect("the palette is not empty")
 }
 
 /// Arrow and pill color, and the arrowhead marker to match.
