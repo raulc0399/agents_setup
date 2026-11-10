@@ -1154,42 +1154,50 @@ button {
   fill: var(--lane);
 }
 
-.diagram-svg .prism-box {
-  --kind: var(--kind-text);
-}
-
-.diagram-svg .prism-box.prism-step {
-  --kind: var(--kind-step);
-}
-
-.diagram-svg .prism-box.prism-finding {
-  --kind: var(--kind-finding);
-}
-
-.diagram-svg .prism-box.prism-question {
-  --kind: var(--kind-question);
-}
-
+/* Boxes look like the list's cards (.card): surface, border, kind stripe and label. Kind
+   colors per rule, as for the arrows below: no token set on the group. */
 .diagram-svg .prism-box .prism-shape {
   fill: var(--surface);
-  stroke: var(--kind);
-  stroke-width: 1.5;
+  stroke: var(--border);
+  stroke-width: 1;
 }
 
 .diagram-svg .prism-box:hover .prism-shape {
-  stroke-width: 2.5;
+  stroke: var(--border-strong);
+  stroke-width: 2;
 }
 
-.diagram-svg .prism-box .prism-stripe {
-  fill: var(--kind);
+.diagram-svg .prism-box .prism-stripe,
+.diagram-svg .prism-box .prism-kind {
+  fill: var(--kind-text);
 }
 
-.diagram-svg .prism-name,
-.diagram-svg .prism-body {
+.diagram-svg .prism-box.prism-step .prism-stripe,
+.diagram-svg .prism-box.prism-step .prism-kind {
+  fill: var(--kind-step);
+}
+
+.diagram-svg .prism-box.prism-finding .prism-stripe,
+.diagram-svg .prism-box.prism-finding .prism-kind {
+  fill: var(--kind-finding);
+}
+
+.diagram-svg .prism-box.prism-question .prism-stripe,
+.diagram-svg .prism-box.prism-question .prism-kind {
+  fill: var(--kind-question);
+}
+
+.diagram-svg .prism-number {
+  fill: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.diagram-svg .prism-name {
   fill: var(--text);
 }
 
-.diagram-svg .prism-subtitle {
+.diagram-svg .prism-subtitle,
+.diagram-svg .prism-body {
   fill: var(--muted);
 }
 
@@ -1297,6 +1305,11 @@ button {
   fill: var(--selected-bg);
   stroke: var(--accent);
   stroke-width: 2.5;
+}
+
+.diagram-svg .prism-box.selected .prism-number {
+  fill: var(--accent);
+  font-weight: 600;
 }
 
 .diagram-svg .prism-arrow.selected .prism-line {

@@ -6,7 +6,7 @@ use crate::model::{Direction, Document, ElementKind, Id, single_line};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-pub const BOX_WIDTH: f32 = 220.0;
+pub const BOX_WIDTH: f32 = 300.0;
 const BOX_GAP_X: f32 = 48.0;
 const BOX_GAP_Y: f32 = 64.0;
 pub const LANE_PADDING: f32 = 24.0;
@@ -17,12 +17,37 @@ const LANE_GAP: f32 = 48.0;
 /// around it, for keeping pills and lines off it.
 const LANE_TITLE_CHAR_WIDTH: f32 = 8.5;
 const LANE_TITLE_PADDING: f32 = 20.0;
-const NAME_HEIGHT: f32 = 32.0;
-const SUBTITLE_HEIGHT: f32 = 52.0;
-const BODY_LINE_HEIGHT: f32 = 15.0;
-const BODY_LINE_CHARS: usize = 34;
+/// A box reads like a card of the app's list (`.card` in its `ui/styles.css`): the same
+/// padding, kind stripe, number column and font sizes, in world units, so that at 100% zoom
+/// both match. Line heights are the font size times 1.45, as there.
+const BOX_PADDING_Y: f32 = 8.0;
+const BOX_PADDING_RIGHT: f32 = 12.0;
+const BOX_RADIUS: f32 = 8.0;
+const STRIPE_X: f32 = 5.0;
+const STRIPE_Y: f32 = 7.0;
+const STRIPE_WIDTH: f32 = 3.0;
+/// The number is right-aligned in its column; kind, title and text start after it.
+const NUMBER_RIGHT: f32 = 33.0;
+const TEXT_X: f32 = 42.0;
+const NUMBER_SIZE: f32 = 13.0;
+const KIND_SIZE: f32 = 11.0;
+/// 0.04em, as the card's kind label.
+const KIND_LETTER_SPACING: f32 = 0.44;
+const TITLE_SIZE: f32 = 16.0;
+const TEXT_SIZE: f32 = 15.0;
+const HEAD_LINE_HEIGHT: f32 = 19.0;
+const TITLE_LINE_HEIGHT: f32 = 23.0;
+const TEXT_LINE_HEIGHT: f32 = 22.0;
+/// Where a text sits in its line: the baseline is this share of the font size below the
+/// middle of the line, which centers the capitals.
+const BASELINE_SHIFT: f32 = 0.35;
+/// Average character width per font size, generous so that clipped text stays in its box.
+const TITLE_CHAR_EM: f32 = 0.56;
+const TEXT_CHAR_EM: f32 = 0.52;
+const TEXT_WIDTH: f32 = BOX_WIDTH - TEXT_X - BOX_PADDING_RIGHT;
+const NAME_CHARS: usize = (TEXT_WIDTH / (TITLE_SIZE * TITLE_CHAR_EM)) as usize;
+const TEXT_CHARS: usize = (TEXT_WIDTH / (TEXT_SIZE * TEXT_CHAR_EM)) as usize;
 const BODY_MAX_LINES: usize = 8;
-const SUBTITLE_WORDS: usize = 5;
 const MAX_COLUMNS: usize = 4;
 const PILL_HEIGHT: f32 = 20.0;
 const PILL_CHAR_WIDTH: f32 = 6.6;
@@ -34,7 +59,7 @@ const GATE_HEIGHT: f32 = 18.0;
 const GATE_PADDING: f32 = 26.0;
 const MORE_PADDING: f32 = 20.0;
 const GATE_GAP: f32 = 6.0;
-/// How far a badge reaches down into its box: it stays clear of the box's name.
+/// How far a badge reaches down into its box: it stays clear of the kind label.
 const GATE_OVERLAP: f32 = 5.0;
 /// Badges share the right part of their box's top edge; arrows enter left of them.
 const GATE_ROOM: f32 = BOX_WIDTH * 0.75;
@@ -53,8 +78,6 @@ const RUN_MARGIN: f32 = 4.0;
 const PORT_INSET: f32 = 12.0;
 /// Where along a segment a pill may sit, tried in this order.
 const PILL_POSITIONS: [f32; 3] = [0.5, 0.25, 0.75];
-const NAME_CHARS: usize = 26;
-const SUBTITLE_CHARS: usize = 32;
 const ARROW_HIT_DISTANCE: f32 = 8.0;
 /// Pixels per world unit below which boxes show names only, and above which full text.
 const SUBTITLE_SCALE: f32 = 0.45;
@@ -79,8 +102,10 @@ const HEAD_FOCUS: &str = "prism-head-focus";
 
 const BACKGROUND: &str = "#101418";
 const BOX_FILL: &str = "#1a2027";
+const BOX_BORDER: &str = "#2e3440";
 const TEXT: &str = "#d8dde3";
 const DIM: &str = "#8b93a1";
+const FAINT: &str = "#737c8c";
 /// White, so that the focus differs from every kind and arrow color by more than hue.
 const FOCUS: &str = "#ffffff";
 const STEP: &str = "#4cc9f0";
@@ -165,6 +190,8 @@ struct Gate {
 
 struct Node {
     id: Id,
+    /// The number the list shows for the item.
+    number: usize,
     rect: WorldRect,
     name: String,
     subtitle: String,
@@ -207,15 +234,12 @@ fn kind_color(kind: &ElementKind) -> &'static str {
     }
 }
 
+/// The item's text on one line, as the card's excerpt flows it, clipped to the box.
 fn subtitle(body: &str) -> String {
-    body.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .split_whitespace()
-        .take(SUBTITLE_WORDS)
-        .collect::<Vec<_>>()
-        .join(" ")
+    clip(
+        &body.split_whitespace().collect::<Vec<_>>().join(" "),
+        TEXT_CHARS,
+    )
 }
 
 fn wrap_words(text: &str, chars: usize, max_lines: usize) -> Vec<String> {
@@ -241,12 +265,22 @@ fn wrap_words(text: &str, chars: usize, max_lines: usize) -> Vec<String> {
     lines
 }
 
+/// Number and kind, the title, then the lines of text the detail shows.
 fn box_height(detail: Detail, body_lines: usize) -> f32 {
-    match detail {
-        Detail::Names => NAME_HEIGHT,
-        Detail::Subtitles => SUBTITLE_HEIGHT,
-        Detail::Full => NAME_HEIGHT + body_lines as f32 * BODY_LINE_HEIGHT + 14.0,
-    }
+    let text_lines = match detail {
+        Detail::Names => 0,
+        Detail::Subtitles => 1,
+        Detail::Full => body_lines,
+    };
+    BOX_PADDING_Y * 2.0
+        + HEAD_LINE_HEIGHT
+        + TITLE_LINE_HEIGHT
+        + text_lines as f32 * TEXT_LINE_HEIGHT
+}
+
+/// The baseline of a text of `size` in the line that starts at `top`.
+fn baseline(top: f32, line_height: f32, size: f32) -> f32 {
+    top + line_height / 2.0 + size * BASELINE_SHIFT
 }
 
 impl GraphLayout {
@@ -264,6 +298,13 @@ impl GraphLayout {
             items
         };
         let shown: BTreeSet<Id> = elements.iter().map(|item| item.id).collect();
+        // The list (`rows` in the app's `ui/js/rows.js`) shows the visible elements first, in
+        // this order, numbered from 1; badges keep their number.
+        let numbers: BTreeMap<Id, usize> = elements
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (item.id, index + 1))
+            .collect();
         let relationships: Vec<_> = document
             .relationships
             .values()
@@ -385,7 +426,7 @@ impl GraphLayout {
             for (position, id) in members.iter().enumerate() {
                 let element = &document.elements[id];
                 let body = if detail == Detail::Full {
-                    wrap_words(&element.body, BODY_LINE_CHARS, BODY_MAX_LINES)
+                    wrap_words(&element.body, TEXT_CHARS, BODY_MAX_LINES)
                 } else {
                     Vec::new()
                 };
@@ -406,9 +447,10 @@ impl GraphLayout {
                 lane_of.insert(*id, index);
                 layout.nodes.push(Node {
                     id: *id,
+                    number: numbers[id],
                     rect,
                     name: single_line(&element.title),
-                    subtitle: single_line(&subtitle(&element.body)),
+                    subtitle: subtitle(&single_line(&element.body)),
                     body,
                     kind: element.kind.clone(),
                     color: kind_color(&element.kind),
@@ -689,7 +731,7 @@ impl GraphLayout {
         for node in &self.nodes {
             let r = node.rect;
             let focused = focus == Some(node.id);
-            let stroke = if focused { FOCUS } else { node.color };
+            let stroke = if focused { FOCUS } else { BOX_BORDER };
             let fill = if selected.contains(&node.id) {
                 "#22303a"
             } else {
@@ -704,39 +746,58 @@ impl GraphLayout {
             );
             let _ = write!(
                 svg,
-                r#"<rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="6" fill="{fill}" stroke="{stroke}" stroke-width="{}"/><rect class="prism-stripe" x="{}" y="{}" width="5" height="{}" rx="2" fill="{}"/>"#,
+                r#"<rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="{BOX_RADIUS}" fill="{fill}" stroke="{stroke}" stroke-width="{}"/><rect class="prism-stripe" x="{}" y="{}" width="{STRIPE_WIDTH}" height="{}" rx="{}" fill="{}"/>"#,
                 r.x,
                 r.y,
                 r.width,
                 r.height,
-                if focused { 3.0 } else { 1.5 },
-                r.x,
-                r.y,
-                r.height,
+                if focused { 3.0 } else { 1.0 },
+                r.x + STRIPE_X,
+                r.y + STRIPE_Y,
+                r.height - STRIPE_Y * 2.0,
+                STRIPE_WIDTH / 2.0,
                 node.color
             );
+            let head = r.y + BOX_PADDING_Y;
             let _ = write!(
                 svg,
-                r#"<text class="prism-name" x="{}" y="{}" fill="{TEXT}" font-weight="700" font-size="14">{}</text>"#,
-                r.x + 14.0,
-                r.y + 21.0,
+                r#"<text class="prism-number" x="{}" y="{}" text-anchor="end" fill="{FAINT}" font-size="{NUMBER_SIZE}">{}</text><text class="prism-kind" x="{}" y="{}" fill="{}" font-size="{KIND_SIZE}" font-weight="650" letter-spacing="{KIND_LETTER_SPACING}">{}</text>"#,
+                r.x + NUMBER_RIGHT,
+                baseline(head, HEAD_LINE_HEIGHT, NUMBER_SIZE),
+                node.number,
+                r.x + TEXT_X,
+                baseline(head, HEAD_LINE_HEIGHT, KIND_SIZE),
+                node.color,
+                kind_label(&node.kind).to_uppercase()
+            );
+            let title = head + HEAD_LINE_HEIGHT;
+            let _ = write!(
+                svg,
+                r#"<text class="prism-name" x="{}" y="{}" fill="{TEXT}" font-weight="600" font-size="{TITLE_SIZE}">{}</text>"#,
+                r.x + TEXT_X,
+                baseline(title, TITLE_LINE_HEIGHT, TITLE_SIZE),
                 escape(&clip(&node.name, NAME_CHARS))
             );
+            let text = title + TITLE_LINE_HEIGHT;
             if self.detail == Detail::Subtitles && !node.subtitle.is_empty() {
                 let _ = write!(
                     svg,
-                    r#"<text class="prism-subtitle" x="{}" y="{}" fill="{DIM}" font-size="12">{}</text>"#,
-                    r.x + 14.0,
-                    r.y + 39.0,
-                    escape(&clip(&node.subtitle, SUBTITLE_CHARS))
+                    r#"<text class="prism-subtitle" x="{}" y="{}" fill="{DIM}" font-size="{TEXT_SIZE}">{}</text>"#,
+                    r.x + TEXT_X,
+                    baseline(text, TEXT_LINE_HEIGHT, TEXT_SIZE),
+                    escape(&node.subtitle)
                 );
             }
             for (index, line) in node.body.iter().enumerate() {
                 let _ = write!(
                     svg,
-                    r#"<text class="prism-body" x="{}" y="{}" fill="{TEXT}" font-size="12">{}</text>"#,
-                    r.x + 14.0,
-                    r.y + NAME_HEIGHT + 10.0 + index as f32 * BODY_LINE_HEIGHT,
+                    r#"<text class="prism-body" x="{}" y="{}" fill="{DIM}" font-size="{TEXT_SIZE}">{}</text>"#,
+                    r.x + TEXT_X,
+                    baseline(
+                        text + index as f32 * TEXT_LINE_HEIGHT,
+                        TEXT_LINE_HEIGHT,
+                        TEXT_SIZE
+                    ),
                     escape(line)
                 );
             }

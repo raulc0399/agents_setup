@@ -782,3 +782,100 @@ fn arrows_leaving_one_box_differ_while_a_color_is_free() {
         .collect();
     assert_eq!(leaving.len(), ARROW_COLORS.len());
 }
+
+/// The numbers the list shows (`rows` in app/ui/js/rows.js): of the items that are not
+/// archived and are shown, elements first, by `order`, then by ID as a string, numbered
+/// from 1; links and groups follow them.
+fn list_numbers(document: &Document, visible: &BTreeSet<Id>) -> BTreeMap<Id, usize> {
+    let mut elements: Vec<&Element> = document
+        .elements
+        .values()
+        .filter(|item| !item.archived && visible.contains(&item.id))
+        .collect();
+    elements.sort_by_key(|item| (item.order, item.id.to_string()));
+    elements
+        .iter()
+        .enumerate()
+        .map(|(index, item)| (item.id, index + 1))
+        .collect()
+}
+
+/// The number each box shows.
+fn box_numbers(svg: &str) -> BTreeMap<Id, usize> {
+    let (groups, _) = split(svg);
+    groups
+        .iter()
+        .filter(|group| group.kind == KIND_BOX)
+        .map(|group| {
+            let text = group.inner.split(r#"class="prism-number""#).nth(1).unwrap();
+            let number = text.split('>').nth(1).unwrap().split('<').next().unwrap();
+            (group.id, number.parse().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn boxes_show_the_number_the_list_shows() {
+    // Box 4 comes first by order, 2 and 3 tie on it, 1 is hidden, 5 archived, and the
+    // finding is a badge on 3 that keeps its number.
+    let (mut document, mut visible) = steps(5);
+    for (id, order) in [(4, 0), (2, 2), (3, 2)] {
+        document.elements.get_mut(&Id::from_u128(id)).unwrap().order = order;
+    }
+    visible.remove(&Id::from_u128(1));
+    document
+        .elements
+        .get_mut(&Id::from_u128(5))
+        .unwrap()
+        .archived = true;
+    let (key, finding) = element(50, 1, "A finding", ElementKind::Finding);
+    document.elements.insert(key, finding);
+    visible.insert(key);
+    let (key, relationship) = link(60, 50, 3, "blocks", false);
+    document.relationships.insert(key, relationship);
+    visible.insert(key);
+
+    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+    let shown = box_numbers(&svg);
+    let mut expected = list_numbers(&document, &visible);
+    expected.remove(&Id::from_u128(50));
+    assert_eq!(shown, expected);
+    assert_eq!(
+        shown,
+        BTreeMap::from([
+            (Id::from_u128(4), 1),
+            (Id::from_u128(2), 3),
+            (Id::from_u128(3), 4)
+        ])
+    );
+}
+
+#[test]
+fn a_box_shows_number_kind_title_and_one_line_of_text() {
+    let (mut document, visible) = fixture();
+    document
+        .elements
+        .get_mut(&Id::from_u128(STEP_A))
+        .unwrap()
+        .body =
+        "First line of the text\nand a second line that runs on past the width of the box".into();
+    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+    let (groups, _) = split(&svg);
+    let inner = &groups
+        .iter()
+        .find(|group| group.kind == KIND_BOX && group.id == Id::from_u128(STEP_A))
+        .unwrap()
+        .inner;
+    let texts: Vec<&str> = inner
+        .split("<text ")
+        .skip(1)
+        .map(|text| text.split('>').nth(1).unwrap().split('<').next().unwrap())
+        .collect();
+    assert_eq!(texts[..3], ["1", "STEP", "Collect"]);
+    assert_eq!(texts.len(), 4, "one line of text");
+    assert!(
+        texts[3].starts_with("First line of the text and") && texts[3].ends_with('…'),
+        "the text flows onto one line, clipped: {}",
+        texts[3]
+    );
+}

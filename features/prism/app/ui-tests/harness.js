@@ -288,6 +288,7 @@ async function diagramChecks(backend, app) {
 
   // V switches the document to its diagram; the choice is view state.
   expect(root.querySelector('.cards'), 'the document starts in the list, as chosen before');
+  const listNumbers = new Map([...root.querySelectorAll('.card')].map((card) => [card.dataset.id, card.querySelector('.number').textContent]));
   key('v');
   expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'V shows the diagram');
   expect(root.querySelector('.segmented [aria-pressed="true"]')?.textContent === 'Diagram', 'the switch shows the diagram');
@@ -299,7 +300,20 @@ async function diagramChecks(backend, app) {
   const pills = [...svg().querySelectorAll('[data-kind="pill"] .prism-label')].map((label) => label.textContent);
   expect(pills.every((label, index) => label.startsWith(String(index + 1))), `pills are numbered: ${pills}`);
   expect(svg().querySelectorAll('.prism-arrow.prism-manual [stroke-dasharray]').length === 1, 'the manual arrow is dashed');
-  expect(shape('box', item(1)).querySelector('.prism-subtitle')?.textContent === 'Sensor app records a reading', 'a subtitle of five words');
+  // Boxes read like cards: number, kind, title and one clipped line of text, all inside.
+  const boxes = [...svg().querySelectorAll('[data-kind="box"]')];
+  const boxNumbers = boxes.map((box) => [box.querySelector('.prism-number')?.textContent, listNumbers.get(box.dataset.id)]);
+  expect(boxNumbers.every(([shown, listed]) => shown === listed), `boxes show the list's numbers: ${JSON.stringify(boxNumbers)}`);
+  expect(shape('box', item(1)).querySelector('.prism-kind')?.textContent === 'STEP', 'the kind label in capitals');
+  expect(shape('box', item(1)).querySelector('.prism-subtitle')?.textContent === 'Sensor app records a reading e…', 'one clipped line of text');
+  const overflowing = boxes.filter((box) => {
+    const outline = box.querySelector('.prism-shape').getBBox();
+    return [...box.querySelectorAll('text')].some((text) => {
+      const bounds = text.getBBox();
+      return bounds.x < outline.x || bounds.x + bounds.width > outline.x + outline.width || bounds.y < outline.y || bounds.y + bounds.height > outline.y + outline.height;
+    });
+  });
+  expect(overflowing.length === 0, `box texts stay inside their box: ${overflowing.map((box) => box.dataset.id)}`);
   const paint = (node, property) => getComputedStyle(node).getPropertyValue(property);
   expect(paint(shape('box', item(1)).querySelector('.prism-shape'), 'fill') === 'rgb(255, 255, 255)', 'boxes take the surface token');
   expect(paint(shape('gate', item(7)).querySelector('.prism-shape'), 'fill') === 'rgb(232, 160, 32)', 'badges take the amber token');
