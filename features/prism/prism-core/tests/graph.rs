@@ -38,6 +38,7 @@ fn link(id: u128, from: u128, to: u128, label: &str, manual: bool) -> (Id, Relat
         label: label.into(),
         direction: Direction::Directed,
         manual,
+        order: None,
         semantic_revision: REVISION,
         accepted_revision: None,
         archived: false,
@@ -51,6 +52,7 @@ fn fixture() -> (Document, BTreeSet<Id>) {
         id: Id::from_u128(LANE),
         title: "Device".into(),
         members: [STEP_A, STEP_B].into_iter().map(Id::from_u128).collect(),
+        order: None,
         semantic_revision: REVISION,
         accepted_revision: None,
         archived: false,
@@ -154,33 +156,76 @@ fn only_visible_content_is_laid_out() {
 }
 
 #[test]
-fn archived_content_is_left_out_even_when_visible() {
+fn dropped_content_keeps_its_place_and_number_and_is_drawn_faded() {
     let (mut document, visible) = fixture();
+    let before = GraphLayout::new(&document, &visible, Detail::Names);
+    let boxes = [STEP_A, STEP_B].map(|id| before.rect_of(Id::from_u128(id)));
+
+    // A dropped arrow stays, faded and dashed lightly.
     document
         .relationships
         .get_mut(&Id::from_u128(FLOW))
         .unwrap()
         .archived = true;
     let layout = GraphLayout::new(&document, &visible, Detail::Names);
-    assert!(layout.rect_of(Id::from_u128(STEP_B)).is_some());
-    assert_eq!(layout.rect_of(Id::from_u128(FLOW)), None);
+    assert_eq!(
+        layout.rect_of(Id::from_u128(FLOW)),
+        before.rect_of(Id::from_u128(FLOW))
+    );
+    let svg = layout.svg(None, &BTreeSet::new());
+    assert!(svg.contains(r#"stroke-dasharray="2 4""#));
+    assert!(svg.contains(r#"aria-label="Arrow 1 hands over: Collect to Store (dropped)""#));
 
+    // A dropped box keeps its place and number, with its arrow and the dropped label.
     document
         .elements
         .get_mut(&Id::from_u128(STEP_B))
         .unwrap()
         .archived = true;
-    document
-        .relationships
-        .get_mut(&Id::from_u128(FLOW))
-        .unwrap()
-        .archived = false;
     let layout = GraphLayout::new(&document, &visible, Detail::Names);
-    assert_eq!(layout.rect_of(Id::from_u128(STEP_B)), None);
     assert_eq!(
-        layout.rect_of(Id::from_u128(FLOW)),
-        None,
-        "an arrow to an archived box is left out"
+        [STEP_A, STEP_B].map(|id| layout.rect_of(Id::from_u128(id))),
+        boxes
+    );
+    let svg = layout.svg(None, &BTreeSet::new());
+    let (groups, _) = split(&svg);
+    let dropped: Vec<_> = groups
+        .iter()
+        .filter(|group| group.open.contains("prism-dropped"))
+        .map(|group| (group.kind.as_str(), group.id))
+        .collect();
+    assert_eq!(
+        dropped,
+        vec![
+            (KIND_ARROW, Id::from_u128(FLOW)),
+            (KIND_BOX, Id::from_u128(STEP_B)),
+            (KIND_PILL, Id::from_u128(FLOW))
+        ]
+    );
+    let store = groups
+        .iter()
+        .find(|group| group.kind == KIND_BOX && group.id == Id::from_u128(STEP_B))
+        .unwrap();
+    assert!(store.open.contains(r#"opacity="0.45""#));
+    assert!(store.open.contains(r#"aria-label="Step: Store (dropped)""#));
+    assert!(store.inner.contains(">DROPPED<"));
+    assert_eq!(box_numbers_as_listed(&svg, &document, &visible).len(), 2);
+
+    // A dropped group keeps its lane, named dropped.
+    document
+        .groups
+        .get_mut(&Id::from_u128(LANE))
+        .unwrap()
+        .archived = true;
+    let layout = GraphLayout::new(&document, &visible, Detail::Names);
+    assert_eq!(
+        [STEP_A, STEP_B].map(|id| layout.rect_of(Id::from_u128(id))),
+        boxes
+    );
+    assert!(
+        layout
+            .svg(None, &BTreeSet::new())
+            .contains(">DEVICE · DROPPED<")
     );
 }
 
@@ -494,6 +539,7 @@ fn three_lanes() -> (Document, BTreeSet<Id>) {
             id: Id::from_u128(id),
             title: title.into(),
             members: members.into_iter().map(Id::from_u128).collect(),
+            order: None,
             semantic_revision: REVISION,
             accepted_revision: None,
             archived: false,
@@ -783,21 +829,69 @@ fn arrows_leaving_one_box_differ_while_a_color_is_free() {
     assert_eq!(leaving.len(), ARROW_COLORS.len());
 }
 
-/// The numbers the list shows (`rows` in app/ui/js/rows.js): of the items that are not
-/// archived and are shown, elements first, by `order`, then by ID as a string, numbered
-/// from 1; links and groups follow them.
+/// The numbers the list shows (`rows` in app/ui/js/rows.js), written as it does: every record
+/// shown, archived ones included, by position, then elements before links before groups,
+/// then by ID as a string, numbered from 1. A link or group without a stored position gets
+/// one after the highest stored position, links before groups, each by ID as a string.
 fn list_numbers(document: &Document, visible: &BTreeSet<Id>) -> BTreeMap<Id, usize> {
-    let mut elements: Vec<&Element> = document
+    let stored = document
         .elements
         .values()
-        .filter(|item| !item.archived && visible.contains(&item.id))
+        .map(|item| item.order)
+        .chain(
+            document
+                .relationships
+                .values()
+                .filter_map(|item| item.order),
+        )
+        .chain(document.groups.values().filter_map(|item| item.order))
+        .max();
+    let mut next = stored.map_or(0, |highest| highest + 1);
+    let mut records: Vec<(u64, u8, String, Id)> = document
+        .elements
+        .values()
+        .map(|item| (item.order, 0, item.id.to_string(), item.id))
         .collect();
-    elements.sort_by_key(|item| (item.order, item.id.to_string()));
-    elements
-        .iter()
+    let mut links: Vec<_> = document.relationships.values().collect();
+    links.sort_by_key(|item| item.id.to_string());
+    for item in links {
+        let position = item.order.unwrap_or_else(|| {
+            next += 1;
+            next - 1
+        });
+        records.push((position, 1, item.id.to_string(), item.id));
+    }
+    let mut groups: Vec<_> = document.groups.values().collect();
+    groups.sort_by_key(|item| item.id.to_string());
+    for item in groups {
+        let position = item.order.unwrap_or_else(|| {
+            next += 1;
+            next - 1
+        });
+        records.push((position, 2, item.id.to_string(), item.id));
+    }
+    records.sort();
+    records
+        .into_iter()
+        .map(|(_, _, _, id)| id)
+        .filter(|id| visible.contains(id))
         .enumerate()
-        .map(|(index, item)| (item.id, index + 1))
+        .map(|(index, id)| (id, index + 1))
         .collect()
+}
+
+/// The number each box shows, checked against the number the list shows for it.
+fn box_numbers_as_listed(
+    svg: &str,
+    document: &Document,
+    visible: &BTreeSet<Id>,
+) -> BTreeMap<Id, usize> {
+    let shown = box_numbers(svg);
+    let listed = list_numbers(document, visible);
+    for (id, number) in &shown {
+        assert_eq!(listed.get(id), Some(number), "box {id}");
+    }
+    shown
 }
 
 /// The number each box shows.
@@ -816,8 +910,8 @@ fn box_numbers(svg: &str) -> BTreeMap<Id, usize> {
 
 #[test]
 fn boxes_show_the_number_the_list_shows() {
-    // Box 4 comes first by order, 2 and 3 tie on it, 1 is hidden, 5 archived, and the
-    // finding is a badge on 3 that keeps its number.
+    // Box 4 comes first by order, 2 and 3 tie on it, 1 is hidden, 5 archived keeps its
+    // number, and the finding is a badge on 3 that keeps its number.
     let (mut document, mut visible) = steps(5);
     for (id, order) in [(4, 0), (2, 2), (3, 2)] {
         document.elements.get_mut(&Id::from_u128(id)).unwrap().order = order;
@@ -836,18 +930,71 @@ fn boxes_show_the_number_the_list_shows() {
     visible.insert(key);
 
     let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
-    let shown = box_numbers(&svg);
-    let mut expected = list_numbers(&document, &visible);
-    expected.remove(&Id::from_u128(50));
-    assert_eq!(shown, expected);
+    let shown = box_numbers_as_listed(&svg, &document, &visible);
     assert_eq!(
         shown,
         BTreeMap::from([
             (Id::from_u128(4), 1),
             (Id::from_u128(2), 3),
+            (Id::from_u128(3), 4),
+            (Id::from_u128(5), 5)
+        ])
+    );
+}
+
+#[test]
+fn every_record_is_numbered_in_publication_order_as_the_list_numbers_it() {
+    // Elements at 0, 2 and 4 with a link published at 1 between them; a link and a group
+    // stored before they had a position follow the highest stored one, link first.
+    let (mut document, visible) = steps(3);
+    for (id, order) in [(1, 0), (2, 2), (3, 4)] {
+        document.elements.get_mut(&Id::from_u128(id)).unwrap().order = order;
+    }
+    let mut visible = visible;
+    let (key, mut between) = link(72, 1, 2, "first", false);
+    between.order = Some(1);
+    document.relationships.insert(key, between);
+    visible.insert(key);
+    let (key, legacy) = link(71, 2, 3, "second", false);
+    document.relationships.insert(key, legacy);
+    visible.insert(key);
+    let group = Group {
+        id: Id::from_u128(80),
+        title: "Lane".into(),
+        members: [1, 2].into_iter().map(Id::from_u128).collect(),
+        order: None,
+        semantic_revision: REVISION,
+        accepted_revision: None,
+        archived: false,
+    };
+    visible.insert(group.id);
+    document.groups.insert(group.id, group);
+
+    assert_eq!(
+        document.list_order(),
+        [1, 72, 2, 3, 71, 80].map(Id::from_u128).to_vec()
+    );
+    let listed = list_numbers(&document, &visible);
+    assert_eq!(
+        document
+            .list_order()
+            .iter()
+            .map(|id| listed[id])
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    let svg = GraphLayout::new(&document, &visible, Detail::Names).svg(None, &BTreeSet::new());
+    assert_eq!(
+        box_numbers_as_listed(&svg, &document, &visible),
+        BTreeMap::from([
+            (Id::from_u128(1), 1),
+            (Id::from_u128(2), 3),
             (Id::from_u128(3), 4)
         ])
     );
+    // Pills count the arrows in that order too, not by ID.
+    assert!(svg.contains(r#"aria-label="Arrow 1 first: Step 1 to Step 2""#));
+    assert!(svg.contains(r#"aria-label="Arrow 2 second: Step 2 to Step 3""#));
 }
 
 #[test]

@@ -21,11 +21,16 @@ const QUESTION_STATES = {
 /** An answer recorded by the agent wins over the delivery outcome. */
 const ANSWERED = { short: 'answered', label: 'Answered', tone: 'answered' };
 export const ACCEPT_NOTE = 'Acceptance is feedback for the agent, never permission to run tools.';
+/** Class and badge of a dropped item, which keeps its card. */
+const DROPPED = 'dropped';
+/** Why Ask, Accept and Drop refuse a dropped item; it stays in the list until U undoes the drop. */
+export const DROPPED_NOTE = 'Dropped items cannot be asked about, accepted or dropped again; U undoes the drop.';
 
 /**
  * The list view of one tab: a compact card per row; the tab's side pane shows the focused
- * one with its actions and, when asking, the question editor. Cards are kept per item ID and
- * rebuilt only when what they show changed, so updates do not shift the layout.
+ * one with its actions. A dropped item keeps its card and number, greyed out with a
+ * "dropped" badge. Cards are kept per item ID and rebuilt only when what they show changed,
+ * so updates do not shift the layout.
  *
  * `actions`: onFocus(id), onToggle(id).
  */
@@ -80,16 +85,16 @@ export class ListView {
   }
 
   fill(card, row, { focused, selected, questions }) {
-    card.className = `card kind-${row.kind}${focused ? ' focused' : ''}${selected ? ' selected' : ''}`;
+    card.className = `card kind-${row.kind}${row.dropped ? ` ${DROPPED}` : ''}${focused ? ' focused' : ''}${selected ? ' selected' : ''}`;
     if (focused) {
       card.setAttribute('aria-current', 'true');
     } else {
       card.removeAttribute('aria-current');
     }
-    card.setAttribute('aria-label', `${selected ? 'Selected: ' : ''}${row.number} ${row.kindLabel} ${row.title}`);
+    card.setAttribute('aria-label', `${selected ? 'Selected: ' : ''}${row.number} ${row.kindLabel} ${row.title}${row.dropped ? ` (${DROPPED})` : ''}`);
     card.dataset.id = row.id;
 
-    const badges = acceptanceBadges(row);
+    const badges = stateBadges(row);
     if (row.changed) {
       badges.push(h('span', { class: 'badge changed', text: 'new' }));
     }
@@ -115,9 +120,12 @@ export class ListView {
   }
 }
 
-/** "accepted" or "changed since accepted", as cards and the detail panel show them. */
-export function acceptanceBadges(row) {
+/** "dropped", "accepted" or "changed since accepted", as cards and the detail panel show them. */
+export function stateBadges(row) {
   const badges = [];
+  if (row.dropped) {
+    badges.push(h('span', { class: `badge ${DROPPED}`, title: `Dropped for everyone. ${DROPPED_NOTE}`, text: DROPPED }));
+  }
   if (row.isAccepted) {
     badges.push(h('span', { class: 'badge accepted', title: `Accepted. ${ACCEPT_NOTE}`, text: 'accepted' }));
   }

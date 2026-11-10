@@ -110,19 +110,24 @@ Ask the CLI to publish a list or diagram. It supplies stable content IDs; revisi
 reuse those IDs. Accepting content records feedback on that content revision,
 not permission for implementation. Semantic edits make earlier acceptance stale.
 Archive affects every view; hide affects the current view. Undo rejects edits
-that conflict with later changes instead of overwriting them. Elements appear
-in publication order; reordering them in a later publication is not a semantic
-edit.
+that conflict with later changes instead of overwriting them. Every element,
+relationship and group keeps the position of its first publication: what a later
+publication adds goes after the last item and nothing existing moves, so neither a
+publication nor a drop changes an item's number (hide and the filter number only
+what the tab shows). Documents stored before keep the numbering they showed.
 
 In the app, the list shows one card per item; the focused card expands with its
-text, its questions and the actions ask, hide and drop. **Ask** shares the focused
-item, or the text selected inside it, as a quoted reference. With Claude Code,
-the native mod places it in the CLI prompt box within a second as
+text, its questions and the actions ask, accept and drop. **Ask** shares the focused
+item, or the text selected inside it, as a quoted reference, right away. With
+Claude Code, the native mod places it in the CLI prompt box within a second as
 `Item 2: <title>` plus `> quoted lines` and a `[prism:<request id>]` marker; you
-type your question after it and press Enter there. Claude records its reply
-with `mcp__prism__answer`, and the card shows it. Codex has no prompt box
-access: ask it to retrieve the shared question with `prism_questions`. Share does
-not start a model turn or prove an answer began. **Drop** is the shared archive;
+type your question after it and press Enter there. Answers are kept in the
+conversation and saved to the md files when relevant; they are not recorded in
+the app, which changes only when the agent publishes the revised item. Codex has no
+prompt box access: ask it to retrieve the shared question with `prism_questions`.
+Share does not start a model turn or prove an answer began. **Drop** is the
+shared archive: a dropped item stays in its place, greyed with a `dropped` badge,
+so numbers never shift; it cannot be asked about or accepted, and `U` undoes it.
 **hide** and the filter only affect that tab. **Close** (× on a document or `W`)
 is shared too: the document leaves the strip in every window and the agent's
 `inspect` marks it; `Closed (N)` reopens it, `U` right after the close undoes it,

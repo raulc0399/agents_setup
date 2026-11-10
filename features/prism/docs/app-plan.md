@@ -87,8 +87,11 @@ the Linux container.
 
 1. **Publish**: agent tool → bridge → store → `update` to the app → tab redraws.
 2. **Ask**: select text or an item in the app → `ask` to the bridge → shared question →
-   mod poll → prompt box → user sends → `answer` tool → bridge → `update` → shown on the item.
-3. **Drop / undo**: app → bridge → store → `update` to every connected app view.
+   mod poll → the reference is placed in the prompt box → user types the question and
+   sends → the agent answers in the chat. Answers are not recorded in Prism for now; the
+   app changes only when the agent publishes the revised item.
+3. **Drop / undo**: app → bridge → store → `update` to every connected app view; a dropped
+   item stays visible in its place, greyed, with its number.
 4. **Session end**: bridge sends `closed`; the tab stays, marked ended, until the user closes it.
 
 ## Batches
@@ -135,6 +138,8 @@ the Linux container.
 6. **Ask, answer, drop, undo in the app** **[done]**
    6.1 Native text selection inside cards and the side panel; `Ask` sends item + quote.
    6.2 Question state on the item: shared, in prompt box, answered, with the answer text.
+       (2026-11-10: answers are not recorded for now, so "answered" shows only for older
+       questions; Ask places the reference in the prompt box without an editor.)
    6.3 Drop and undo; filter and hide stay local to the tab.
    6.4 Accept and multi-selection (Space), as the terminal list view has them today; needed
        before batch 7 deletes it (found in the batch 4 review).

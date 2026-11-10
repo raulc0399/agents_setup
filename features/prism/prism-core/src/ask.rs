@@ -1,5 +1,5 @@
-//! Text of an `ask`: which items it is about, the quoted content and the user's question. The
-//! CLI prompt box receives this text as it is.
+//! Text of an `ask`: which items it is about and the quoted content. The CLI prompt box
+//! receives this text as it is, and the user types the question there.
 use crate::model::{single_line, terminal_safe};
 use serde::{Deserialize, Serialize};
 
@@ -15,12 +15,10 @@ pub struct AskItem {
     pub quote: String,
 }
 
-/// Per item `Item <number>: <title>`, then every quoted line prefixed with `> `; then, when the
-/// user typed one, the question after a blank line. Items follow each other without a blank
-/// line, so the first blank line always starts the question. One item gives the terminal
-/// list's text. As there, the title is one line and terminal controls in the content are
-/// escaped, so pasted text cannot drive the CLI.
-pub fn ask_text(items: &[AskItem], question: &str) -> String {
+/// Per item `Item <number>: <title>`, then every quoted line prefixed with `> `, the items one
+/// after the other. The title is one line and terminal controls in the content are escaped,
+/// so pasted text cannot drive the CLI.
+pub fn ask_text(items: &[AskItem]) -> String {
     let mut lines = Vec::new();
     for item in items {
         lines.push(format!(
@@ -32,13 +30,7 @@ pub fn ask_text(items: &[AskItem], question: &str) -> String {
             lines.push(format!("> {line}"));
         }
     }
-    let mut text = lines.join("\n");
-
-    let question = terminal_safe(question.trim());
-    if !question.is_empty() {
-        text.push_str(&format!("\n\n{question}"));
-    }
-    text
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -54,53 +46,33 @@ mod tests {
     }
 
     #[test]
-    fn quotes_every_line_and_appends_the_question() {
-        let text = ask_text(
-            &[item(3, "Collect", "Reads the device\nevery second")],
-            " Why poll? \n",
-        );
-        assert_eq!(
-            text,
-            "Item 3: Collect\n> Reads the device\n> every second\n\nWhy poll?"
-        );
+    fn quotes_every_line() {
+        let text = ask_text(&[item(3, "Collect", "Reads the device\nevery second")]);
+        assert_eq!(text, "Item 3: Collect\n> Reads the device\n> every second");
     }
 
     #[test]
     fn escapes_terminal_controls_and_keeps_the_title_on_one_line() {
-        let text = ask_text(
-            &[item(
-                2,
-                "Two\nlines\tand\x1b[31m",
-                "red \x1b[31mtext\nnext\u{7}",
-            )],
-            "ok\x08?",
-        );
+        let text = ask_text(&[item(
+            2,
+            "Two\nlines\tand\x1b[31m",
+            "red \x1b[31mtext\nnext\u{7}",
+        )]);
         assert_eq!(
             text,
-            "Item 2: Two lines and\\u{1b}[31m\n> red \\u{1b}[31mtext\n> next\\u{7}\n\nok\\u{8}?"
+            "Item 2: Two lines and\\u{1b}[31m\n> red \\u{1b}[31mtext\n> next\\u{7}"
         );
     }
 
     #[test]
-    fn without_a_question_shares_the_reference_only() {
-        assert_eq!(
-            ask_text(&[item(1, "Collect", "Reads the device")], "  "),
-            "Item 1: Collect\n> Reads the device"
-        );
-    }
-
-    #[test]
-    fn several_items_follow_each_other_before_the_question() {
-        let text = ask_text(
-            &[
-                item(2, "Collect", "Reads the device"),
-                item(5, "Store", "Writes a batch\n\nonce a minute"),
-            ],
-            "How do these relate?",
-        );
+    fn several_items_follow_each_other() {
+        let text = ask_text(&[
+            item(2, "Collect", "Reads the device"),
+            item(5, "Store", "Writes a batch\n\nonce a minute"),
+        ]);
         assert_eq!(
             text,
-            "Item 2: Collect\n> Reads the device\nItem 5: Store\n> Writes a batch\n> \n> once a minute\n\nHow do these relate?"
+            "Item 2: Collect\n> Reads the device\nItem 5: Store\n> Writes a batch\n> \n> once a minute"
         );
     }
 }

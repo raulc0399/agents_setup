@@ -396,7 +396,6 @@ fn commands_get_fresh_ids_and_replies_are_matched() {
             title: "First".into(),
             quote: "First body".into(),
         }],
-        question: "Why?".into(),
     };
     let first = app.host.send(&key(), ask).unwrap();
     let second = app.host.send(&key(), archive()).unwrap();
@@ -409,7 +408,7 @@ fn commands_get_fresh_ids_and_replies_are_matched() {
         AppMessage::Ask {
             id: first,
             selection: selection(),
-            text: "Item 1: First\n> First body\n\nWhy?".into(),
+            text: "Item 1: First\n> First body".into(),
         }
     );
     assert!(matches!(bridge.receive(), AppMessage::Action { id, .. } if id == second));
@@ -461,7 +460,6 @@ fn an_ask_about_several_items_names_each_of_them() {
             {"number": 2, "title": "Second", "quote": "Second body"},
             {"number": 1, "title": "First", "quote": "First"},
         ],
-        "question": "How do they relate?",
     }))
     .unwrap();
     let id = app.host.send(&key(), ask).unwrap();
@@ -474,8 +472,7 @@ fn an_ask_about_several_items_names_each_of_them() {
                 revision: 1,
                 ids: vec![Id::from_u128(101), Id::from_u128(100)],
             },
-            text: "Item 2: Second\n> Second body\nItem 1: First\n> First\n\nHow do they relate?"
-                .into(),
+            text: "Item 2: Second\n> Second body\nItem 1: First\n> First".into(),
         }
     );
 }
@@ -525,7 +522,6 @@ fn an_ask_over_the_text_limit_is_refused_before_it_is_sent() {
             title: "First".into(),
             quote: "x".repeat(MAX_TEXT_BYTES),
         }],
-        question: String::new(),
     };
     let error = app.host.send(&key(), ask).unwrap_err();
     assert!(

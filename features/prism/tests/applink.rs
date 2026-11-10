@@ -708,7 +708,8 @@ fn commands_apply_through_the_shared_actions() {
     let (document, element) = fixture.publish("Commands");
     let (mut socket, ..) = fixture.connect();
 
-    // Ask: the command ID becomes the request ID of a question shared for the prompt box.
+    // Ask: the command ID becomes the request ID of a question shared for the prompt box. The
+    // app sends the reference without a typed question; the user types it in the CLI.
     let ask = Id::new_v4();
     send(
         &mut socket,
@@ -733,6 +734,10 @@ fn commands_apply_through_the_shared_actions() {
         pending["data"]["questions"][0]["request_id"],
         ask.to_string()
     );
+    assert_eq!(
+        pending["data"]["questions"][0]["text"],
+        "Item 1: Node\n> Body"
+    );
 
     // Action, then its resend against the old revision.
     let archive = |id| AppMessage::Action {
@@ -753,6 +758,24 @@ fn commands_apply_through_the_shared_actions() {
         reply(&mut socket, resent),
         Some(CommandError::StaleRevision { current: 2 })
     );
+    // The dropped element still crosses, and an ask about it is refused.
+    let dropped = Id::new_v4();
+    send(
+        &mut socket,
+        &AppMessage::Ask {
+            id: dropped,
+            selection: Selection {
+                document_id: document,
+                revision: 2,
+                ids: vec![element],
+            },
+            text: "Item 1: Node".into(),
+        },
+    );
+    assert!(matches!(
+        reply(&mut socket, dropped),
+        Some(CommandError::Invalid { .. })
+    ));
 
     // Undo, its resend, and an undo with nothing left.
     let undo = |id, expected_revision| AppMessage::Undo {

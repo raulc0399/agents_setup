@@ -71,7 +71,8 @@ pub struct Element {
     pub body: String,
     pub kind: ElementKind,
     pub source: Option<String>,
-    /// Publication position; display order is (order, id), not ID order.
+    /// Position in the document's publication sequence (see `Document::positions`), given at
+    /// the element's first publication and kept by every later one.
     #[serde(default)]
     pub order: u64,
     pub semantic_revision: u64,
@@ -89,6 +90,10 @@ pub struct Relationship {
     /// A manual or review step; diagrams draw it dashed.
     #[serde(default)]
     pub manual: bool,
+    /// Position in the publication sequence, as `Element::order`; `None` when stored before
+    /// relationships had one (see `Document::positions`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u64>,
     pub semantic_revision: u64,
     pub accepted_revision: Option<u64>,
     pub archived: bool,
@@ -99,6 +104,10 @@ pub struct Group {
     pub id: Id,
     pub title: String,
     pub members: BTreeSet<Id>,
+    /// Position in the publication sequence, as `Element::order`; `None` when stored before
+    /// groups had one (see `Document::positions`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u64>,
     pub semantic_revision: u64,
     pub accepted_revision: Option<u64>,
     pub archived: bool,
@@ -112,6 +121,80 @@ pub struct Document {
     pub elements: BTreeMap<Id, Element>,
     pub relationships: BTreeMap<Id, Relationship>,
     pub groups: BTreeMap<Id, Group>,
+}
+
+impl Document {
+    /// Every record's position in the document's one publication sequence: elements, then
+    /// relationships, then groups of a first publication, each in request order; whatever a
+    /// later publication adds goes after the highest position. A relationship or group stored
+    /// before it had a position gets one after the highest stored position, relationships
+    /// before groups, each by ID, so such a document keeps the numbering it always showed.
+    pub fn positions(&self) -> BTreeMap<Id, u64> {
+        let stored = self
+            .elements
+            .values()
+            .map(|item| Some(item.order))
+            .chain(self.relationships.values().map(|item| item.order))
+            .chain(self.groups.values().map(|item| item.order))
+            .flatten()
+            .max();
+        let mut sequence = Sequence::after(stored);
+
+        let mut positions: BTreeMap<Id, u64> = self
+            .elements
+            .values()
+            .map(|item| (item.id, item.order))
+            .collect();
+        for item in self.relationships.values() {
+            let position = item.order.unwrap_or_else(|| sequence.take());
+            positions.insert(item.id, position);
+        }
+        for item in self.groups.values() {
+            let position = item.order.unwrap_or_else(|| sequence.take());
+            positions.insert(item.id, position);
+        }
+        positions
+    }
+
+    /// The positions a publication gives out next: after every record's position.
+    pub fn sequence(&self) -> Sequence {
+        Sequence::after(self.positions().into_values().max())
+    }
+
+    /// Every record in the order the list numbers them from 1: by position, then elements
+    /// before relationships before groups, then by ID. The app's `ui/js/rows.js` agrees.
+    pub fn list_order(&self) -> Vec<Id> {
+        let positions = self.positions();
+        let mut records: Vec<(u64, u8, Id)> = self
+            .elements
+            .keys()
+            .map(|id| (positions[id], 0, *id))
+            .chain(self.relationships.keys().map(|id| (positions[id], 1, *id)))
+            .chain(self.groups.keys().map(|id| (positions[id], 2, *id)))
+            .collect();
+        records.sort();
+        records.into_iter().map(|(_, _, id)| id).collect()
+    }
+}
+
+/// Hands out the next positions of a document's publication sequence, one by one.
+pub struct Sequence {
+    next: u64,
+}
+
+impl Sequence {
+    /// Starts after `highest`, or at 0 when there is no position yet.
+    pub fn after(highest: Option<u64>) -> Self {
+        Sequence {
+            next: highest.map_or(0, |highest| highest + 1),
+        }
+    }
+
+    pub fn take(&mut self) -> u64 {
+        let position = self.next;
+        self.next += 1;
+        position
+    }
 }
 
 /// The shared content actions; drop is archive under the name users see. Unknown fields are

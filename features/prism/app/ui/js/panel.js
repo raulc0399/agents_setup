@@ -1,14 +1,13 @@
 import { MOD_KEY, h } from './dom.js';
-import { ACCEPT_NOTE, acceptanceBadges, questionState } from './list.js';
+import { ACCEPT_NOTE, DROPPED_NOTE, stateBadges, questionState } from './list.js';
 import { questionsFor, typedQuestion } from './rows.js';
 
 /**
  * The detail area of one tab's side pane, in the list and in the diagram: the focused item
- * with its text, actions or ask editor, and its questions. Without a focused item (only in
- * the diagram, where the user picks one) it shows an overview of the diagram.
+ * with its text, actions and questions. Without a focused item (only in the diagram, where
+ * the user picks one) it shows an overview of the diagram.
  *
- * `actions`: onAsk(), onAccept(), onDrop(), onSend(question), onCancelAsk(),
- * onDraft(text).
+ * `actions`: onAsk(), onAccept(), onDrop().
  */
 export class DetailPanel {
   constructor(actions) {
@@ -21,37 +20,24 @@ export class DetailPanel {
 
   /**
    * `model`: {document, rows, focus: the focused item's ID or null, selected: Set of selected
-   * item IDs, questions, ask: {text, quoteLabel, sending} | null, readOnly: why commands are
-   * unavailable, or null, counts: [boxes, arrows, badges] of the diagram, or null}.
-   * Rebuilt only when what it shows changed; a rebuild keeps the draft, the keyboard and the caret.
+   * item IDs, questions, readOnly: why commands are unavailable, or null, counts: [boxes,
+   * arrows, badges] of the diagram, or null}. Rebuilt only when what it shows changed.
    */
   render(model) {
     this.model = model;
-    const { ask, readOnly, counts } = model;
+    const { readOnly, counts } = model;
     const row = model.rows.find((candidate) => candidate.id === model.focus) ?? null;
     const selected = model.rows.filter((candidate) => model.selected.has(candidate.id));
     const questions = row ? questionsFor(model.questions, model.document.id, row.id) : [];
-    const signature = JSON.stringify([row, questions, selected.map((item) => [item.number, item.title]), ask ? [ask.quoteLabel, ask.sending] : null, readOnly, row ? null : [model.document.title, counts]]);
+    const signature = JSON.stringify([row, questions, selected.map((item) => [item.number, item.title, item.dropped]), readOnly, row ? null : [model.document.title, counts]]);
     if (signature === this.signature) {
       return;
     }
     this.signature = signature;
-    const previous = this.element.querySelector('.ask textarea');
-    const typing = ask && previous && document.activeElement === previous;
-    const caret = typing ? [previous.selectionStart, previous.selectionEnd] : null;
-    const actions = row || selected.length > 0 || ask ? this.panelActions(selected.length, ask, readOnly) : null;
+    const actions = row || selected.length > 0 ? this.panelActions(row, selected, readOnly) : null;
     this.element.replaceChildren(
       ...(row ? itemPanel(row, questions, actions) : overviewPanel(model.document.title, counts, selected, actions)),
     );
-    if (typing) {
-      const textarea = this.element.querySelector('.ask textarea');
-      textarea.focus();
-      textarea.setSelectionRange(...caret);
-    }
-  }
-
-  focusEditor() {
-    this.element.querySelector('.ask textarea')?.focus();
   }
 
   /** The text the user selected inside the panel's text of the focused item. */
@@ -59,18 +45,28 @@ export class DetailPanel {
     return id === this.model?.focus ? selectionInside(this.element.querySelector('.panel-body')) : '';
   }
 
-  /** The ask editor while asking, else the buttons for the focused or selected items. */
-  panelActions(selection, ask, readOnly) {
-    if (ask) {
-      return askEditor(ask, readOnly, this.actions);
-    }
-    return h('div', { class: 'panel-actions' }, itemActions(selection, readOnly, this.actions), readOnly ? h('span', { class: 'hint', text: readOnly }) : null);
+  /**
+   * The buttons for the selected items, else the focused one. Dropped items take no part:
+   * with only dropped ones the buttons are disabled and say why.
+   */
+  panelActions(row, selected, readOnly) {
+    const actionable = selected.filter((item) => !item.dropped).length;
+    const onlyDropped = selected.length > 0 ? actionable === 0 : Boolean(row?.dropped);
+    const unavailable = readOnly ?? (onlyDropped ? DROPPED_NOTE : null);
+    const leftOut = selected.length - actionable;
+    const hint = unavailable ?? (selected.length > 0 && leftOut > 0 ? `${leftOut} dropped ${leftOut === 1 ? 'item takes' : 'items take'} no part` : null);
+    return h(
+      'div',
+      { class: 'panel-actions' },
+      itemActions(selected.length > 0 ? actionable : 0, unavailable, this.actions),
+      hint ? h('span', { class: 'hint', text: hint }) : null,
+    );
   }
 }
 
-/** The focused item; `actions` (buttons or the ask editor) come before its questions. */
+/** The focused item; its `actions` come before its questions. */
 function itemPanel(row, questions, actions) {
-  const badges = acceptanceBadges(row);
+  const badges = stateBadges(row);
   return [
     h('div', { class: `panel-tag kind-${row.kind}` }, h('span', { class: 'kind', text: row.kindLabel }), h('span', { class: 'number', text: String(row.number) })),
     h('h2', { class: 'panel-title', text: row.title }),
@@ -125,18 +121,18 @@ function selectionInside(container) {
 }
 
 /**
- * Ask, Accept, Hide and Drop for the focused item or, when `selection` items are selected,
- * for those; the labels say which.
+ * Ask, Accept and Drop for the focused item or, when `selection` items are selected, for
+ * those; the labels say which. `unavailable`: why the buttons are disabled, or null.
  */
-function itemActions(selection, readOnly, actions) {
+function itemActions(selection, unavailable, actions) {
   const many = selection > 0;
   const what = many ? `the ${selection} selected ${selection === 1 ? 'item' : 'items'}` : 'this item';
   const count = many ? ` ${selection}` : '';
   const button = (className, text, title, action) =>
     h('button', {
       class: `button ${className}`,
-      disabled: Boolean(readOnly),
-      title: readOnly ? readOnly : title,
+      disabled: Boolean(unavailable),
+      title: unavailable ?? title,
       text,
       onclick: (event) => {
         event.stopPropagation();
@@ -151,46 +147,6 @@ function itemActions(selection, readOnly, actions) {
     button('', `Accept${count}`, `Accept ${what}. ${ACCEPT_NOTE} (A)`, actions.onAccept),
     button('danger', `Drop${count}`, `Drop ${what} for everyone; U undoes (X)`, actions.onDrop),
   ];
-}
-
-/**
- * The question editor: what it quotes, the typed question, send and cancel.
- * `ask`: {text, quoteLabel, sending}; `actions`: onSend(question), onCancelAsk(), onDraft(text).
- */
-function askEditor(ask, readOnly, actions) {
-  const textarea = h('textarea', {
-    placeholder: 'Your question (optional): the CLI prompt box receives the items, the quote and this text',
-    'aria-label': 'Question',
-    value: ask.text,
-    oninput: () => actions.onDraft(textarea.value),
-    onkeydown: (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        actions.onCancelAsk();
-      } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        actions.onSend(textarea.value);
-      }
-    },
-  });
-  return h(
-    'div',
-    { class: 'ask', onclick: (event) => event.stopPropagation() },
-    h('div', { class: 'quote', title: ask.quoteLabel, text: ask.quoteLabel }),
-    textarea,
-    h(
-      'div',
-      { class: 'row' },
-      h('span', { class: 'hint' }, h('kbd', { text: MOD_KEY }), ' ', h('kbd', { text: 'Enter' }), ' sends · ', h('kbd', { text: 'Esc' }), ' cancels'),
-      h('button', { class: 'button', text: 'Cancel', onclick: () => actions.onCancelAsk() }),
-      h('button', {
-        class: 'button primary',
-        disabled: Boolean(readOnly) || ask.sending,
-        text: ask.sending ? 'Sending…' : 'Send to CLI',
-        onclick: () => actions.onSend(textarea.value),
-      }),
-    ),
-  );
 }
 
 /** A shared question with its delivery state and answer, as the detail panel shows it. */

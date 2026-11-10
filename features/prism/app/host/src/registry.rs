@@ -84,11 +84,10 @@ pub struct Content {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     /// `items` name the selected items as the list shows them, each with its text or the
-    /// part the user selected; `question` is what the user typed.
+    /// part the user selected; the user types the question in the CLI prompt box.
     Ask {
         selection: Selection,
         items: Vec<AskItem>,
-        question: String,
     },
     Action {
         document_id: Id,
@@ -105,14 +104,10 @@ pub enum Command {
 impl Command {
     fn into_message(self, id: Id) -> AppMessage {
         match self {
-            Command::Ask {
-                selection,
-                items,
-                question,
-            } => AppMessage::Ask {
+            Command::Ask { selection, items } => AppMessage::Ask {
                 id,
                 selection,
-                text: ask_text(&items, &question),
+                text: ask_text(&items),
             },
             Command::Action {
                 document_id,

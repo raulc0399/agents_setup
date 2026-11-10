@@ -644,6 +644,16 @@ button {
   background: var(--selected-bg);
 }
 
+/* A dropped item keeps its place and number, greyed out; its badges stay readable. */
+.card.dropped::before {
+  background: var(--faint);
+}
+
+.card.dropped .card-head > :not(.badges),
+.card.dropped .excerpt {
+  opacity: 0.5;
+}
+
 .card.selected .card-head .number {
   border-radius: 9px;
   background: var(--accent);
@@ -705,6 +715,11 @@ button {
 
 .badge.accepted {
   color: var(--success);
+}
+
+.badge.dropped {
+  color: var(--text);
+  font-weight: 600;
 }
 
 .badge.changed,
@@ -808,55 +823,6 @@ button {
 
 .card-question.tone-error .state {
   color: var(--danger);
-}
-
-.ask {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface-muted);
-}
-
-.ask .quote {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ask textarea {
-  width: 100%;
-  min-height: 64px;
-  max-height: 220px;
-  padding: 7px 9px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  resize: vertical;
-}
-
-.ask textarea:focus {
-  border-color: var(--focus);
-  outline: none;
-  box-shadow: 0 0 0 3px var(--focus-soft);
-}
-
-.ask .row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.ask .row .hint {
-  margin-right: auto;
-  color: var(--faint);
-  font-size: 11px;
 }
 
 /* View switch */
@@ -1059,20 +1025,6 @@ button {
   overflow-wrap: anywhere;
   user-select: text;
   cursor: text;
-}
-
-.detail-panel .ask .quote {
-  white-space: normal;
-}
-
-/* The panel is narrow: the key hint gets its own line above the buttons. */
-.detail-panel .ask .row {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.detail-panel .ask .row .hint {
-  flex-basis: 100%;
 }
 
 .detail-panel .badges {
@@ -1375,6 +1327,21 @@ button {
 .diagram-svg .prism-gate.focused .prism-shape {
   stroke: var(--focus);
   stroke-width: 2.5;
+}
+
+/* Dropped content keeps its place, faded by the opacity prism-core writes; the stripe goes
+   grey as on the card. Focused or selected, it comes forward enough to show the highlight. */
+.diagram-svg .prism-box.prism-dropped .prism-stripe {
+  fill: var(--faint);
+}
+
+.diagram-svg .prism-dropped-label {
+  fill: var(--text);
+}
+
+.diagram-svg .prism-dropped.focused,
+.diagram-svg .prism-dropped.selected {
+  opacity: 0.8;
 }
 
 /* Narrow windows: the side pane goes below the list or canvas. */

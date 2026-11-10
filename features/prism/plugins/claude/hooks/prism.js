@@ -7,7 +7,8 @@ const bindings = new Map();
 const SUBAGENT_REFUSAL = 'Prism tools are available only to the main conversation the user is watching, not to subagents.';
 const PROTOCOL_VERSION = 1;
 const COMMAND_NAME = 'prism';
-// Shared questions are polled and placed in the prompt box; the user sends them from there.
+// Shared questions are polled and placed in the prompt box; the user types the question after
+// them and sends it from there. Answers stay in the conversation; none is recorded in Prism.
 const QUESTION_POLL_MS = 1000;
 const filledQuestions = new Set();
 const TOOL_FIELDS = {

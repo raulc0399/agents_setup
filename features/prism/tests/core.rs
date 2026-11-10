@@ -713,30 +713,178 @@ fn unknown_delivery_requires_new_request_for_retry() {
     );
 }
 
+fn element_input(title: &str) -> ElementInput {
+    ElementInput {
+        id: Id::new_v4(),
+        title: title.into(),
+        body: String::new(),
+        kind: ElementKind::Step,
+        source: None,
+    }
+}
+
+fn link_input(from: Id, to: Id) -> RelationshipInput {
+    RelationshipInput {
+        id: Id::new_v4(),
+        from,
+        to,
+        label: "next".into(),
+        direction: Direction::Directed,
+        manual: false,
+    }
+}
+
+/// Record IDs in the order the list and the diagram number them.
+fn numbered(store: &Store, workspace: Id, document: Id) -> Vec<Id> {
+    store.document(workspace, document).unwrap().list_order()
+}
+
+/// Three elements, a link and a group: numbered in that order on the first publication.
+fn three_steps(store: &mut Store, workspace: Id) -> (PublishRequest, PublishResult, Vec<Id>) {
+    let mut request = publication();
+    request.elements = ["First", "Second", "Third"]
+        .into_iter()
+        .map(element_input)
+        .collect();
+    let ids: Vec<Id> = request.elements.iter().map(|item| item.id).collect();
+    request.relationships = vec![link_input(ids[0], ids[1])];
+    request.groups[0].members = ids.iter().copied().collect();
+    let result = store.publish(workspace, &request).unwrap();
+    let mut published = ids;
+    published.push(request.relationships[0].id);
+    published.push(request.groups[0].id);
+    assert_eq!(numbered(store, workspace, result.document_id), published);
+    (request, result, published)
+}
+
 #[test]
-fn publication_order_is_stored_and_reordering_keeps_acceptance() {
-    let (mut store, workspace, request, result) = setup();
-    let [first, second] = [request.elements[0].id, request.elements[1].id];
-    let document = store.document(workspace, result.document_id).unwrap();
-    assert_eq!(document.elements[&first].order, 0);
-    assert_eq!(document.elements[&second].order, 1);
+fn publishing_never_renumbers_existing_records() {
+    let mut store = Store::open(":memory:").unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let (request, result, published) = three_steps(&mut store, workspace);
+    let document = result.document_id;
+    let first = request.elements[0].id;
     store
         .apply(
             workspace,
-            result.document_id,
-            document.revision,
+            document,
+            1,
             &ContentAction::Accept { ids: vec![first] },
         )
         .unwrap();
-    // Republishing the same elements in reverse order moves them without a semantic change.
-    let mut reordered = edit(&request, &result, 2);
-    reordered.elements.swap(0, 1);
-    store.publish(workspace, &reordered).unwrap();
-    let document = store.document(workspace, result.document_id).unwrap();
-    assert_eq!(document.elements[&first].order, 1);
-    assert_eq!(document.elements[&second].order, 0);
-    assert_eq!(document.elements[&first].accepted_revision, Some(1));
-    assert_eq!(document.elements[&first].semantic_revision, 1);
+
+    // Revising only the second element keeps it in its place.
+    let mut revision = edit(&request, &result, 2);
+    revision.elements = vec![request.elements[1].clone()];
+    revision.relationships.clear();
+    revision.groups.clear();
+    revision.elements[0].body = "Revised".into();
+    store.publish(workspace, &revision).unwrap();
+    assert_eq!(numbered(&store, workspace, document), published);
+
+    // Sending everything in reverse order renumbers nothing and keeps acceptance.
+    let mut reversed = edit(&request, &result, 3);
+    reversed.elements.reverse();
+    store.publish(workspace, &reversed).unwrap();
+    assert_eq!(numbered(&store, workspace, document), published);
+    let stored = store.document(workspace, document).unwrap();
+    assert_eq!(stored.elements[&first].accepted_revision, Some(1));
+    assert_eq!(stored.elements[&first].semantic_revision, 1);
+
+    // A new element in the middle of a request and a new link go after the last record.
+    let mut added = edit(&request, &result, 4);
+    let new = element_input("New");
+    added.elements.insert(1, new.clone());
+    let new_link = link_input(new.id, request.elements[0].id);
+    added.relationships.insert(0, new_link.clone());
+    store.publish(workspace, &added).unwrap();
+    let mut expected = published.clone();
+    expected.extend([new.id, new_link.id]);
+    assert_eq!(numbered(&store, workspace, document), expected);
+}
+
+#[test]
+fn a_new_element_after_an_archived_last_one_takes_a_new_position() {
+    let mut store = Store::open(":memory:").unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let (request, result, published) = three_steps(&mut store, workspace);
+    let document = result.document_id;
+    let group = request.groups[0].id;
+    store
+        .apply(
+            workspace,
+            document,
+            1,
+            &ContentAction::Archive { ids: vec![group] },
+        )
+        .unwrap();
+    let archived = store.document(workspace, document).unwrap().groups[&group].order;
+
+    let mut added = edit(&request, &result, 2);
+    let new = element_input("New");
+    added.elements = vec![new.clone()];
+    added.relationships.clear();
+    added.groups.clear();
+    store.publish(workspace, &added).unwrap();
+    let stored = store.document(workspace, document).unwrap();
+    assert!(Some(stored.elements[&new.id].order) > archived);
+    let mut expected = published;
+    expected.push(new.id);
+    assert_eq!(stored.list_order(), expected);
+}
+
+#[test]
+fn a_document_stored_before_positions_keeps_its_numbering_and_appends() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let (request, result, _) = three_steps(&mut store, workspace);
+    let document = result.document_id;
+    drop(store);
+
+    // As stored before: no position on links and groups, every element at the default 0.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let content: String = connection
+        .query_row(
+            "SELECT content FROM documents WHERE id=?1",
+            [document.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: serde_json::Value = serde_json::from_str(&content).unwrap();
+    for records in ["relationships", "groups"] {
+        for record in stored[records].as_object_mut().unwrap().values_mut() {
+            record.as_object_mut().unwrap().remove("order");
+        }
+    }
+    for record in stored["elements"].as_object_mut().unwrap().values_mut() {
+        record["order"] = 0.into();
+    }
+    connection
+        .execute(
+            "UPDATE documents SET content=?2 WHERE id=?1",
+            rusqlite::params![document.to_string(), stored.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    // Today's numbering: elements by order and ID, then links by ID, then groups by ID.
+    let mut store = Store::open(&path).unwrap();
+    let before = store.document(workspace, document).unwrap();
+    let mut today: Vec<Id> = before.elements.keys().copied().collect();
+    today.push(request.relationships[0].id);
+    today.push(request.groups[0].id);
+    assert_eq!(before.list_order(), today);
+
+    let mut added = edit(&request, &result, 1);
+    let new = element_input("New");
+    added.elements = vec![new.clone()];
+    added.relationships = vec![link_input(new.id, request.elements[0].id)];
+    added.groups.clear();
+    store.publish(workspace, &added).unwrap();
+    today.extend([new.id, added.relationships[0].id]);
+    assert_eq!(numbered(&store, workspace, document), today);
 }
 
 #[test]

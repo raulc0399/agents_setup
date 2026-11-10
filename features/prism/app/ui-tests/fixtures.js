@@ -276,6 +276,7 @@ const DIAGRAM_VIEWS = {
   // A focused and a selected arrow between the same two lanes: marked by more than their color.
   'diagram-arrow': { focus: releaseLink(4), selected: [releaseLink(5)], cameras: {} },
   'diagram-checks': { focus: null, modes: { [RELEASE]: 'list' }, cameras: {} },
+  'diagram-dropped': { focus: null, cameras: {} },
   'narrow-checks': { focus: releaseItem(4), cameras: {} },
 };
 export const CONTENTS_FOR_TESTS = CONTENTS;
@@ -292,7 +293,26 @@ const LIST_VIEWS = {
   'action-checks': { modes: { ...LIST_MODES, [RELEASE]: 'list' } },
   // A document without arrows or groups: a list without a view switch.
   plain: { document: REVIEW },
+  dropped: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
 };
+/** Scenarios whose live tab shows dropped content: document, element and relationship IDs. */
+const DROPPED_SCENARIOS = {
+  dropped: [PLAN, ['a0000000-0000-4000-8000-000000000004'], []],
+  'diagram-dropped': [RELEASE, [releaseItem(6)], [releaseLink(5)]],
+};
+
+/** The fixture's contents with the given content of one document dropped (archived). */
+function droppedContents([documentId, elements, relationships]) {
+  const live = structuredClone(CONTENTS[LIVE]);
+  const dropped = live.documents.find((candidate) => candidate.id === documentId);
+  elements.forEach((id) => {
+    dropped.elements[id].archived = true;
+  });
+  relationships.forEach((id) => {
+    dropped.relationships[id].archived = true;
+  });
+  return { ...CONTENTS, [LIVE]: live };
+}
 /** Scenarios whose live tab has two documents closed: the strip with its Closed (N) control. */
 const CLOSED_SCENARIOS = ['documents', 'closed-menu'];
 /** Scenarios whose live tab has no saved view state: each document opens as its content says. */
@@ -336,5 +356,6 @@ export function fixture(scenario) {
   if (DIAGRAM_VIEWS[scenario]) {
     views[LIVE] = { document: RELEASE, hidden: [], ...DIAGRAM_VIEWS[scenario] };
   }
-  return { state: { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) }, contents: CONTENTS };
+  const contents = DROPPED_SCENARIOS[scenario] ? droppedContents(DROPPED_SCENARIOS[scenario]) : CONTENTS;
+  return { state: { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) }, contents };
 }

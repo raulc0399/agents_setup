@@ -20,8 +20,8 @@ pub struct Diagram {
     pub order: Vec<Id>,
 }
 
-/// Lays out what the tab lists: `visible` leaves out hidden and filtered-out items; archived
-/// ones are always left out.
+/// Lays out what the tab lists: `visible` leaves out hidden and filtered-out items; dropped
+/// (archived) ones stay in their place, drawn faded.
 pub fn diagram(document: &Document, visible: &BTreeSet<Id>) -> Diagram {
     let layout = GraphLayout::new(document, visible, Detail::Subtitles);
     Diagram {

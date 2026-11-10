@@ -1,7 +1,8 @@
 //! Graphic diagram: lanes, boxes, arrows and gates laid out in world units and written as
 //! SVG. The same geometry answers clicks; every clickable shape in the SVG carries `data-id`
 //! and `data-kind` (one of the `KIND_*` values). Shapes and texts carry `prism-*` classes, so
-//! a stylesheet can theme what the presentation attributes paint by default.
+//! a stylesheet can theme what the presentation attributes paint by default. Archived
+//! (dropped) content keeps its place and number: it is drawn faded, with `prism-dropped`.
 use crate::model::{Direction, Document, ElementKind, Id, single_line};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -96,6 +97,12 @@ const MODIFIER_MANUAL: &str = "manual";
 const COLOR_MARK: &str = "c";
 /// Class modifier on every second lane, which the default colors paint in the second tone.
 const MODIFIER_ALTERNATE: &str = "alt";
+/// Class modifier on dropped (archived) content, which is drawn at `DROPPED_OPACITY`; a
+/// dropped arrow is dashed with `DROPPED_DASH`, a dropped box says `DROPPED_LABEL`.
+const MODIFIER_DROPPED: &str = "dropped";
+const DROPPED_OPACITY: f32 = 0.45;
+const DROPPED_DASH: &str = "2 4";
+const DROPPED_LABEL: &str = "dropped";
 /// Arrowhead markers: one per arrow color (see `COLOR_MARK`), and the focused one.
 const HEAD: &str = "prism-head";
 const HEAD_FOCUS: &str = "prism-head-focus";
@@ -171,9 +178,12 @@ impl WorldRect {
 struct Lane {
     /// The group behind the lane; the lane of ungrouped boxes has none.
     group: Option<Id>,
+    /// What the lane shows, " · dropped" included; `name` is its accessible name.
     title: String,
+    name: String,
     color: &'static str,
     rect: WorldRect,
+    dropped: bool,
 }
 
 struct Gate {
@@ -186,6 +196,7 @@ struct Gate {
     /// The "+N" badge for the badges beyond `MAX_GATES`: its ID is the first of them, its
     /// title lists them all.
     more: bool,
+    dropped: bool,
 }
 
 struct Node {
@@ -199,6 +210,7 @@ struct Node {
     kind: ElementKind,
     color: &'static str,
     gates: Vec<Gate>,
+    dropped: bool,
 }
 
 struct Edge {
@@ -214,6 +226,7 @@ struct Edge {
     pill: WorldRect,
     /// Index into `ARROW_COLORS`.
     color: usize,
+    dropped: bool,
 }
 
 #[derive(Default)]
@@ -285,34 +298,35 @@ fn baseline(top: f32, line_height: f32, size: f32) -> f32 {
 
 impl GraphLayout {
     /// Lays out the content whose IDs are in `visible`: elements, relationships and groups.
-    /// Archived content is always left out; the caller leaves out hidden and filtered-out
-    /// content. An arrow is drawn only when both of its ends are.
+    /// Archived content is drawn as dropped where it was, so numbers and places never shift;
+    /// the caller leaves out hidden and filtered-out content. An arrow is drawn only when both
+    /// of its ends are.
     pub fn new(document: &Document, visible: &BTreeSet<Id>, detail: Detail) -> Self {
         let elements: Vec<_> = {
             let mut items: Vec<_> = document
                 .elements
                 .values()
-                .filter(|item| !item.archived && visible.contains(&item.id))
+                .filter(|item| visible.contains(&item.id))
                 .collect();
             items.sort_by_key(|item| (item.order, item.id));
             items
         };
         let shown: BTreeSet<Id> = elements.iter().map(|item| item.id).collect();
-        // The list (`rows` in the app's `ui/js/rows.js`) shows the visible elements first, in
-        // this order, numbered from 1; badges keep their number.
-        let numbers: BTreeMap<Id, usize> = elements
-            .iter()
+        // The list (`rows` in the app's `ui/js/rows.js`) numbers the visible records from 1 in
+        // `list_order`, dropped ones included; boxes and badges show the same number.
+        let numbers: BTreeMap<Id, usize> = document
+            .list_order()
+            .into_iter()
+            .filter(|id| visible.contains(id))
             .enumerate()
-            .map(|(index, item)| (item.id, index + 1))
+            .map(|(index, id)| (id, index + 1))
             .collect();
+        let positions = document.positions();
         let relationships: Vec<_> = document
             .relationships
             .values()
             .filter(|item| {
-                !item.archived
-                    && visible.contains(&item.id)
-                    && shown.contains(&item.from)
-                    && shown.contains(&item.to)
+                visible.contains(&item.id) && shown.contains(&item.from) && shown.contains(&item.to)
             })
             .collect();
 
@@ -353,6 +367,7 @@ impl GraphLayout {
                 label: String::new(),
                 rect: WorldRect::default(),
                 more: false,
+                dropped: element.archived,
             });
         }
 
@@ -362,7 +377,7 @@ impl GraphLayout {
         let mut groups: Vec<_> = document
             .groups
             .values()
-            .filter(|group| !group.archived && visible.contains(&group.id))
+            .filter(|group| visible.contains(&group.id))
             .collect();
         groups.sort_by_key(|group| {
             group
@@ -386,7 +401,13 @@ impl GraphLayout {
                 continue;
             }
             placed.extend(members.iter().copied());
-            lane_members.push((Some(group.id), single_line(&group.title), members));
+            let title = single_line(&group.title);
+            let title = if group.archived {
+                format!("{title} · {DROPPED_LABEL}")
+            } else {
+                title
+            };
+            lane_members.push((Some(group.id), title, members));
         }
         let rest: Vec<Id> = elements
             .iter()
@@ -455,15 +476,22 @@ impl GraphLayout {
                     kind: element.kind.clone(),
                     color: kind_color(&element.kind),
                     gates: node_gates,
+                    dropped: element.archived,
                 });
             }
             let lane_height = title_height
                 + LANE_PADDING * 2.0
                 + (row_y - lane_top - title_height - LANE_PADDING)
                 + row_height;
+            let dropped = group.is_some_and(|id| document.groups[&id].archived);
+            let name = group.map_or(String::new(), |id| {
+                let title = single_line(&document.groups[&id].title);
+                format!("Group: {title}{}", dropped_suffix(dropped))
+            });
             layout.lanes.push(Lane {
                 group,
                 title,
+                name,
                 color,
                 rect: WorldRect {
                     x: 0.0,
@@ -471,6 +499,7 @@ impl GraphLayout {
                     width: lane_width,
                     height: lane_height,
                 },
+                dropped,
             });
             y = lane_top + lane_height + LANE_GAP;
         }
@@ -515,7 +544,8 @@ impl GraphLayout {
             .iter()
             .filter(|item| !consumed_edges.contains(&item.id))
             .collect();
-        sorted.sort_by_key(|item| (item.semantic_revision, item.id));
+        // Pills count the arrows in publication order, so a revised arrow keeps its number.
+        sorted.sort_by_key(|item| (positions[&item.id], item.id));
         let mut ends = Vec::new();
         for (index, relationship) in sorted.into_iter().enumerate() {
             let (Some(from), Some(to)) =
@@ -551,6 +581,7 @@ impl GraphLayout {
                 pill,
                 // Set below, once all arrows and their neighbors are known.
                 color: 0,
+                dropped: relationship.archived,
             });
         }
         for (edge, color) in layout.edges.iter_mut().zip(arrow_colors(&ends)) {
@@ -669,7 +700,8 @@ impl GraphLayout {
                     group,
                     KIND_LANE,
                     modifier.as_slice(),
-                    Some(&format!("Group: {}", lane.title)),
+                    Some(&lane.name),
+                    lane.dropped,
                 ),
                 // The lane of ungrouped boxes is not content: themed, not clickable.
                 None => {
@@ -710,7 +742,14 @@ impl GraphLayout {
                 Direction::Undirected => String::new(),
             };
             // The pill is the arrow's keyboard stop; the line answers pointers only.
-            open_clickable(&mut svg, edge.id, KIND_ARROW, &edge_modifiers(edge), None);
+            open_clickable(
+                &mut svg,
+                edge.id,
+                KIND_ARROW,
+                &edge_modifiers(edge),
+                None,
+                edge.dropped,
+            );
             // An invisible wide stroke makes the thin arrow easy to hit with a pointer.
             let _ = write!(
                 svg,
@@ -721,10 +760,12 @@ impl GraphLayout {
                 svg,
                 r#"<path class="prism-line" d="{path}" fill="none" stroke="{stroke}" stroke-width="{}"{}{markers}/></g>"#,
                 if focused { 3.0 } else { 1.8 },
-                if edge.dashed {
-                    r#" stroke-dasharray="6 5""#
+                if edge.dropped {
+                    format!(r#" stroke-dasharray="{DROPPED_DASH}""#)
+                } else if edge.dashed {
+                    r#" stroke-dasharray="6 5""#.to_owned()
                 } else {
-                    ""
+                    String::new()
                 }
             );
         }
@@ -742,7 +783,13 @@ impl GraphLayout {
                 node.id,
                 KIND_BOX,
                 &[kind_name(&node.kind)],
-                Some(&format!("{}: {}", kind_label(&node.kind), node.name)),
+                Some(&format!(
+                    "{}: {}{}",
+                    kind_label(&node.kind),
+                    node.name,
+                    dropped_suffix(node.dropped)
+                )),
+                node.dropped,
             );
             let _ = write!(
                 svg,
@@ -770,6 +817,16 @@ impl GraphLayout {
                 node.color,
                 kind_label(&node.kind).to_uppercase()
             );
+            // Right-aligned in the head line, as the card's badge sits at its right end.
+            if node.dropped {
+                let _ = write!(
+                    svg,
+                    r#"<text class="prism-dropped-label" x="{}" y="{}" text-anchor="end" fill="{DIM}" font-size="{KIND_SIZE}" font-weight="650" letter-spacing="{KIND_LETTER_SPACING}">{}</text>"#,
+                    r.right() - BOX_PADDING_RIGHT,
+                    baseline(head, HEAD_LINE_HEIGHT, KIND_SIZE),
+                    DROPPED_LABEL.to_uppercase()
+                );
+            }
             let title = head + HEAD_LINE_HEIGHT;
             let _ = write!(
                 svg,
@@ -814,12 +871,14 @@ impl GraphLayout {
                         format!("{} more on {}: {}", gate.label, node.name, gate.title)
                     } else {
                         format!(
-                            "{} on {}: {}",
+                            "{} on {}: {}{}",
                             kind_label(&gate.kind),
                             node.name,
-                            gate.title
+                            gate.title,
+                            dropped_suffix(gate.dropped)
                         )
                     }),
+                    gate.dropped,
                 );
                 let text = if gate.more {
                     escape(&gate.label)
@@ -850,7 +909,13 @@ impl GraphLayout {
                 edge.id,
                 KIND_PILL,
                 &edge_modifiers(edge),
-                Some(&format!("Arrow {}: {}", edge.label, edge.ends)),
+                Some(&format!(
+                    "Arrow {}: {}{}",
+                    edge.label,
+                    edge.ends,
+                    dropped_suffix(edge.dropped)
+                )),
+                edge.dropped,
             );
             let _ = write!(
                 svg,
@@ -884,6 +949,7 @@ fn place_gates(mut gates: Vec<Gate>, rect: &WorldRect) -> Vec<Gate> {
             label: format!("+{}", rest.len()),
             rect: WorldRect::default(),
             more: true,
+            dropped: rest.iter().all(|gate| gate.dropped),
         });
     }
     let more_width =
@@ -1211,6 +1277,15 @@ fn edge_modifiers(edge: &Edge) -> Vec<String> {
         .collect()
 }
 
+/// Ends the accessible name of dropped content.
+fn dropped_suffix(dropped: bool) -> String {
+    if dropped {
+        format!(" ({DROPPED_LABEL})")
+    } else {
+        String::new()
+    }
+}
+
 fn kind_name(kind: &ElementKind) -> &'static str {
     match kind {
         ElementKind::Text => "text",
@@ -1231,18 +1306,25 @@ fn kind_label(kind: &ElementKind) -> &'static str {
 
 /// Opens the `<g>` around one clickable shape; the caller closes it. CSS themes the shape
 /// through its classes: `prism-<kind>`, plus `prism-<modifier>` for each modifier. With a
-/// `label` it is a keyboard stop named by it; without, it answers pointers only.
+/// `label` it is a keyboard stop named by it; without, it answers pointers only. A `dropped`
+/// shape is faded and also carries `prism-dropped`.
 fn open_clickable(
     svg: &mut String,
     id: Id,
     kind: &str,
     modifiers: &[impl AsRef<str>],
     label: Option<&str>,
+    dropped: bool,
 ) {
-    let modifier: String = modifiers
+    let mut modifier: String = modifiers
         .iter()
         .map(|name| format!(" prism-{}", name.as_ref()))
         .collect();
+    let mut opacity = String::new();
+    if dropped {
+        modifier.push_str(&format!(" prism-{MODIFIER_DROPPED}"));
+        opacity = format!(r#" opacity="{DROPPED_OPACITY}""#);
+    }
     let focus = label.map_or(r#"tabindex="-1" aria-hidden="true""#.to_owned(), |label| {
         format!(
             r#"tabindex="0" role="button" aria-label="{}""#,
@@ -1251,7 +1333,7 @@ fn open_clickable(
     });
     let _ = write!(
         svg,
-        r#"<g class="prism-{kind}{modifier}" data-id="{id}" data-kind="{kind}" {focus}>"#
+        r#"<g class="prism-{kind}{modifier}" data-id="{id}" data-kind="{kind}"{opacity} {focus}>"#
     );
 }
 

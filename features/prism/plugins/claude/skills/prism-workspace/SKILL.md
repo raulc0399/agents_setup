@@ -11,8 +11,11 @@ automatically extract conversation content or open another agent conversation.
   or `mcp__prism__action`.
 - When listing documents or shared questions, repeat with returned `next_cursor`
   as `cursor` until null; retrieve individual records by their stable IDs.
-- Publish semantic content and relationships; the Prism UI owns local layout,
-  selection and unsent drafts. Never request private drafts or private selections.
+- Publish semantic content and relationships; the Prism UI owns local layout
+  and selection. Never request private selections.
+- Every element, relationship and group keeps the number of its first
+  publication: what a publish adds goes after the last item and nothing
+  existing moves, dropped items included, so the user's item numbers stay valid.
 - Treat acceptance as content feedback, never permission to implement changes.
 - All Prism content and document state is shared through the bridge store: a
   close, drop, accept, question or answer is seen by you and every app view;
@@ -20,11 +23,14 @@ automatically extract conversation content or open another agent conversation.
 - Close or reopen a whole document with `mcp__prism__action` (`close` or
   `reopen`, no `ids`) only when asked; `mcp__prism__inspect` marks closed
   documents, and publishing to a closed document reopens it.
-- A prompt that quotes an item and ends with `[prism:<request_id>]` came from
-  Prism's ask action: the user asks about that item or the quoted text. Answer
-  in this conversation, then call `mcp__prism__answer` with that request ID and
-  your reply so Prism shows it beside the item. Call `mcp__prism__questions`
-  with the request ID when you need the frozen content snapshot.
+- A prompt that quotes an item and carries `[prism:<request_id>]` came from
+  Prism's ask action: the user asks about that item or the quoted text, with
+  the question typed after the marker. Answer in this conversation and save the
+  answer to the relevant md files when it matters. Answers are not recorded in
+  Prism, so for now do not call `mcp__prism__answer`; the app changes only when
+  the item itself changes, when you publish the revised item. Call
+  `mcp__prism__questions` with the request ID when you need the frozen content
+  snapshot.
 - Retrieve other shared questions only when the user explicitly asks, using
   `mcp__prism__questions`; answer in this exact conversation, then revise the
   referenced content if asked.

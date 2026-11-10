@@ -176,16 +176,29 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
         }
     }
     document.title = request.title.clone();
-    for (order, input) in request.elements.iter().enumerate() {
+    // Every record keeps the position it was first published at, so a publish never
+    // renumbers the list. Relationships and groups stored before they had one get the
+    // position they are shown at, so what this publish adds goes after them: new elements,
+    // then new relationships, then new groups, each in request order.
+    let positions = document.positions();
+    for item in document.relationships.values_mut() {
+        item.order = Some(positions[&item.id]);
+    }
+    for item in document.groups.values_mut() {
+        item.order = Some(positions[&item.id]);
+    }
+    let mut sequence = document.sequence();
+    for input in &request.elements {
         let previous = document.elements.get(&input.id);
         reject_archived(previous.is_some_and(|item| item.archived))?;
+        let order = previous.map_or_else(|| sequence.take(), |item| item.order);
         let mut item = Element {
             id: input.id,
             title: input.title.clone(),
             body: input.body.clone(),
             kind: input.kind.clone(),
             source: input.source.clone(),
-            order: previous.map_or(0, |item| item.order),
+            order,
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,
@@ -196,8 +209,6 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
                 item.semantic_revision = revision;
             }
         }
-        // Reordering is presentation, not a semantic edit; it never stales acceptance.
-        item.order = order as u64;
         document.elements.insert(item.id, item);
     }
     for input in &request.relationships {
@@ -210,6 +221,11 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
             label: input.label.clone(),
             direction: input.direction.clone(),
             manual: input.manual,
+            order: Some(
+                previous
+                    .and_then(|item| item.order)
+                    .unwrap_or_else(|| sequence.take()),
+            ),
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,
@@ -236,6 +252,11 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
             id: input.id,
             title: input.title.clone(),
             members: input.members.clone(),
+            order: Some(
+                previous
+                    .and_then(|item| item.order)
+                    .unwrap_or_else(|| sequence.take()),
+            ),
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,

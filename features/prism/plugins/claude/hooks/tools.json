@@ -1,7 +1,7 @@
 [
   {
     "name": "publish",
-    "description": "Publish or revise requested visual content in Prism for this Claude conversation; the Prism app shows it. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Retrying the same request ID requires the identical payload.",
+    "description": "Publish or revise requested visual content in Prism for this Claude conversation; the Prism app shows it. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Every element, relationship and group keeps the position of its first publication: what a publish adds goes after the last record, and nothing existing moves. Retrying the same request ID requires the identical payload.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -281,7 +281,7 @@
   },
   {
     "name": "answer",
-    "description": "Record the reply you gave in this conversation to a Prism question, so Prism shows it beside the item. Use the request ID from the [prism:<id>] marker in the prompt. Record only after answering; a later call replaces the recorded text.",
+    "description": "Not used for now; do not call it. Answers are kept in the conversation and saved to the md files when relevant; they are not recorded in Prism, which changes only when the item itself changes and you publish the revised item. The tool records a reply to a Prism question beside the item; a later call replaces the recorded text.",
     "inputSchema": {
       "type": "object",
       "properties": {

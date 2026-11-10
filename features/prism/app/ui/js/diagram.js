@@ -174,7 +174,7 @@ export class DiagramView {
     this.canvas.focus({ preventScroll: true });
   }
 
-  /** After the ask editor closed: back to the focused item, or the canvas. */
+  /** After leaving the filter: back to the focused item, or the canvas. */
   restoreKeyboard() {
     (this.stop(this.model?.focus) ?? this.canvas).focus({ preventScroll: true });
   }

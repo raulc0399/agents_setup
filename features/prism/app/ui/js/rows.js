@@ -1,8 +1,9 @@
 import { flowText } from './format.js';
 
 /**
- * What the list shows for a document, as the terminal list did: elements in publication
- * order, then links, then groups; archived, hidden and filtered-out ones left out.
+ * What the list shows for a document: every element, link and group in the document's one
+ * publication sequence, so a publication never renumbers it; hidden and filtered-out ones
+ * left out. Archived (dropped) ones stay in their place, marked `dropped`.
  */
 
 export const KIND_LABELS = {
@@ -24,11 +25,36 @@ function byId(left, right) {
   return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 }
 
+/** Record kinds in the order they sort at one position, as `Document::list_order` in prism-core. */
+const RANKS = { element: 0, link: 1, group: 2 };
+
+/**
+ * Every record's position, as `Document::positions` in prism-core: an element's `order`; a
+ * link or group stored before it had one gets one after the highest stored position, links
+ * before groups, each by ID. A document stored before keeps the numbering it always showed.
+ */
+function positions(document) {
+  const elements = Object.values(document.elements);
+  const links = Object.values(document.relationships).sort(byId);
+  const groups = Object.values(document.groups).sort(byId);
+  const stored = [...elements.map((item) => item.order ?? 0), ...[...links, ...groups].map((item) => item.order).filter((order) => order !== null && order !== undefined)];
+  let next = stored.length > 0 ? Math.max(...stored) + 1 : 0;
+  const result = new Map(elements.map((item) => [item.id, item.order ?? 0]));
+  for (const item of [...links, ...groups]) {
+    if (item.order === null || item.order === undefined) {
+      result.set(item.id, next);
+      next += 1;
+    } else {
+      result.set(item.id, item.order);
+    }
+  }
+  return result;
+}
+
 function records(document) {
   const titleOf = (id) => document.elements[id]?.title ?? 'missing';
+  const position = positions(document);
   const elements = Object.values(document.elements)
-    .filter((item) => !item.archived)
-    .sort((left, right) => (left.order ?? 0) - (right.order ?? 0) || byId(left, right))
     .map((item) => ({
       id: item.id,
       kind: item.kind,
@@ -39,10 +65,10 @@ function records(document) {
       details: item.source ? `${item.body}\nSource: ${item.source}` : item.body,
       revision: item.semantic_revision,
       accepted: item.accepted_revision,
+      dropped: item.archived,
+      rank: RANKS.element,
     }));
   const links = Object.values(document.relationships)
-    .filter((item) => !item.archived)
-    .sort(byId)
     .map((item) => {
       const endpoints = `${titleOf(item.from)} -> ${titleOf(item.to)}`;
       const details = `${endpoints}\nDirection: ${DIRECTION_LABELS[item.direction] ?? item.direction}`;
@@ -56,11 +82,11 @@ function records(document) {
         details,
         revision: item.semantic_revision,
         accepted: item.accepted_revision,
+        dropped: item.archived,
+        rank: RANKS.link,
       };
     });
   const groups = Object.values(document.groups)
-    .filter((item) => !item.archived)
-    .sort(byId)
     .map((item) => {
       const details = `Members:\n${item.members.map((id) => `- ${titleOf(id)}`).join('\n')}`;
       return {
@@ -73,9 +99,13 @@ function records(document) {
         details,
         revision: item.semantic_revision,
         accepted: item.accepted_revision,
+        dropped: item.archived,
+        rank: RANKS.group,
       };
     });
-  return [...elements, ...links, ...groups];
+  return [...elements, ...links, ...groups].sort(
+    (left, right) => position.get(left.id) - position.get(right.id) || left.rank - right.rank || byId(left, right),
+  );
 }
 
 /**
@@ -108,27 +138,25 @@ export function rows(document, hidden, filter = '') {
       kindLabel: KIND_LABELS[record.kind] ?? record.kind,
       isAccepted: record.accepted === record.revision,
       staleAcceptance: record.accepted !== null && record.accepted !== undefined && record.accepted !== record.revision,
-      changed: hasOlderContent && record.revision === latest && record.accepted !== record.revision,
+      changed: hasOlderContent && record.revision === latest && record.accepted !== record.revision && !record.dropped,
     }));
 }
 
-/** Number of items a document has that are not archived, hidden or not. */
+/** Number of items a document has, dropped and hidden ones included. */
 export function itemCount(document) {
   return records(document).length;
 }
 
 /**
- * Whether a document has something to draw beyond boxes: a group, or an arrow between two
- * items, none of them archived.
+ * Whether a document has something to draw beyond boxes: an arrow or a group. Dropped ones
+ * count too: the diagram keeps drawing them where they were.
  */
 export function hasDiagram(document) {
-  const active = (id) => document.elements[id] && !document.elements[id].archived;
-  const arrows = Object.values(document.relationships).some((item) => !item.archived && active(item.from) && active(item.to));
-  return arrows || Object.values(document.groups).some((item) => !item.archived);
+  return Object.keys(document.relationships).length > 0 || Object.keys(document.groups).length > 0;
 }
 
-/** IDs of the items a document has that are not archived, hidden or not. */
-export function activeIds(document) {
+/** IDs of the items a document has, dropped and hidden ones included. */
+export function itemIds(document) {
   return new Set(records(document).map((record) => record.id));
 }
 
@@ -151,7 +179,10 @@ export function questionsFor(questions, documentId, itemId) {
     );
 }
 
-/** The question the user typed: what follows the quoted reference after a blank line. */
+/**
+ * The question typed in the app's former question editor: what follows the quoted reference
+ * after a blank line. Empty for questions asked since, whose question is typed in the CLI.
+ */
 export function typedQuestion(question) {
   const separator = question.text.indexOf('\n\n');
   return separator === -1 ? '' : question.text.slice(separator + 2).trim();

@@ -24,8 +24,10 @@ reports the published documents and the Prism app connection without a model
 turn. Once a conversation is
 attached, the mod polls shared questions every second and appends each new one
 to the prompt box as `Item N: <title>`, quoted lines and a `[prism:<request id>]`
-marker; the user sends it. The skill tells Claude to answer in the conversation
-and record the reply with `mcp__prism__answer`.
+marker; the user types the question after it and sends it. The skill tells
+Claude to keep answers in the conversation and save them to the md files when
+relevant; for now it does not call `mcp__prism__answer`, and the app changes only
+when Claude publishes the revised item.
 
 Start `claude` normally and discuss your task. When needed, use `/prism` or ask
 Claude to show the plan in Prism. The mod reads the native session ID and

@@ -21,7 +21,3 @@ export function shortConversation(conversation) {
 export function flowText(text) {
   return text.split('\n').map((line) => line.trim()).filter((line) => line !== '').join(' ');
 }
-
-export function firstLine(text) {
-  return text.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? '';
-}
