@@ -35,6 +35,7 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 | 3 Bridge app link | **[done]** | `src/applink.rs`; commits noticed by polling SQLite `data_version`; legacy bindings report `bound_at_ms = 1` |
 | 4 App shell | **[done]**, Mac pass open | one review round; the fix round was committed without a second review pass (usage limit). Mac checklist: see `app/README.md` if present, else the batch 4 report in the session |
 | 5 Diagram | **[done]**, Mac pass open (pinch, save dialog, Tab in WKWebView) | layout in the shell via `prism-core`; `LANE_GAP` grew to 48, arrows that skip a box run below the row |
+| 6 Ask, answer, drop, undo | **[done]**, Mac pass open (text selection, ⌘-click, prompt round trip) | multi-item ask lists every item; questions ordered by `(selection.revision, request_id)` with UUID v7 ids |
 
 Gate results (2026-11-09, from the `d_claude` container):
 
@@ -128,7 +129,7 @@ the Linux container.
        shows tag, title, text, source and the questions with answers.
    5.4 Light and dark theme through CSS tokens; SVG export.
 
-6. **Ask, answer, drop, undo in the app**
+6. **Ask, answer, drop, undo in the app** **[done]**
    6.1 Native text selection inside cards and the side panel; `Ask` sends item + quote.
    6.2 Question state on the item: shared, in prompt box, answered, with the answer text.
    6.3 Drop and undo; filter and hide stay local to the tab.
