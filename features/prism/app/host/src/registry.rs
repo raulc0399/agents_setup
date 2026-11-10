@@ -1,8 +1,10 @@
 //! Sessions keyed by conversation: the connection that currently speaks for each, the
 //! content it sent (kept in memory only), and the commands awaiting their `reply`. Applies
 //! the rules of `prism_core::protocol` for snapshots, superseding and resending.
-use prism_core::ask::ask_text;
-use prism_core::model::{AgentKind, ContentAction, Document, Id, Question, Selection};
+use prism_core::ask::{AskItem, ask_text};
+use prism_core::model::{
+    AgentKind, ContentAction, Document, Id, MAX_TEXT_BYTES, Question, Selection,
+};
 use prism_core::protocol::{
     APP_PROTOCOL, AppMessage, BridgeMessage, CommandError, Refusal, Session,
 };
@@ -79,13 +81,11 @@ pub struct Content {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    /// `number` and `title` name the item as the list shows it; `quote` is its text or the
+    /// `items` name the selected items as the list shows them, each with its text or the
     /// part the user selected; `question` is what the user typed.
     Ask {
         selection: Selection,
-        number: usize,
-        title: String,
-        quote: String,
+        items: Vec<AskItem>,
         question: String,
     },
     Action {
@@ -105,14 +105,12 @@ impl Command {
         match self {
             Command::Ask {
                 selection,
-                number,
-                title,
-                quote,
+                items,
                 question,
             } => AppMessage::Ask {
                 id,
                 selection,
-                text: ask_text(number, &title, &quote, &question),
+                text: ask_text(&items, &question),
             },
             Command::Action {
                 document_id,
@@ -143,6 +141,11 @@ pub enum CommandRejected {
     Unknown(SessionKey),
     #[error("the conversation is not connected; wait until its bridge reconnects")]
     NotLive,
+    /// The store refuses a question text over `MAX_TEXT_BYTES`; refused here, before queuing.
+    #[error(
+        "the question with its quoted items is {bytes} bytes, more than the {MAX_TEXT_BYTES} the CLI accepts; quote less or ask about fewer items"
+    )]
+    TooLong { bytes: usize },
 }
 
 /// What changed, for the shell to forward to the windows.
@@ -440,8 +443,16 @@ impl Registry {
             return Err(CommandRejected::NotLive);
         }
 
-        let id = Id::new_v4();
-        entry.push_pending(command.into_message(id));
+        // Time-ordered: an `ask` ID becomes the question's request ID, and the UI shows the
+        // latest question first by it.
+        let id = Id::now_v7();
+        let message = command.into_message(id);
+        if let AppMessage::Ask { text, .. } = &message
+            && text.len() > MAX_TEXT_BYTES
+        {
+            return Err(CommandRejected::TooLong { bytes: text.len() });
+        }
+        entry.push_pending(message);
         Ok(id)
     }
 

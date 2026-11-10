@@ -3,9 +3,10 @@ mod common;
 
 use common::*;
 use prism_app_host::registry::{Command, HostEvent, Link};
+use prism_core::ask::AskItem;
 use prism_core::model::{
-    ContentAction, DeliveryMode, DeliveryOutcome, Id, MAX_PAYLOAD_BYTES, Question, Selection,
-    SelectionSnapshot,
+    ContentAction, DeliveryMode, DeliveryOutcome, Id, MAX_PAYLOAD_BYTES, MAX_TEXT_BYTES, Question,
+    Selection, SelectionSnapshot,
 };
 use prism_core::protocol::*;
 use serde_json::json;
@@ -265,14 +266,19 @@ fn commands_get_fresh_ids_and_replies_are_matched() {
 
     let ask = Command::Ask {
         selection: selection(),
-        number: 1,
-        title: "First".into(),
-        quote: "First body".into(),
+        items: vec![AskItem {
+            number: 1,
+            title: "First".into(),
+            quote: "First body".into(),
+        }],
         question: "Why?".into(),
     };
     let first = app.host.send(&key(), ask).unwrap();
     let second = app.host.send(&key(), archive()).unwrap();
     assert_ne!(first, second);
+    // Time-ordered, so the UI can show the latest question first by its request ID.
+    assert_eq!(first.get_version_num(), 7);
+    assert!(second > first);
     assert_eq!(
         bridge.receive(),
         AppMessage::Ask {
@@ -311,6 +317,71 @@ fn commands_get_fresh_ids_and_replies_are_matched() {
             error: None
         }
     );
+}
+
+#[test]
+fn an_ask_about_several_items_names_each_of_them() {
+    let app = start_app();
+    let mut bridge = app.connect(session(1, 1));
+    bridge.snapshot(vec![document(1, 1, &["First", "Second"])], Vec::new());
+    app.wait_for("loaded", |state| {
+        state.sessions.iter().any(|session| session.loaded)
+    });
+
+    // As the UI sends it.
+    let ask: Command = serde_json::from_value(json!({
+        "type": "ask",
+        "selection": {"document_id": Id::from_u128(1), "revision": 1, "ids": [Id::from_u128(101), Id::from_u128(100)]},
+        "items": [
+            {"number": 2, "title": "Second", "quote": "Second body"},
+            {"number": 1, "title": "First", "quote": "First"},
+        ],
+        "question": "How do they relate?",
+    }))
+    .unwrap();
+    let id = app.host.send(&key(), ask).unwrap();
+    assert_eq!(
+        bridge.receive(),
+        AppMessage::Ask {
+            id,
+            selection: Selection {
+                document_id: Id::from_u128(1),
+                revision: 1,
+                ids: vec![Id::from_u128(101), Id::from_u128(100)],
+            },
+            text: "Item 2: Second\n> Second body\nItem 1: First\n> First\n\nHow do they relate?"
+                .into(),
+        }
+    );
+}
+
+#[test]
+fn an_ask_over_the_text_limit_is_refused_before_it_is_sent() {
+    let app = start_app();
+    let mut bridge = app.connect(session(1, 1));
+    bridge.snapshot(vec![document(1, 1, &["First"])], Vec::new());
+    app.wait_for("loaded", |state| {
+        state.sessions.iter().any(|session| session.loaded)
+    });
+
+    let ask = Command::Ask {
+        selection: selection(),
+        items: vec![AskItem {
+            number: 1,
+            title: "First".into(),
+            quote: "x".repeat(MAX_TEXT_BYTES),
+        }],
+        question: String::new(),
+    };
+    let error = app.host.send(&key(), ask).unwrap_err();
+    assert!(
+        error.contains("more than the 65536 the CLI accepts"),
+        "{error}"
+    );
+
+    // Nothing was queued: the next message the bridge sees is the next command.
+    let fetch = app.host.send(&key(), Command::Fetch).unwrap();
+    assert_eq!(bridge.receive(), AppMessage::Fetch { id: fetch });
 }
 
 #[test]

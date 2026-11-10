@@ -1,5 +1,5 @@
 import { MOD_KEY, h } from './dom.js';
-import { questionBlock } from './list.js';
+import { acceptanceBadges, askEditor, itemActions, questionBlock, selectionInside } from './list.js';
 import { questionsFor } from './rows.js';
 
 /** Zoom limits in pixels per world unit; a fitted diagram is never blown up beyond MAX_FIT_SCALE. */
@@ -34,6 +34,8 @@ const EXPORT_PROPERTIES = [
   'letter-spacing',
 ];
 const XML_PROLOG = '<?xml version="1.0" encoding="UTF-8"?>\n';
+/** Classes the view adds to shapes, left out of an export. */
+const VIEW_CLASSES = ['focused', 'selected'];
 
 /**
  * The diagram view of one tab: the SVG that `prism-core` laid out, panned and zoomed through
@@ -41,8 +43,9 @@ const XML_PROLOG = '<?xml version="1.0" encoding="UTF-8"?>\n';
  * `{x, y, scale}` is the world point at the top left and pixels per world unit; each
  * document has its own, `null` fits the whole diagram.
  *
- * `actions`: layout(document, visibleIds) -> Diagram, onFocus(id), onClear(),
- * onCamera(documentId, camera).
+ * `actions`: layout(document, visibleIds) -> Diagram, onFocus(id), onToggle(id), onClear(),
+ * onCamera(documentId, camera), and for the panel onAsk(), onAccept(), onHide(), onDrop(),
+ * onSend(question), onCancelAsk(), onDraft(text).
  */
 export class DiagramView {
   constructor(actions) {
@@ -57,6 +60,7 @@ export class DiagramView {
     this.pointerFocus = false;
     this.gestureScale = null;
     this.shownFocus = null;
+    this.shownSelection = null;
     this.panelSignature = null;
 
     this.message = h('div', { class: 'diagram-message', hidden: true });
@@ -106,8 +110,9 @@ export class DiagramView {
   }
 
   /**
-   * `model`: {document, rows, focus: the focused item's ID or null, questions,
-   * camera: the camera saved for this document or null}.
+   * `model`: {document, rows, focus: the focused item's ID or null, selected: Set of selected
+   * item IDs, questions, camera: the camera saved for this document or null,
+   * ask: {text, quoteLabel} | null, readOnly: why commands are unavailable, or null}.
    */
   render(model) {
     const previousFocus = this.model?.focus ?? null;
@@ -159,6 +164,7 @@ export class DiagramView {
     this.canvas.prepend(svg);
     this.showMessage(diagram.order.length === 0 ? 'Nothing to draw: the items shown here have no boxes.' : null);
     this.shownFocus = null;
+    this.shownSelection = null;
     this.applyCamera();
     this.showFocus(false);
     this.renderPanel();
@@ -170,6 +176,20 @@ export class DiagramView {
   /** After Esc: the keyboard stays in the diagram, on no item. */
   focusCanvas() {
     this.canvas.focus({ preventScroll: true });
+  }
+
+  /** After the ask editor closed: back to the focused item, or the canvas. */
+  restoreKeyboard() {
+    (this.stop(this.model?.focus) ?? this.canvas).focus({ preventScroll: true });
+  }
+
+  focusEditor() {
+    this.panel.querySelector('.ask textarea')?.focus();
+  }
+
+  /** The text the user selected inside the panel's text of the focused item. */
+  selectedText(id) {
+    return id === this.model?.focus ? selectionInside(this.panel.querySelector('.panel-body')) : '';
   }
 
   showMessage(text) {
@@ -207,6 +227,19 @@ export class DiagramView {
       }
       this.shownFocus = focus;
     }
+    const selection = [...this.model.selected].join();
+    if (selection !== this.shownSelection) {
+      for (const node of this.svg.querySelectorAll('[data-id]')) {
+        const selected = this.model.selected.has(node.dataset.id);
+        node.classList.toggle('selected', selected);
+        // Keyboard stops say it too; the label from prism-core is kept to restore it.
+        if (node.hasAttribute('aria-label')) {
+          node.dataset.label ??= node.getAttribute('aria-label');
+          node.setAttribute('aria-label', selected ? `Selected: ${node.dataset.label}` : node.dataset.label);
+        }
+      }
+      this.shownSelection = selection;
+    }
     const stop = this.stop(focus);
     if (!moved || !stop || this.pointerFocus) {
       return;
@@ -218,16 +251,38 @@ export class DiagramView {
     this.reveal(stop);
   }
 
+  /** Rebuilt only when what it shows changed; a rebuild keeps the draft, the keyboard and the caret. */
   renderPanel() {
+    const { ask, readOnly } = this.model;
     const row = this.model.rows.find((candidate) => candidate.id === this.model.focus) ?? null;
+    const selected = this.model.rows.filter((candidate) => this.model.selected.has(candidate.id));
     const questions = row ? questionsFor(this.model.questions, this.model.document.id, row.id) : [];
     const counts = this.svg ? ['box', 'pill', 'gate'].map((kind) => this.svg.querySelectorAll(`[data-kind="${kind}"]`).length) : null;
-    const signature = JSON.stringify([row, questions, row ? null : [this.model.document.title, counts]]);
+    const signature = JSON.stringify([row, questions, selected.map((item) => [item.number, item.title]), ask ? [ask.quoteLabel, ask.sending] : null, readOnly, row ? null : [this.model.document.title, counts]]);
     if (signature === this.panelSignature) {
       return;
     }
     this.panelSignature = signature;
-    this.panel.replaceChildren(...(row ? itemPanel(row, questions) : overviewPanel(this.model.document.title, counts)));
+    const previous = this.panel.querySelector('.ask textarea');
+    const typing = ask && previous && document.activeElement === previous;
+    const caret = typing ? [previous.selectionStart, previous.selectionEnd] : null;
+    const actions = row || selected.length > 0 || ask ? this.panelActions(selected.length, ask, readOnly) : null;
+    this.panel.replaceChildren(
+      ...(row ? itemPanel(row, questions, actions) : overviewPanel(this.model.document.title, counts, selected, actions)),
+    );
+    if (typing) {
+      const textarea = this.panel.querySelector('.ask textarea');
+      textarea.focus();
+      textarea.setSelectionRange(...caret);
+    }
+  }
+
+  /** The ask editor while asking, else the buttons for the focused or selected items. */
+  panelActions(selection, ask, readOnly) {
+    if (ask) {
+      return askEditor(ask, readOnly, this.actions);
+    }
+    return h('div', { class: 'panel-actions' }, itemActions(selection, readOnly, this.actions), readOnly ? h('span', { class: 'hint', text: readOnly }) : null);
   }
 
   // Camera
@@ -416,7 +471,9 @@ export class DiagramView {
     }
     const shape = event.target.closest?.('[data-id]');
     this.pointerFocus = true;
-    if (shape) {
+    if (shape && (event.metaKey || event.ctrlKey)) {
+      this.actions.onToggle(shape.dataset.id);
+    } else if (shape) {
       // An arrow's line is not a keyboard stop; its pill is.
       this.stop(shape.dataset.id)?.focus({ preventScroll: true });
       this.actions.onFocus(shape.dataset.id);
@@ -470,8 +527,8 @@ export class DiagramView {
     if (!this.svg || !this.diagram) {
       return null;
     }
-    const focused = [...this.svg.querySelectorAll('.focused')];
-    focused.forEach((node) => node.classList.remove('focused'));
+    const marked = VIEW_CLASSES.map((name) => [name, [...this.svg.querySelectorAll(`.${name}`)]]);
+    marked.forEach(([name, nodes]) => nodes.forEach((node) => node.classList.remove(name)));
     const copy = this.svg.cloneNode(true);
     const originals = [this.svg, ...this.svg.querySelectorAll(EXPORT_SHAPES)];
     const copies = [copy, ...copy.querySelectorAll(EXPORT_SHAPES)];
@@ -481,7 +538,7 @@ export class DiagramView {
         copies[index].setAttribute(property, style.getPropertyValue(property));
       }
     });
-    focused.forEach((node) => node.classList.add('focused'));
+    marked.forEach(([name, nodes]) => nodes.forEach((node) => node.classList.add(name)));
     copy.removeAttribute('class');
     copy.setAttribute('width', String(this.diagram.width));
     copy.setAttribute('height', String(this.diagram.height));
@@ -502,29 +559,46 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
-function itemPanel(row, questions) {
+/** The focused item; `actions` (buttons or the ask editor) come before its questions. */
+function itemPanel(row, questions, actions) {
+  const badges = acceptanceBadges(row);
   return [
     h('div', { class: `panel-tag kind-${row.kind}` }, h('span', { class: 'kind', text: row.kindLabel }), h('span', { class: 'number', text: String(row.number) })),
     h('h2', { class: 'panel-title', text: row.title }),
+    badges.length > 0 ? h('div', { class: 'badges' }, badges) : null,
     row.body ? h('div', { class: 'panel-body', text: row.body }) : null,
     row.source ? h('div', { class: 'card-source', text: row.source }) : null,
+    actions,
     ...questions.map(questionBlock),
   ].filter(Boolean);
 }
 
-function overviewPanel(title, counts) {
+function overviewPanel(title, counts, selected, actions) {
   const [boxes, arrows, badges] = counts ?? [0, 0, 0];
   const chip = (count, one, many) => h('span', { class: 'chip', text: `${count} ${count === 1 ? one : many}` });
   return [
     h('div', { class: 'panel-tag' }, h('span', { class: 'kind', text: 'Diagram' })),
     h('h2', { class: 'panel-title', text: title }),
     counts ? h('div', { class: 'chips' }, chip(boxes, 'box', 'boxes'), chip(arrows, 'arrow', 'arrows'), chip(badges, 'badge', 'badges')) : null,
+    selected.length > 0
+      ? h(
+          'div',
+          { class: 'panel-selection' },
+          h('h3', { text: `${selected.length} selected` }),
+          h('ul', {}, selected.map((item) => h('li', {}, h('span', { class: 'number', text: String(item.number) }), ' ', item.title))),
+        )
+      : null,
+    actions,
     h(
       'p',
       { class: 'hint' },
       'Click a box, an arrow’s number or a badge, or press ',
       h('kbd', { text: 'Tab' }),
-      '. Drag or scroll to pan; ',
+      '; ',
+      h('kbd', { text: 'Space' }),
+      ' or ',
+      h('kbd', { text: MOD_KEY }),
+      ' and click selects several. Drag or scroll to pan; ',
       h('kbd', { text: MOD_KEY }),
       ' and scroll or pinch to zoom.',
     ),

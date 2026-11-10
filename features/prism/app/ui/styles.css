@@ -19,6 +19,8 @@
   --accent-text: #ffffff;
   --focus: #2563eb;
   --focus-soft: rgba(37, 99, 235, 0.14);
+  /* Items selected for one action. */
+  --selected-bg: #edf2fd;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
   --shadow-pop: 0 10px 30px rgba(16, 24, 40, 0.16), 0 1px 3px rgba(16, 24, 40, 0.08);
 
@@ -29,6 +31,8 @@
   --danger: #c62828;
   --danger-soft: rgba(198, 40, 40, 0.09);
   --warning-soft: rgba(217, 119, 6, 0.1);
+  /* Amber for text: at least 4.5:1 on the surfaces, muted surfaces and selection tint. */
+  --warning-text: #9a5800;
   --success: #15803d;
 
   /* Item kinds, as in the terminal list. */
@@ -67,6 +71,7 @@
     --accent-text: #0d1117;
     --focus: #6ea0ff;
     --focus-soft: rgba(110, 160, 255, 0.16);
+    --selected-bg: #1f2a40;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
 
@@ -76,6 +81,7 @@
     --danger: #f06a6a;
     --danger-soft: rgba(240, 106, 106, 0.12);
     --warning-soft: rgba(227, 163, 59, 0.12);
+    --warning-text: #e3a33b;
     --success: #3fb950;
 
     --kind-text: #9aa5b8;
@@ -426,6 +432,34 @@ button {
   flex: 1;
 }
 
+.toolbar .filter {
+  flex: 0 1 180px;
+  min-width: 80px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.toolbar .filter:focus {
+  border-color: var(--focus);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-soft);
+}
+
+.toolbar .filter.active {
+  border-color: var(--accent);
+  background: var(--selected-bg);
+}
+
+.toolbar .button.selection {
+  color: var(--accent);
+  font-weight: 550;
+}
+
 .toolbar .info {
   color: var(--faint);
   font-variant-numeric: tabular-nums;
@@ -522,6 +556,19 @@ button {
   box-shadow: 0 0 0 3px var(--focus-soft);
 }
 
+.card.selected {
+  border-color: var(--accent);
+  background: var(--selected-bg);
+}
+
+.card.selected .card-head .number {
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+  text-align: center;
+}
+
 .card-head {
   display: flex;
   align-items: baseline;
@@ -582,11 +629,27 @@ button {
 
 .badge.changed,
 .badge.stale {
-  color: var(--disconnected);
+  color: var(--warning-text);
 }
 
 .badge.asked {
   color: var(--kind-question);
+}
+
+.badge.asked.tone-prompt {
+  color: var(--accent);
+}
+
+.badge.asked.tone-answered {
+  color: var(--success);
+}
+
+.badge.asked.tone-warning {
+  color: var(--warning-text);
+}
+
+.badge.asked.tone-error {
+  color: var(--danger);
 }
 
 .excerpt {
@@ -635,6 +698,40 @@ button {
 .card-question .state {
   color: var(--faint);
   font-size: 11px;
+}
+
+/* Question states: in the prompt box, answered, needs attention, failed. */
+.card-question.tone-prompt {
+  border-left-color: var(--accent);
+}
+
+.card-question.tone-prompt .state {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.card-question.tone-answered {
+  border-left-color: var(--success);
+}
+
+.card-question.tone-answered .state {
+  color: var(--success);
+}
+
+.card-question.tone-warning {
+  border-left-color: var(--disconnected);
+}
+
+.card-question.tone-warning .state {
+  color: var(--warning-text);
+}
+
+.card-question.tone-error {
+  border-left-color: var(--danger);
+}
+
+.card-question.tone-error .state {
+  color: var(--danger);
 }
 
 .card-actions {
@@ -870,8 +967,61 @@ button {
 }
 
 .diagram-panel .card-source,
-.diagram-panel .card-question {
+.diagram-panel .card-question,
+.diagram-panel .ask {
   margin-left: 0;
+}
+
+.diagram-panel .ask .quote {
+  white-space: normal;
+}
+
+/* The panel is narrow: the key hint gets its own line above the buttons. */
+.diagram-panel .ask .row {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.diagram-panel .ask .row .hint {
+  flex-basis: 100%;
+}
+
+.diagram-panel .badges {
+  flex-wrap: wrap;
+}
+
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.panel-actions .hint {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.panel-selection h3 {
+  margin: 4px 0;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.panel-selection ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.panel-selection .number {
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .diagram-panel .chips {
@@ -995,6 +1145,32 @@ button {
   fill: var(--gate-text);
 }
 
+/* Selected items: tinted, under the focus highlight. */
+
+.diagram-svg .prism-lane.selected .prism-shape {
+  fill: var(--accent);
+  fill-opacity: 0.12;
+  stroke: var(--accent);
+  stroke-opacity: 1;
+}
+
+.diagram-svg .prism-box.selected .prism-shape {
+  fill: var(--selected-bg);
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+.diagram-svg .prism-arrow.selected .prism-line {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+.diagram-svg .prism-pill.selected .prism-shape,
+.diagram-svg .prism-gate.selected .prism-shape {
+  stroke: var(--text);
+  stroke-width: 2;
+}
+
 /* The focused item, in every shape that shows it. */
 
 .diagram-svg .prism-lane.focused .prism-shape {
@@ -1030,9 +1206,18 @@ button {
   stroke-width: 2.5;
 }
 
-/* Narrow windows: the panel goes below the canvas. */
+/* Narrow windows: the panel goes below the canvas, the documents get a row of their own. */
 
 @media (max-width: 760px) {
+  .toolbar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .toolbar .documents {
+    flex: 1 1 100%;
+  }
+
   .diagram-view {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) minmax(0, 40%);
@@ -1235,7 +1420,8 @@ button {
 }
 
 .statusbar .message {
-  flex: 1;
+  /* The message takes what it needs; the key map gets the rest and is shortened first. */
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1251,8 +1437,13 @@ button {
 }
 
 .statusbar .keys {
-  flex: none;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
   color: var(--faint);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 kbd {

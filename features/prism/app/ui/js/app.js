@@ -1,16 +1,21 @@
 import { DiagramView } from './diagram.js';
 import { h } from './dom.js';
 import { agentLabel, firstLine, projectName, shortConversation } from './format.js';
-import { ListView } from './list.js';
-import { itemCount, rows as buildRows, sortedDocuments } from './rows.js';
+import { ACCEPT_NOTE, ListView } from './list.js';
+import { activeIds, itemCount, rows as buildRows, sortedDocuments } from './rows.js';
 
 /** View state is saved this long after the last change, not on every key press. */
 const VIEW_SAVE_DELAY_MS = 300;
 /** After a tab was dropped outside every window, wait this long for another window to claim it. */
 const DRAG_OUT_CHECK_DELAY_MS = 250;
 const TAB_DRAG_PREFIX = 'prism-tab:';
-/** Per tab, saved by the host. `cameras`: the diagram's zoom and pan per document ID; none fits it. */
-const DEFAULT_VIEW = { document: null, focus: null, hidden: [], mode: 'list', cameras: {} };
+/** A reply can arrive before `send_command` returned its ID; it waits this long to be matched. */
+const EARLY_REPLY_KEEP_MS = 10000;
+/**
+ * Per tab, saved by the host. `cameras`: the diagram's zoom and pan per document ID; none fits
+ * it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
+ */
+const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], mode: 'list', cameras: {} };
 /** What a tab shows: `mode` in its view state; V switches. */
 const VIEWS = ['list', 'diagram'];
 const VIEW_LABELS = { list: 'List', diagram: 'Diagram' };
@@ -21,24 +26,36 @@ const READ_ONLY_REASONS = {
   waiting: 'Read-only until the bridge connects',
   ended: 'Read-only: this conversation ended',
 };
+/** Keys, action and rank: when the status bar is short of room, the highest ranks go first. */
 const KEY_HINTS = {
   list: [
-    [['J', 'K'], 'move'],
-    [['Enter'], 'ask'],
-    [['H'], 'hide'],
-    [['X'], 'drop'],
-    [['U'], 'undo'],
-    [['[', ']'], 'documents'],
-    [['V'], 'diagram'],
+    [['J', 'K'], 'move', 1],
+    [['Space'], 'select', 2],
+    [['Shift+A'], 'all', 5],
+    [['Enter'], 'ask', 1],
+    [['A'], 'accept', 2],
+    [['X'], 'drop', 2],
+    [['U'], 'undo', 2],
+    [['H'], 'hide', 3],
+    [['/'], 'filter', 3],
+    [['Esc'], 'clear', 4],
+    [['[', ']'], 'documents', 4],
+    [['V'], 'diagram', 3],
   ],
   diagram: [
-    [['J', 'K'], 'move'],
-    [['+', '-'], 'zoom'],
-    [['0'], 'fit'],
-    [['Esc'], 'clear'],
-    [['H'], 'hide'],
-    [['S'], 'export'],
-    [['V'], 'list'],
+    [['J', 'K'], 'move', 1],
+    [['Space'], 'select', 2],
+    [['Enter'], 'ask', 1],
+    [['A'], 'accept', 2],
+    [['X'], 'drop', 2],
+    [['U'], 'undo', 2],
+    [['+', '-'], 'zoom', 3],
+    [['0'], 'fit', 4],
+    [['Esc'], 'clear', 4],
+    [['H'], 'hide', 3],
+    [['/'], 'filter', 3],
+    [['S'], 'export', 4],
+    [['V'], 'list', 3],
   ],
 };
 const SESSION_GROUPS = [
@@ -83,6 +100,7 @@ class App {
     this.focusIndex = new Map();
     this.saveTimers = new Map();
     this.pending = new Map();
+    this.earlyReplies = new Map();
     this.ask = null;
     this.message = null;
     this.sessionsOpen = false;
@@ -109,6 +127,22 @@ class App {
       h('div', { class: 'strip-actions' }, this.sessionsButton),
     );
     this.header = h('div', { class: 'tab-header' });
+    // One input for the active tab's filter, kept across header rebuilds so typing goes on.
+    this.filterInput = h('input', {
+      class: 'filter',
+      type: 'search',
+      placeholder: 'Filter',
+      spellcheck: 'false',
+      'aria-label': 'Filter the items of this tab',
+      title: 'Show only items whose kind, title, text or ID contains this; only this tab (/)',
+      oninput: () => this.updateView(this.activeKey(), { filter: this.filterInput.value }),
+      onkeydown: (event) => {
+        if (event.key === 'Escape' || event.key === 'Enter') {
+          event.preventDefault();
+          this.leaveFilter();
+        }
+      },
+    });
     this.body = h('div', { class: 'body' });
     this.popover = h('div', { class: 'popover', role: 'dialog', 'aria-label': 'Sessions', hidden: true });
     this.main = h('main', { class: 'main' }, this.header, this.body, this.popover);
@@ -117,6 +151,8 @@ class App {
     this.statusbar = h('footer', { class: 'statusbar' }, this.statusMessage, this.keys);
     this.menuElement = h('div', { class: 'menu', role: 'menu', hidden: true });
     this.root.replaceChildren(this.tabstrip, this.main, this.statusbar, this.menuElement);
+    this.keysSignature = null;
+    new ResizeObserver(() => this.renderStatus()).observe(this.statusbar);
   }
 
   async start() {
@@ -167,11 +203,22 @@ class App {
       const content = await this.backend.content(key);
       if (content) {
         this.contents.set(key, content);
+        this.pruneSelection(key);
       }
     } finally {
       this.loading.delete(key);
     }
     this.render();
+  }
+
+  /** Selected items that were dropped, or left with their document, leave the selection. */
+  pruneSelection(key) {
+    const current = this.current(key);
+    const active = current ? activeIds(current.document) : new Set();
+    const selected = this.view(key).selected;
+    if (selected.some((id) => !active.has(id))) {
+      this.storeView(key, { selected: selected.filter((id) => active.has(id)) });
+    }
   }
 
   myWindow() {
@@ -214,20 +261,29 @@ class App {
         key,
         new ListView({
           onFocus: (id) => this.focus(key, id),
-          onAsk: (row) => this.openAsk(key, row),
-          onHide: (row) => this.hide(key, row),
-          onDrop: (row) => this.drop(key, row),
-          onSend: (row, question) => this.sendAsk(key, row, question),
-          onCancelAsk: () => this.cancelAsk(),
-          onDraft: (text) => {
-            if (this.ask) {
-              this.ask.text = text;
-            }
-          },
+          ...this.itemActions(key),
         }),
       );
     }
     return this.listViews.get(key);
+  }
+
+  /** What the list and the diagram panel do with the focused or selected items. */
+  itemActions(key) {
+    return {
+      onToggle: (id) => this.toggleSelection(key, id),
+      onAsk: () => this.openAsk(key),
+      onAccept: () => this.accept(key),
+      onHide: () => this.hide(key),
+      onDrop: () => this.drop(key),
+      onSend: (question) => this.sendAsk(key, question),
+      onCancelAsk: () => this.cancelAsk(),
+      onDraft: (text) => {
+        if (this.ask) {
+          this.ask.text = text;
+        }
+      },
+    };
   }
 
   diagramView(key) {
@@ -237,6 +293,7 @@ class App {
         new DiagramView({
           layout: (document, visible) => this.backend.diagram(document, visible),
           onFocus: (id) => this.focus(key, id),
+          ...this.itemActions(key),
           onClear: () => this.focus(key, null),
           onCamera: (documentId, camera) => {
             const cameras = { ...this.view(key).cameras };
@@ -253,7 +310,7 @@ class App {
     return this.diagramViews.get(key);
   }
 
-  /** The document, its visible rows and the focused row of a tab; null before content. */
+  /** The document, its visible rows, the focused and the selected rows of a tab; null before content. */
   current(key) {
     const content = this.contents.get(key);
     if (!content || content.documents.length === 0) {
@@ -262,14 +319,16 @@ class App {
     const view = this.view(key);
     const documents = sortedDocuments(content.documents);
     const document = documents.find((candidate) => candidate.id === view.document) ?? documents[0];
-    const rows = buildRows(document, new Set(view.hidden));
+    const rows = buildRows(document, new Set(view.hidden), view.filter);
     let focusIndex = rows.findIndex((row) => row.id === view.focus);
     if (focusIndex === -1 && rows.length > 0) {
       // The focused item left (dropped, hidden): its neighbour takes over.
       focusIndex = Math.min(this.focusIndex.get(key) ?? 0, rows.length - 1);
     }
     this.focusIndex.set(key, focusIndex);
-    return { content, documents, document, rows, focus: rows[focusIndex] ?? null };
+    // Only what is shown counts: a selected item hidden or filtered out takes no part.
+    const selected = new Set(view.selected);
+    return { content, documents, document, rows, focus: rows[focusIndex] ?? null, selected: rows.filter((row) => selected.has(row.id)) };
   }
 
   // Rendering
@@ -384,12 +443,23 @@ class App {
     const current = this.current(key);
     const view = this.view(key);
     const hidden = view.hidden.length;
+    const filtering = document.activeElement === this.filterInput;
+    const caret = filtering ? [this.filterInput.selectionStart, this.filterInput.selectionEnd] : null;
     this.patch(
       'header',
       this.header,
-      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, current?.rows.length, hidden, view.mode],
-      () => this.tabHeader(key, session, state, current, hidden, view.mode),
+      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, current?.rows.length, hidden, current?.selected.length, view.selected.length, view.mode],
+      () => this.tabHeader(key, session, state, current, hidden, view),
     );
+    if (filtering && document.activeElement !== this.filterInput) {
+      this.filterInput.focus();
+      this.filterInput.setSelectionRange(...caret);
+    }
+    // While typing the two agree; they differ after a tab switch or Clear filter.
+    if (this.filterInput.value !== view.filter) {
+      this.filterInput.value = view.filter;
+    }
+    this.filterInput.classList.toggle('active', view.filter.trim() !== '');
 
     if (!current) {
       this.showBody(null);
@@ -401,17 +471,27 @@ class App {
     if (current.rows.length === 0) {
       this.showBody(null);
       const total = itemCount(current.document);
-      this.patch('body', this.body, ['no-rows', key, current.document.id, total, hidden], () => [
+      const filter = view.filter.trim();
+      this.patch('body', this.body, ['no-rows', key, current.document.id, total, hidden, filter], () => [
         total === 0
           ? empty('This document has no items', 'Dropped items come back with U (undo).')
-          : empty(
-              `All ${total} items are hidden in this tab`,
-              null,
-              h('button', { class: 'button', text: 'Show hidden', onclick: () => this.updateView(key, { hidden: [] }) }),
-            ),
+          : filter
+            ? empty(
+                `No items match “${filter}”`,
+                hidden > 0 ? `Items hidden in this tab are not searched; Shift+H shows them.` : null,
+                h('button', { class: 'button', text: 'Clear filter', onclick: () => this.updateView(key, { filter: '' }) }),
+              )
+            : empty(
+                `All ${total} items are hidden in this tab`,
+                null,
+                h('button', { class: 'button', text: 'Show hidden', onclick: () => this.updateView(key, { hidden: [] }) }),
+              ),
       ]);
       return;
     }
+    const selected = new Set(current.selected.map((row) => row.id));
+    const ask = this.ask?.key === key ? this.ask : null;
+    const readOnly = READ_ONLY_REASONS[state] ?? null;
 
     if (view.mode === 'diagram') {
       const diagramView = this.diagramView(key);
@@ -421,8 +501,11 @@ class App {
         rows: current.rows,
         // Only an item the user picked: without one the panel shows the overview.
         focus: view.focus,
+        selected,
         questions: current.content.questions,
         camera: view.cameras?.[current.document.id] ?? null,
+        ask,
+        readOnly,
       });
       return;
     }
@@ -432,9 +515,10 @@ class App {
       document: current.document,
       rows: current.rows,
       focus: current.focus?.id ?? null,
+      selected,
       questions: current.content.questions,
-      ask: this.ask?.key === key ? this.ask : null,
-      readOnly: READ_ONLY_REASONS[state] ?? null,
+      ask,
+      readOnly,
     });
   }
 
@@ -456,7 +540,10 @@ class App {
     }
   }
 
-  tabHeader(key, session, state, current, hidden, mode) {
+  tabHeader(key, session, state, current, hidden, view) {
+    const mode = view.mode;
+    // Selected items hidden or filtered out stay selected but take no part in actions.
+    const filteredOut = current ? view.selected.length - current.selected.length : 0;
     const agent = session ? agentLabel(session.agent) : '';
     const parts = [
       h(
@@ -493,7 +580,7 @@ class App {
                 'aria-selected': String(document.id === current.document.id),
                 title: document.title,
                 text: document.title,
-                onclick: () => this.updateView(key, { document: document.id, focus: null }),
+                onclick: () => this.showDocument(key, document.id),
               }),
             ),
           ),
@@ -509,7 +596,16 @@ class App {
               }),
             ),
           ),
+          this.filterInput,
           h('span', { class: 'spacer' }),
+          view.selected.length > 0
+            ? h('button', {
+                class: 'button quiet selection',
+                title: filteredOut > 0 ? 'Actions leave out selected items that are hidden or filtered out. Clear the selection (Esc)' : 'Clear the selection (Esc)',
+                text: `${current.selected.length} selected${filteredOut > 0 ? ` (${filteredOut} not shown)` : ''} · clear`,
+                onclick: () => this.clearSelection(key),
+              })
+            : null,
           h('span', {
             class: 'info',
             text: `${current.rows.length} ${current.rows.length === 1 ? 'item' : 'items'} · revision ${current.document.revision}`,
@@ -681,9 +777,29 @@ class App {
     const key = this.activeKey();
     this.keys.hidden = !key;
     const mode = key ? this.view(key).mode : 'list';
-    this.patch('keys', this.keys, [mode], () => keyHints(KEY_HINTS[mode] ?? KEY_HINTS.list));
     this.statusMessage.textContent = this.message?.text ?? '';
+    this.statusMessage.title = this.message?.text ?? '';
     this.statusMessage.className = `message ${this.message?.tone ?? ''}`;
+    this.fitKeys(mode);
+  }
+
+  /** Shows the key hints that fit beside the message, leaving out the highest ranks first. */
+  fitKeys(mode) {
+    const signature = JSON.stringify([mode, this.keys.hidden, this.message?.text ?? '', this.statusbar.clientWidth]);
+    if (this.keys.hidden || signature === this.keysSignature) {
+      return;
+    }
+    this.keysSignature = signature;
+    let hints = KEY_HINTS[mode] ?? KEY_HINTS.list;
+    this.keys.replaceChildren(...keyHints(hints));
+    const ranks = [...new Set(hints.map(([, , rank]) => rank))].sort((left, right) => right - left);
+    for (const rank of ranks) {
+      if (this.keys.scrollWidth <= this.keys.clientWidth) {
+        break;
+      }
+      hints = hints.filter(([, , other]) => other < rank);
+      this.keys.replaceChildren(...keyHints(hints));
+    }
   }
 
   renderMenu() {
@@ -848,7 +964,69 @@ class App {
     }
     const index = current.documents.findIndex((document) => document.id === current.document.id);
     const next = current.documents[(index + step + current.documents.length) % current.documents.length];
-    this.updateView(key, { document: next.id, focus: null });
+    this.showDocument(key, next.id);
+  }
+
+  /** Another document of the tab: its own items, so no focus, selection or open question. */
+  showDocument(key, id) {
+    if (this.ask?.key === key) {
+      this.ask = null;
+    }
+    this.updateView(key, { document: id, focus: null, selected: [] });
+  }
+
+  focusFilter() {
+    this.filterInput.focus();
+    this.filterInput.select();
+  }
+
+  /** Enter or Esc in the filter: the keyboard goes back to the items, the filter stays. */
+  leaveFilter() {
+    const key = this.activeKey();
+    if (this.view(key).mode === 'diagram') {
+      this.diagramView(key).restoreKeyboard();
+    } else {
+      this.listView(key).element.focus();
+    }
+  }
+
+  /** What an action acts on: the selected items shown, else the focused one (in the diagram, only one the user picked). */
+  targets(key) {
+    const current = this.current(key);
+    if (!current) {
+      return [];
+    }
+    if (current.selected.length > 0) {
+      return current.selected;
+    }
+    const focus = this.view(key).mode === 'diagram' ? this.diagramFocus(key) : current.focus;
+    return focus ? [focus] : [];
+  }
+
+  /** Space, or a click with ⌘/Ctrl: the item joins or leaves the selection and takes the focus. */
+  toggleSelection(key, id) {
+    const selected = this.view(key).selected;
+    this.updateView(key, { focus: id, selected: selected.includes(id) ? selected.filter((other) => other !== id) : [...selected, id] });
+  }
+
+  /** Shift+A: every item shown is selected, as in the terminal list. */
+  selectAll(key) {
+    const rows = this.current(key)?.rows ?? [];
+    this.updateView(key, { selected: rows.map((row) => row.id) });
+  }
+
+  clearSelection(key) {
+    if (this.view(key).selected.length > 0) {
+      this.updateView(key, { selected: [] });
+    }
+  }
+
+  /** Removes items from the selection, for example once an action on them committed. */
+  deselect(key, ids) {
+    const selected = this.view(key).selected;
+    if (selected.some((id) => ids.includes(id))) {
+      this.updateView(key, { selected: selected.filter((id) => !ids.includes(id)) });
+    }
   }
 
   /** The item picked in the diagram, if it is still shown. */
@@ -900,119 +1078,233 @@ class App {
     return this.session(key)?.link.state === 'live';
   }
 
-  openAsk(key, row) {
+  /** Whether shared commands can go out; if not, says why instead of sending. */
+  requireLive(key) {
+    if (this.isLive(key)) {
+      return true;
+    }
+    this.setMessage(READ_ONLY_REASONS[this.session(key)?.link.state ?? 'waiting'] ?? 'Not connected.', 'error');
+    return false;
+  }
+
+  /** The targets of an action, or none with a hint when nothing is focused or selected. */
+  pickedTargets(key) {
+    const targets = this.targets(key);
+    if (targets.length === 0) {
+      this.setMessage('Pick an item first: click it, or move to it with J and K.', 'error');
+    }
+    return targets;
+  }
+
+  /**
+   * Opens the question editor for the focused or selected items: in the focused card, or in
+   * the diagram's panel; when the focused item is not among them, the first one takes the
+   * focus. Text selected inside the focused item becomes its quote; every other item is
+   * quoted in full.
+   */
+  openAsk(key) {
     if (!this.isLive(key)) {
       this.setMessage('Not connected: asking needs a live conversation.', 'error');
       return;
     }
-    const selected = this.listView(key).selectedText(row.id);
-    const quote = selected.trim() ? selected : row.details;
+    const targets = this.pickedTargets(key);
+    if (targets.length === 0) {
+      return;
+    }
+    const diagram = this.view(key).mode === 'diagram';
+    const view = diagram ? this.diagramView(key) : this.listView(key);
+    let focus = diagram ? this.diagramFocus(key) : this.current(key).focus;
+    if (!focus || !targets.some((row) => row.id === focus.id)) {
+      focus = targets[0];
+      this.storeView(key, { focus: focus.id });
+    }
+    const quoted = view.selectedText(focus.id);
+    const quotedRow = quoted.trim() ? focus : null;
+    const ids = targets.map((row) => row.id);
+    const same = this.ask?.key === key && this.ask.ids.join() === ids.join();
     this.ask = {
       key,
-      id: row.id,
-      text: this.ask?.id === row.id ? this.ask.text : '',
-      quote,
-      quoteLabel: selected.trim()
-        ? `Quoting your selection: “${firstLine(selected)}”`
-        : `Quoting item ${row.number}, ${row.title}, in full`,
+      id: focus.id,
+      ids,
+      // Only the user's quote is kept; numbers, titles and full texts are read again on send.
+      quote: quotedRow ? { id: quotedRow.id, text: quoted } : null,
+      text: same ? this.ask.text : '',
+      quoteLabel: quoteLabel(targets, quotedRow, quoted),
+      sending: false,
     };
     this.render();
-    this.listView(key).focusEditor();
+    if (!diagram) {
+      view.reveal(focus.id);
+    }
+    view.focusEditor();
   }
 
   cancelAsk() {
     const key = this.ask?.key;
     this.ask = null;
     this.render();
-    if (key) {
+    if (!key) {
+      return;
+    }
+    if (this.view(key).mode === 'diagram') {
+      this.diagramView(key).restoreKeyboard();
+    } else {
       this.listView(key).element.focus();
     }
   }
 
-  async sendAsk(key, row, question) {
+  /**
+   * Shares the question with the items as they are shown now. The editor closes only once the
+   * bridge confirmed; an error keeps it open with the draft.
+   */
+  async sendAsk(key, question) {
+    const ask = this.ask;
     const current = this.current(key);
-    if (!current || !this.ask) {
+    if (!current || ask?.key !== key || ask.sending) {
       return;
     }
+    const rows = ask.ids.map((id) => current.rows.find((row) => row.id === id));
+    const gone = rows.filter((row) => !row).length;
+    if (gone > 0) {
+      this.setMessage(`${gone === 1 ? 'An item' : `${gone} items`} of this question left the list (dropped, hidden or filtered out). Cancel and ask again.`, 'error');
+      return;
+    }
+    const items = rows.map((row) => ({ number: row.number, title: row.title, quote: row.id === ask.quote?.id ? ask.quote.text : row.details }));
+    const reopen = () => {
+      if (this.ask === ask) {
+        ask.sending = false;
+        this.render();
+      }
+    };
+    ask.sending = true;
+    this.render();
     const sent = await this.send(
       key,
       {
         type: 'ask',
-        selection: { document_id: current.document.id, revision: current.document.revision, ids: [row.id] },
-        number: row.number,
-        title: row.title,
-        quote: this.ask.quote,
+        selection: { document_id: current.document.id, revision: current.document.revision, ids: ask.ids },
+        items,
         question,
       },
-      `Shared item ${row.number} with the CLI prompt box.`,
+      {
+        sending: 'Sharing…',
+        done: `Shared ${items.length === 1 ? 'item' : 'items'} ${items.map((item) => item.number).join(', ')} with the CLI prompt box.`,
+        onSuccess: () => {
+          if (this.ask === ask) {
+            this.cancelAsk();
+          }
+        },
+        onError: reopen,
+      },
     );
-    if (sent) {
-      this.setMessage('Sharing…');
-      this.cancelAsk();
+    if (!sent) {
+      reopen();
     }
   }
 
-  hide(key, row) {
-    this.updateView(key, { hidden: [...this.view(key).hidden, row.id] });
-    this.setMessage(`Hid “${row.title}” in this tab. Shift+H shows hidden items.`);
-  }
-
-  async drop(key, row) {
-    const current = this.current(key);
-    if (!current) {
+  hide(key) {
+    const targets = this.pickedTargets(key);
+    if (targets.length === 0) {
       return;
     }
-    const sent = await this.send(
+    const ids = targets.map((row) => row.id);
+    const view = this.view(key);
+    this.updateView(key, { hidden: [...view.hidden, ...ids], selected: view.selected.filter((id) => !ids.includes(id)) });
+    this.setMessage(`Hid ${described(targets)} in this tab. Shift+H shows hidden items.`);
+  }
+
+  drop(key) {
+    const targets = this.isLive(key) ? this.pickedTargets(key) : [];
+    return this.applyAction(key, 'archive', targets, {
+      sending: 'Dropping…',
+      done: `Dropped ${described(targets)}. U undoes.`,
+    });
+  }
+
+  accept(key) {
+    const targets = this.isLive(key) ? this.pickedTargets(key) : [];
+    return this.applyAction(key, 'accept', targets, {
+      sending: 'Accepting…',
+      done: `Accepted ${described(targets)}. ${ACCEPT_NOTE}`,
+    });
+  }
+
+  /** One `action` for all targets at the document's revision; once it committed, they leave the selection. */
+  async applyAction(key, action, targets, { sending, done }) {
+    const current = this.current(key);
+    if (!current || !this.requireLive(key) || targets.length === 0) {
+      return;
+    }
+    const ids = targets.map((row) => row.id);
+    await this.send(
       key,
       {
         type: 'action',
         document_id: current.document.id,
         expected_revision: current.document.revision,
-        action: { action: 'archive', ids: [row.id] },
+        action: { action, ids },
       },
-      `Dropped “${row.title}”. U undoes.`,
+      { sending, done, onSuccess: () => this.deselect(key, ids) },
     );
-    if (sent) {
-      this.setMessage('Dropping…');
-    }
   }
 
+  /** Reverts the latest undo record of the document, whatever made it (drop, accept, a tool). */
   async undo(key) {
     const current = this.current(key);
-    if (!current) {
+    if (!current || !this.requireLive(key)) {
       return;
     }
-    const sent = await this.send(
+    await this.send(
       key,
       { type: 'undo', document_id: current.document.id, expected_revision: current.document.revision },
-      'Undone.',
+      {
+        sending: 'Undoing…',
+        done: 'Undid the latest action on this document.',
+        errors: {
+          not_found: 'Nothing to undo in this document.',
+          // The store discards a record that can never apply, so the next undo reaches the one before.
+          undo_conflict: 'The latest action conflicts with later changes and was discarded; U undoes the one before it.',
+        },
+      },
     );
-    if (sent) {
-      this.setMessage('Undoing…');
-    }
   }
 
-  /** Sends a command; its reply later shows `done` or the error. */
-  async send(key, command, done) {
+  /**
+   * Sends a command and shows `sending`; its reply later runs `onSuccess` and shows `done`, or
+   * runs `onError` and shows the error, in the words of `errors[code]` when given.
+   */
+  async send(key, command, { sending, done, errors = {}, onSuccess = null, onError = null }) {
+    let id;
     try {
-      const id = await this.backend.send(key, command);
-      this.pending.set(id, { key, done });
-      return true;
+      id = await this.backend.send(key, command);
     } catch (error) {
       this.setMessage(String(error), 'error');
       return false;
     }
+    this.pending.set(id, { key, done, errors, onSuccess, onError });
+    this.setMessage(sending);
+    const early = this.earlyReplies.get(id);
+    if (early) {
+      this.earlyReplies.delete(id);
+      this.onReply(early);
+    }
+    return true;
   }
 
-  onReply({ id, error }) {
-    const pending = this.pending.get(id);
+  onReply(reply) {
+    const pending = this.pending.get(reply.id);
     if (!pending) {
+      // Possibly faster than `send` returning its ID: kept briefly for it.
+      this.earlyReplies.set(reply.id, reply);
+      setTimeout(() => this.earlyReplies.delete(reply.id), EARLY_REPLY_KEEP_MS);
       return;
     }
-    this.pending.delete(id);
-    if (error) {
-      this.setMessage(errorText(error), 'error');
+    this.pending.delete(reply.id);
+    if (reply.error) {
+      pending.onError?.();
+      this.setMessage(pending.errors[reply.error.code] ?? errorText(reply.error), 'error');
     } else {
+      pending.onSuccess?.();
       this.setMessage(pending.done, 'success');
     }
   }
@@ -1067,11 +1359,16 @@ class App {
       ArrowUp: () => this.moveFocus(key, -1),
       Home: () => this.moveFocus(key, -Infinity),
       End: () => this.moveFocus(key, Infinity),
-      Enter: () => focus() && this.openAsk(key, focus()),
-      h: () => focus() && this.hide(key, focus()),
+      ' ': () => focus() && this.toggleSelection(key, focus().id),
+      A: () => this.selectAll(key),
+      Escape: () => this.clearSelection(key),
+      Enter: () => this.openAsk(key),
+      a: () => this.accept(key),
+      h: () => this.hide(key),
       H: () => this.updateView(key, { hidden: [] }),
-      x: () => focus() && this.drop(key, focus()),
+      x: () => this.drop(key),
       u: () => this.undo(key),
+      '/': () => this.focusFilter(),
       '[': () => this.cycleDocuments(key, -1),
       ']': () => this.cycleDocuments(key, 1),
       v: () => this.updateView(key, { mode: VIEWS[(VIEWS.indexOf(this.view(key).mode) + 1) % VIEWS.length] }),
@@ -1106,12 +1403,10 @@ class App {
       '=': () => diagram.zoomStep(1),
       '-': () => diagram.zoomStep(-1),
       0: () => diagram.fit(),
-      Escape: () => this.clearDiagramFocus(key),
-      h: () => focused() && this.hide(key, focused()),
-      x: () => focused() && this.drop(key, focused()),
+      ' ': () => focused() && this.toggleSelection(key, focused().id),
+      // A selection clears first, then the focus.
+      Escape: () => (this.view(key).selected.length > 0 ? this.clearSelection(key) : this.clearDiagramFocus(key)),
       s: () => this.exportDiagram(key),
-      // Enter acts on the focused shape; the list's ask editor is not shown here.
-      Enter: null,
     };
   }
 
@@ -1135,6 +1430,21 @@ function keyHints(hints) {
     keys.map((name, position) => [position > 0 ? ' ' : '', h('kbd', { text: name })]),
     ` ${action}`,
   ]).flat(Infinity);
+}
+
+/** “Title” for one item, “3 items” for several. */
+function described(rows) {
+  return rows.length === 1 ? `“${rows[0].title}”` : `${rows.length} items`;
+}
+
+/** What the ask editor says it quotes. */
+function quoteLabel(targets, quotedRow, quoted) {
+  if (targets.length === 1) {
+    return quotedRow ? `Quoting your selection: “${firstLine(quoted)}”` : `Quoting item ${targets[0].number}, ${targets[0].title}, in full`;
+  }
+  const numbers = targets.map((row) => row.number).join(', ');
+  const quote = quotedRow ? `your selection in item ${quotedRow.number}, “${firstLine(quoted)}”, the others in full` : 'each in full';
+  return `Asking about ${targets.length} items (${numbers}), quoting ${quote}`;
 }
 
 function empty(title, text, ...extra) {

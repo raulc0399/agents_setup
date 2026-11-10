@@ -1,12 +1,14 @@
 // Drives the product UI (ui/js/app.js) with the fake backend. `?scenario=<name>` picks the
-// fixture and the user input to replay; `?scenario=checks` and `?scenario=diagram-checks` run
-// the behaviour checks of the list and the diagram and write PASS or the failures into #result.
+// fixture and the user input to replay; `?scenario=checks`, `?scenario=diagram-checks` and
+// `?scenario=action-checks` run the behaviour checks of the list, the diagram and the item
+// actions and write PASS or the failures into #result.
 import { start } from '../ui/js/app.js';
+import { questionBlock } from '../ui/js/list.js';
 import { fakeBackend } from './fake-backend.js';
 import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, fixture } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'narrow-checks': narrowChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 const key = (name, options = {}) =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...options }));
@@ -48,6 +50,27 @@ function sharedLines(svg) {
   return shared;
 }
 
+/** Selects characters `start` to `end` of the text inside `node`, as a drag would; returns them. */
+function selectText(node, start, end) {
+  const range = document.createRange();
+  range.setStart(node.firstChild, start);
+  range.setEnd(node.firstChild, end);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return range.toString();
+}
+
+/** Types into the open ask editor and sends with Ctrl+Enter. */
+function typeQuestion(text, send = true) {
+  const textarea = document.querySelector('.ask textarea');
+  textarea.value = text;
+  textarea.dispatchEvent(new Event('input'));
+  if (send) {
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+  }
+}
+
 /** Settles until `condition` holds; the diagram layout arrives over the network. */
 async function waitFor(condition, attempts = 100) {
   for (let attempt = 0; attempt < attempts && !condition(); attempt += 1) {
@@ -68,6 +91,23 @@ async function replay(backend) {
     const textarea = document.querySelector('.ask textarea');
     textarea.value = 'Is the 0600 mode enough on a shared Mac, or should the file live in the keychain?';
     textarea.dispatchEvent(new Event('input'));
+  } else if (scenario === 'accepted') {
+    key('j');
+    key('a');
+    await settle();
+    const { key: session, id } = backend.sent.at(-1);
+    backend.reply(session, id);
+  } else if (scenario === 'select') {
+    for (const step of ['j', ' ', 'j', 'j', ' ', 'j', 'j', ' ']) {
+      key(step);
+      await settle();
+    }
+  } else if (scenario === 'diagram-ask') {
+    await waitFor(() => document.querySelector('.diagram-svg [data-id]'));
+    selectText(document.querySelector('.diagram-panel .panel-body'), 3, 47);
+    key('Enter');
+    await settle();
+    typeQuestion('Who is the operator at night, and can a flagged batch wait until morning?', false);
   } else if (scenario === 'sessions') {
     document.querySelector('.strip-actions .button').click();
   } else if (scenario === 'menu') {
@@ -145,13 +185,14 @@ async function checks(backend) {
   await settle();
   const ask = backend.sent.at(-1);
   expect(ask?.command.type === 'ask', 'ask sent');
-  expect(ask?.command.number === 3 && ask.command.title === 'Windows and tabs', 'ask names item 3');
+  expect(ask?.command.items.length === 1 && ask.command.items[0].number === 3 && ask.command.items[0].title === 'Windows and tabs', 'ask names item 3');
   expect(ask?.command.question === 'Why per project?', 'ask carries the typed question');
-  expect(ask?.command.quote.startsWith('One tab per conversation'), 'ask quotes the item');
+  expect(ask?.command.items[0].quote.startsWith('One tab per conversation'), 'ask quotes the item');
   expect(JSON.stringify(ask?.command.selection.ids) === '["a0000000-0000-4000-8000-000000000003"]', 'ask selects the item');
-  expect(!document.querySelector('.ask'), 'the editor closes after sending');
+  expect(document.querySelector('.ask'), 'the editor waits for the reply');
   backend.reply(ask.key, ask.id);
   await settle();
+  expect(!document.querySelector('.ask'), 'and closes once the question is shared');
   expect(document.querySelector('.statusbar .message').textContent.includes('Shared item 3'), 'the reply is shown');
 
   // Esc keeps nothing open; hide is local and moves focus to the neighbour.
@@ -451,6 +492,429 @@ async function diagramChecks(backend, app) {
   expect(app.diagramViews.has(KEYS.LIVE), 'the tab has a diagram view');
   await backend.moveTab(KEYS.LIVE, null);
   expect(await waitFor(() => !app.diagramViews.has(KEYS.LIVE) && !app.listViews.has(KEYS.LIVE)), 'its list and diagram views are dropped');
+
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/**
+ * Batch 6: multi-selection, ask about several items and from the diagram panel, question
+ * states, accept, drop and undo with their replies, and the tab's filter and hidden items.
+ */
+async function actionChecks(backend, app) {
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const { item } = RELEASE_IDS;
+  const plan = (number) => `a0000000-0000-4000-8000-00000000000${number}`;
+  const card = (id) => document.querySelector(`.card[data-id="${id}"]`);
+  const selectedCards = () => [...document.querySelectorAll('.card.selected')].map((node) => node.dataset.id);
+  const buttons = (scope) => [...document.querySelectorAll(`${scope} .button`)].map((node) => node.textContent);
+  const message = () => document.querySelector('.statusbar .message');
+  const ctrlClick = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+  const saved = () => new Promise((resolve) => setTimeout(() => resolve(backend.views[KEYS.LIVE]), 400));
+  const content = () => backend.content(KEYS.LIVE);
+  const planOf = (snapshot) => snapshot.documents.find((document) => document.id === KEYS.PLAN);
+  // The fake backend keeps the content it was last given; this is the fixture's.
+  const original = structuredClone(CONTENTS_FOR_TESTS[KEYS.LIVE]);
+  const changed = (change) => {
+    const next = structuredClone(original);
+    change(planOf(next));
+    backend.update(KEYS.LIVE, next);
+  };
+  await settle();
+
+  // While disconnected, Accept and Drop are disabled and their keys send nothing.
+  key('Tab', { ctrlKey: true });
+  await settle();
+  const offline = () => [...document.querySelectorAll('.card.focused .card-actions .button')].map((node) => `${node.textContent}:${node.disabled}`);
+  expect(offline().join('|') === 'Ask:true|Accept:true|Hide:false|Drop:true', `shared actions are disabled: ${offline()}`);
+  for (const name of ['a', 'x', 'u']) {
+    key(name);
+    await settle();
+    expect(backend.sent.length === 0 && message().textContent === 'Read-only until the bridge reconnects', `${name} is blocked while disconnected: ${message().textContent}`);
+  }
+  key('Tab', { ctrlKey: true, shiftKey: true });
+  await settle();
+
+  // 6.1 Space and ⌘/Ctrl+click toggle the selection; the focused card's buttons count it.
+  key('j');
+  key(' ');
+  key('j');
+  key('j');
+  key(' ');
+  await settle();
+  expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `Space selects, got ${selectedCards()}`);
+  expect(buttons('.card.focused .card-actions').join('|') === 'Ask about 2|Accept 2|Hide 2|Drop 2', `buttons name the selection: ${buttons('.card.focused .card-actions')}`);
+  expect(document.querySelector('.toolbar .selection')?.textContent === '2 selected · clear', 'the toolbar counts the selection');
+  ctrlClick(card(plan(6)));
+  await settle();
+  expect(selectedCards().length === 3 && document.querySelector('.card.focused').dataset.id === plan(6), 'Ctrl+click selects and focuses');
+  ctrlClick(card(plan(4)));
+  key('j');
+  key('j');
+  key(' ');
+  await settle();
+  expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2)]), `toggling again deselects, got ${selectedCards()}`);
+  expect(JSON.stringify((await saved())?.selected) === JSON.stringify([plan(2)]), 'the selection is view state');
+  key('Escape');
+  await settle();
+  expect(selectedCards().length === 0 && !document.querySelector('.toolbar .selection'), 'Esc clears the selection');
+  key('A');
+  await settle();
+  expect(selectedCards().length === 8, 'Shift+A selects every item shown');
+  key('Escape');
+  await settle();
+
+  // 6.1 Ask about two items: one `ask`, every item named, the text selected in the focused one quoted.
+  key('k');
+  key('k');
+  key('k');
+  key('k');
+  key(' ');
+  key('j');
+  key('j');
+  key(' ');
+  await settle();
+  const quote = selectText(document.querySelector('.card.focused .card-body'), 2, 30);
+  key('Enter');
+  await settle();
+  expect(document.querySelector('.card.focused .ask .quote')?.textContent === `Asking about 2 items (2, 4), quoting your selection in item 4, “${quote}”, the others in full`, `the editor says what it quotes: ${document.querySelector('.ask .quote')?.textContent}`);
+  typeQuestion('How do these two relate?');
+  await settle();
+  const ask = backend.sent.at(-1);
+  const items = ask?.command.items ?? [];
+  expect(ask?.command.type === 'ask' && JSON.stringify(ask.command.selection) === JSON.stringify({ document_id: KEYS.PLAN, revision: 3, ids: [plan(2), plan(4)] }), 'one ask selects both items');
+  expect(JSON.stringify(items.map((entry) => [entry.number, entry.title])) === JSON.stringify([[2, 'Listener, pairing file, session registry'], [4, 'Liveness of a connection is not part of the protocol']]), 'and names both');
+  expect(items[0]?.quote.endsWith('\nSource: features/prism/app/host/src/registry.rs') && items[1]?.quote === quote, 'the other item is quoted in full, the focused one by the selection');
+  expect(ask?.command.question === 'How do these two relate?', 'with the typed question');
+  backend.reply(ask.key, ask.id);
+  await settle();
+  expect(message().textContent === 'Shared items 2, 4 with the CLI prompt box.', `the reply is shown: ${message().textContent}`);
+  expect(selectedCards().length === 2, 'asking keeps the selection');
+
+  // The editor opens in the first selected card when the focused one is not selected.
+  key('j');
+  key('j');
+  key('Enter');
+  await settle();
+  expect(document.querySelector('.card.focused')?.dataset.id === plan(2) && document.querySelector('.card.focused .ask'), 'the first selected card takes the editor');
+  document.querySelector('.ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  key('j');
+  key('j');
+  await settle();
+
+  // An error reply keeps the editor and the draft.
+  const kept = selectText(document.querySelector('.card.focused .card-body'), 2, 20);
+  key('Enter');
+  await settle();
+  typeQuestion('Still there?');
+  await settle();
+  const failing = backend.sent.at(-1);
+  const sendButton = () => document.querySelector('.card.focused .ask .button.primary');
+  expect(sendButton()?.disabled && sendButton().textContent === 'Sending…', 'the editor waits for the reply');
+  backend.reply(failing.key, failing.id, { code: 'failed', message: 'binding retired' });
+  await settle();
+  expect(document.querySelector('.card.focused .ask textarea')?.value === 'Still there?' && !sendButton().disabled, 'an error reply keeps the editor and the draft');
+  expect(message().classList.contains('error') && message().textContent === 'binding retired', `and shows the error: ${message().textContent}`);
+
+  // Sending reads the items again: a new title goes along, an item that left stops the send.
+  changed((document) => {
+    document.revision = 4;
+    document.elements[plan(2)].title = 'Listener and pairing';
+  });
+  await settle();
+  typeQuestion('Still there?');
+  await settle();
+  const resent = backend.sent.at(-1);
+  expect(resent?.command.items[0].title === 'Listener and pairing' && resent.command.selection.revision === 4 && resent.command.items[1].quote === kept, `the send reads the items again, keeping the quote: ${JSON.stringify(resent?.command)}`);
+  backend.reply(resent.key, resent.id);
+  await settle();
+  expect(!document.querySelector('.ask'), 'a confirmed ask closes the editor');
+  key('Enter');
+  await settle();
+  changed((document) => {
+    document.revision = 5;
+    document.elements[plan(2)].archived = true;
+  });
+  await settle();
+  expect(JSON.stringify(app.view(KEYS.LIVE).selected) === JSON.stringify([plan(4)]) && document.querySelector('.toolbar .selection')?.textContent === '1 selected · clear', 'a dropped item leaves the selection when the update arrives');
+  const sentBefore = backend.sent.length;
+  typeQuestion('And now?');
+  await settle();
+  expect(backend.sent.length === sentBefore && message().textContent.includes('left the list') && document.querySelector('.card.focused .ask'), `an item that left stops the send: ${message().textContent}`);
+  document.querySelector('.ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  backend.update(KEYS.LIVE, structuredClone(original));
+  await settle();
+  key('k');
+  key('k');
+  key(' ');
+  key('j');
+  key('j');
+  await settle();
+
+  // 6.4 Accept: one `action` on the selection; the note says acceptance is no tool permission.
+  expect(document.querySelector('.card.focused .card-actions .button:nth-child(2)').title.includes('never permission to run tools'), 'the Accept button says what acceptance is');
+  key('a');
+  await settle();
+  const accept = backend.sent.at(-1);
+  expect(accept?.command.type === 'action' && accept.command.action.action === 'accept' && accept.command.expected_revision === 3, 'accept is an action at the revision');
+  expect(JSON.stringify(accept?.command.action.ids) === JSON.stringify([plan(2), plan(4)]), 'on the selected items');
+  expect(message().textContent === 'Accepting…', 'while it is on its way');
+  backend.reply(accept.key, accept.id);
+  await settle();
+  expect(message().textContent === 'Accepted 2 items. Acceptance is feedback for the agent, never permission to run tools.', `the note: ${message().textContent}`);
+  expect(selectedCards().length === 0, 'a committed action clears its items from the selection');
+  let next = await content();
+  planOf(next).revision = 4;
+  planOf(next).elements[plan(4)].accepted_revision = 4;
+  backend.update(KEYS.LIVE, next);
+  await settle();
+  expect(card(plan(4)).querySelector('.badge.accepted') && !card(plan(4)).querySelector('.badge.stale'), 'the card shows accepted');
+  next = await content();
+  planOf(next).revision = 5;
+  planOf(next).elements[plan(4)].semantic_revision = 5;
+  backend.update(KEYS.LIVE, next);
+  await settle();
+  expect(card(plan(4)).querySelector('.badge.stale')?.textContent === 'changed since accepted' && !card(plan(4)).querySelector('.badge.accepted'), 'and changed since accepted after a revision');
+  key('a');
+  await settle();
+  const stale = backend.sent.at(-1);
+  expect(JSON.stringify(stale?.command.action.ids) === JSON.stringify([plan(4)]) && stale.command.expected_revision === 5, 'without a selection accept takes the focused item');
+  backend.reply(stale.key, stale.id, { code: 'stale_revision', current: 6 });
+  await settle();
+  expect(message().classList.contains('error') && message().textContent.includes('revision 6'), 'a stale revision is explained');
+
+  // 6.3 Drop the selection with one `action`, then undo through every reply.
+  key('k');
+  key(' ');
+  key('j');
+  key('j');
+  key(' ');
+  await settle();
+  key('x');
+  await settle();
+  const drop = backend.sent.at(-1);
+  expect(drop?.command.action.action === 'archive' && JSON.stringify(drop.command.action.ids) === JSON.stringify([plan(3), plan(5)]), 'drop archives the selection in one action');
+  backend.reply(drop.key, drop.id);
+  await settle();
+  expect(message().textContent === 'Dropped 2 items. U undoes.', `drop is confirmed: ${message().textContent}`);
+  next = await content();
+  planOf(next).revision = 6;
+  planOf(next).elements[plan(3)].archived = true;
+  planOf(next).elements[plan(5)].archived = true;
+  backend.update(KEYS.LIVE, next);
+  await settle();
+  expect(!card(plan(3)) && !card(plan(5)) && document.querySelectorAll('.card').length === 6, 'the dropped items leave the list');
+  const undo = async (error, expected) => {
+    key('u');
+    await settle();
+    const sent = backend.sent.at(-1);
+    expect(sent?.command.type === 'undo' && sent.command.document_id === KEYS.PLAN && sent.command.expected_revision === 6, 'undo names the document and its revision');
+    expect(message().textContent === 'Undoing…', 'undo is on its way');
+    backend.reply(sent.key, sent.id, error);
+    await settle();
+    expect(message().textContent.includes(expected) && message().classList.contains(error ? 'error' : 'success'), `undo reply ${error?.code}: ${message().textContent}`);
+  };
+  await undo({ code: 'undo_conflict' }, 'conflicts with later changes and was discarded; U undoes the one before it');
+  await undo({ code: 'not_found', message: 'action to undo for this document' }, 'Nothing to undo in this document.');
+  await undo({ code: 'stale_revision', current: 7 }, 'revision 7');
+  await undo(null, 'Undid the latest action on this document.');
+  backend.update(KEYS.LIVE, structuredClone(original));
+  await settle();
+  expect(card(plan(3)) && card(plan(5)), 'the undone items come back');
+
+  // A reply that arrives before `send` returned the command ID is still matched.
+  const realSend = backend.send;
+  backend.send = async function (session, command) {
+    const id = await realSend.call(this, session, command);
+    app.onReply({ type: 'reply', key: session, id, error: null });
+    return id;
+  };
+  key('u');
+  await settle();
+  backend.send = realSend;
+  expect(message().textContent === 'Undid the latest action on this document.', `an early reply is matched: ${message().textContent}`);
+
+  // Selected items hidden or filtered out take no part in Ask, Accept and Drop.
+  app.updateView(KEYS.LIVE, { selected: [plan(2), plan(4), plan(6)], hidden: [plan(6)], filter: 'pairing' });
+  await settle();
+  expect(document.querySelector('.toolbar .selection')?.textContent === '1 selected (2 not shown) · clear', `the toolbar counts what is not shown: ${document.querySelector('.toolbar .selection')?.textContent}`);
+  for (const name of ['a', 'x']) {
+    key(name);
+    await settle();
+    const sent = backend.sent.at(-1);
+    expect(JSON.stringify(sent?.command.action?.ids) === JSON.stringify([plan(2)]), `${name} acts on the shown selection only: ${JSON.stringify(sent?.command)}`);
+    backend.reply(sent.key, sent.id, { code: 'stale_revision', current: 3 });
+    await settle();
+  }
+  key('Enter');
+  await settle();
+  expect(document.querySelector('.ask .quote')?.textContent === 'Quoting item 1, Listener, pairing file, session registry, in full', `ask too: ${document.querySelector('.ask .quote')?.textContent}`);
+  document.querySelector('.ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  app.updateView(KEYS.LIVE, { selected: [], hidden: [], filter: '' });
+  await settle();
+
+  // The key map leaves out its least important hints first when a long message needs room.
+  app.setMessage('A long message about what just happened, long enough to need most of the status bar at this window width, so that hints must go.');
+  const hints = document.querySelector('.statusbar .keys');
+  expect(hints.scrollWidth <= hints.clientWidth && hints.textContent.includes('move') && hints.textContent.includes('ask') && !hints.textContent.includes('all'), `whole hints only, the important ones kept: ${hints.textContent}`);
+
+  // 6.2 Question states, the latest first, on the card and for every outcome.
+  card(plan(5)).click();
+  await settle();
+  const blocks = () => [...document.querySelectorAll('.card.focused .card-question')].map((node) => [node.querySelector('.q').textContent, node.querySelector('.state').textContent]);
+  const expected = [
+    ['Should the filter be shared as well?', 'Placed in the CLI prompt box'],
+    ['Can hide follow the tab when it moves?', 'Answered'],
+    ['Does the tab list need the same rule?', 'Shared with the conversation · asked about 2 items'],
+    ['Would a per-window hide confuse users?', 'Failed: binding retired; explicitly resume the conversation'],
+    ['Is this still open?', 'Refused: native sending from Prism is disabled for Claude'],
+  ];
+  expect(JSON.stringify(blocks()) === JSON.stringify(expected), `questions latest first with their states: ${JSON.stringify(blocks())}`);
+  expect(document.querySelector('.card.focused .card-question.tone-answered .a')?.textContent.startsWith('Yes: hidden items'), 'the answer is shown');
+  const actionsRow = document.querySelector('.card.focused .card-actions');
+  expect(actionsRow && actionsRow.compareDocumentPosition(document.querySelector('.card.focused .card-question')) & Node.DOCUMENT_POSITION_FOLLOWING, 'the actions come before the questions');
+  expect(card(plan(3)).querySelector('.badge.asked')?.textContent === 'asked · shared', `a collapsed card shows its latest state: ${card(plan(3)).querySelector('.badge.asked')?.textContent}`);
+  next = await content();
+  next.questions.find((question) => question.request_id.endsWith('000000000004')).answer = 'Not yet: the filter is a private reading aid.';
+  backend.update(KEYS.LIVE, next);
+  await settle();
+  expect(blocks()[0][1] === 'Answered' && card(plan(5)).querySelector('.badge.asked')?.textContent === 'asked ×5 · answered', 'an answer that arrives replaces the state');
+  const outcome = (state, extra = {}, answer = null) => questionBlock({ ...original.questions[2], outcome: { state, ...extra }, answer });
+  const states = [
+    [outcome('pending'), 'shared', 'Shared with the conversation'],
+    [outcome('submitted'), 'prompt', 'Placed in the CLI prompt box'],
+    [outcome('queued', { reason: null }), 'warning', 'Queued; start not confirmed'],
+    [outcome('queued', { reason: 'a turn is running' }), 'warning', 'Queued; start not confirmed: a turn is running'],
+    [outcome('started', { turn_id: 'turn-7' }), 'started', 'Started: turn-7'],
+    [outcome('failed', { reason: 'bridge stopped' }), 'error', 'Failed: bridge stopped'],
+    [outcome('refused', { reason: 'not bound' }), 'error', 'Refused: not bound'],
+    [outcome('dropped', { reason: 'conversation cleared' }), 'error', 'Dropped: conversation cleared'],
+    [outcome('unknown', { reason: 'no confirmation' }), 'warning', 'Unknown: no confirmation. Sending again may duplicate it.'],
+    [outcome('submitted', {}, 'Because.'), 'answered', 'Answered'],
+  ];
+  for (const [block, tone, text] of states) {
+    expect(block.classList.contains(`tone-${tone}`) && block.querySelector('.state').textContent === text, `outcome shown as ${text}, got ${block.className} ${block.querySelector('.state').textContent}`);
+  }
+  expect(states.at(-1)[0].querySelector('.a')?.textContent === 'Because.', 'an answered question shows its answer');
+
+  // 6.3 The filter: local to the tab, over kind, title, text and ID; typing keeps the keyboard.
+  key('/');
+  const filter = document.querySelector('.toolbar .filter');
+  expect(document.activeElement === filter, '/ goes to the filter');
+  const untouched = [backend.sent.length, JSON.stringify(app.view(KEYS.LIVE))];
+  for (const name of ['a', 'x', 'u', 'h', 'H', 'A', ' ', 'j', 'v', '/']) {
+    filter.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+  }
+  await settle();
+  expect(backend.sent.length === untouched[0] && JSON.stringify(app.view(KEYS.LIVE)) === untouched[1] && document.activeElement === filter, 'keys typed into the filter do nothing else');
+  filter.value = 'PAIRING';
+  filter.dispatchEvent(new Event('input'));
+  await settle();
+  const titles = () => [...document.querySelectorAll('.card .title')].map((node) => node.textContent);
+  expect(JSON.stringify(titles()) === JSON.stringify(['Listener, pairing file, session registry', 'arrangement uses sessions', 'Batch 4']), `the filter matches text case-insensitively: ${titles()}`);
+  expect(document.activeElement === filter && filter.classList.contains('active'), 'the filter keeps the keyboard and shows it is active');
+  filter.value = 'finding';
+  filter.dispatchEvent(new Event('input'));
+  await settle();
+  expect(JSON.stringify(titles()) === JSON.stringify(['Liveness of a connection is not part of the protocol']) && document.querySelector('.card .number').textContent === '1', `and the kind, numbered as shown: ${titles()}`);
+  filter.value = 'no such words';
+  filter.dispatchEvent(new Event('input'));
+  await settle();
+  expect(document.querySelector('.empty h2')?.textContent === 'No items match “no such words”', 'an empty result says so');
+  document.querySelector('.empty .button').click();
+  await settle();
+  expect(document.querySelectorAll('.card').length === 8 && filter.value === '', 'Clear filter shows everything');
+  expect(backend.sent.filter((sent) => sent.command.type !== 'ask' && sent.command.type !== 'action' && sent.command.type !== 'undo').length === 0, 'filtering sends nothing');
+
+  // The diagram respects filter and hide; both persist in the tab's view state.
+  [...document.querySelectorAll('.documents button')].find((button) => button.textContent === 'Release flow').click();
+  await settle();
+  key('/');
+  filter.value = 'batch';
+  filter.dispatchEvent(new Event('input'));
+  filter.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await settle();
+  expect(document.activeElement === document.querySelector('.view'), 'Enter leaves the filter for the list');
+  key('v');
+  const boxes = () => [...document.querySelectorAll('.diagram-svg [data-kind="box"]')].map((node) => node.dataset.id).sort();
+  expect(await waitFor(() => boxes().length === 3), `the diagram shows only matching boxes: ${boxes()}`);
+  expect(JSON.stringify(boxes()) === JSON.stringify([item(2), item(3), item(6)]), `namely ${boxes()}`);
+  document.querySelector(`.diagram-svg [data-kind="box"][data-id="${item(3)}"]`).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  await settle();
+  expect(document.querySelector('.diagram-panel .badge.accepted'), 'the panel shows an accepted item');
+  key('h');
+  expect(await waitFor(() => boxes().length === 2), 'a hidden box leaves the filtered diagram');
+  const view = await saved();
+  expect(view?.filter === 'batch' && JSON.stringify(view.hidden) === JSON.stringify([item(3)]) && view.mode === 'diagram', `filter and hidden are view state: ${JSON.stringify(view)}`);
+  const restored = fixture('list');
+  restored.state.arrangement.views = structuredClone(backend.views);
+  const root = document.getElementById('app');
+  root.hidden = true;
+  const again = document.createElement('div');
+  again.className = 'app';
+  document.body.append(again);
+  start(fakeBackend(restored), again);
+  const againBoxes = () => [...again.querySelectorAll('.diagram-svg [data-kind="box"]')].map((node) => node.dataset.id).sort();
+  expect(await waitFor(() => againBoxes().length === 2), 'a reopened tab keeps filter and hidden in the diagram');
+  expect(again.querySelector('.toolbar .filter')?.value === 'batch', 'and shows its filter');
+  again.remove();
+  root.hidden = false;
+  key('H');
+  key('/');
+  filter.value = '';
+  filter.dispatchEvent(new Event('input'));
+  filter.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  const shape = (id) => document.querySelector(`.diagram-svg [data-kind="box"][data-id="${id}"]`);
+  expect(await waitFor(() => boxes().length === 6), 'all boxes again');
+
+  // 6.1 Ask from the diagram panel: Enter opens the editor there, with the same payload.
+  shape(item(5)).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  await settle();
+  expect(document.querySelector('.diagram-panel .badge.stale')?.textContent === 'changed since accepted', 'the panel shows changed since accepted');
+  shape(item(4)).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  await settle();
+  expect(buttons('.diagram-panel .panel-actions').join('|') === 'Ask|Accept|Hide|Drop', `the panel has the item actions: ${buttons('.diagram-panel .panel-actions')}`);
+  const panelQuote = selectText(document.querySelector('.diagram-panel .panel-body'), 3, 40);
+  key('Enter');
+  await settle();
+  const editor = document.querySelector('.diagram-panel .ask textarea');
+  expect(editor && document.activeElement === editor, 'Enter opens the editor in the panel');
+  expect(document.querySelector('.diagram-panel .ask .quote')?.textContent === `Quoting your selection: “${panelQuote}”`, 'quoting the text selected in the panel');
+  typeQuestion('Who is on call at night?');
+  await settle();
+  const panelAsk = backend.sent.at(-1);
+  expect(JSON.stringify(panelAsk?.command) === JSON.stringify({ type: 'ask', selection: { document_id: KEYS.RELEASE, revision: 2, ids: [item(4)] }, items: [{ number: 4, title: 'Review anomalies', quote: panelQuote }], question: 'Who is on call at night?' }), `the panel sends the list's payload: ${JSON.stringify(panelAsk?.command)}`);
+  backend.reply(panelAsk.key, panelAsk.id);
+  await settle();
+  expect(!document.querySelector('.diagram-panel .ask') && document.activeElement === shape(item(4)), 'the editor closes and the box has the keyboard');
+
+  // Selection in the diagram: Space and Ctrl+click; the panel asks about all of them.
+  key(' ');
+  ctrlClick(shape(item(2)));
+  await settle();
+  expect(shape(item(4)).classList.contains('selected') && shape(item(2)).classList.contains('selected'), 'selected boxes are marked');
+  expect(shape(item(4)).getAttribute('aria-label').startsWith('Selected: ') && !shape(item(3)).getAttribute('aria-label').startsWith('Selected'), 'and named selected');
+  expect(buttons('.diagram-panel .panel-actions')[0] === 'Ask about 2', 'the panel counts the selection');
+  document.querySelector('.diagram-panel .panel-actions .button.primary').click();
+  await settle();
+  expect(document.querySelector('.diagram-panel .ask .quote')?.textContent === 'Asking about 2 items (2, 4), quoting each in full', `the Ask button asks about both: ${document.querySelector('.diagram-panel .ask .quote')?.textContent}`);
+  document.querySelector('.diagram-panel .ask textarea').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  expect(!document.querySelector('.diagram-panel .ask'), 'Esc in the editor cancels');
+  key('Escape');
+  await settle();
+  expect(!document.querySelector('.diagram-svg .selected') && document.querySelector('.diagram-panel .panel-title')?.textContent === 'Upload batch', 'Esc clears the selection first');
+  key('Escape');
+  await settle();
+  expect(document.querySelector('.diagram-panel .panel-tag')?.textContent === 'Diagram', 'then the focus');
+  expect(!shape(item(4)).getAttribute('aria-label').startsWith('Selected'), 'a deselected box gets its name back');
+  key('Enter');
+  await settle();
+  expect(message().textContent.startsWith('Pick an item first') && !document.querySelector('.diagram-panel .ask'), `Enter with nothing picked says so: ${message().textContent}`);
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }

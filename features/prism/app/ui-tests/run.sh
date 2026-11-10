@@ -9,14 +9,17 @@ APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-"$APP_DIR/target/ui-screenshots"}
 CHROMIUM=${CHROMIUM:-chromium}
 SIZE=1280,800
-CHECKS="checks diagram-checks"
-SCENARIOS="empty port-error no-tabs list focused ask ended disconnected sessions menu error diagram diagram-panel diagram-zoomed"
+CHECKS="checks diagram-checks action-checks"
+SCENARIOS="empty port-error no-tabs list focused ask select questions filter accepted ended disconnected sessions menu error diagram diagram-panel diagram-zoomed diagram-ask"
 # A narrow window: the diagram's panel goes below the canvas.
 NARROW_SIZE=600,760
 NARROW_CHECKS="narrow-checks"
 NARROW_SCENARIOS="diagram-panel"
 
 READY_ATTEMPTS=50
+# Virtual milliseconds a page may run: a screenshot settles quickly, the checks replay a lot.
+SCREENSHOT_BUDGET_MS=3000
+CHECK_BUDGET_MS=15000
 
 mkdir -p "$OUT"
 (cd "$APP_DIR" && CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} cargo build --quiet --locked -p prism-app-host --example diagram)
@@ -39,18 +42,19 @@ until curl -sf "http://127.0.0.1:$PORT/ui-tests/harness.html" >/dev/null; do
   sleep 0.1
 done
 
-# browse <window size> <chromium arguments>
+# browse <window size> <virtual time budget> <chromium arguments>
 browse() {
   size=$1
-  shift
+  budget=$2
+  shift 2
   "$CHROMIUM" --headless --no-sandbox --disable-gpu --hide-scrollbars --window-size="$size" \
-    --virtual-time-budget=3000 "$@"
+    --virtual-time-budget="$budget" "$@"
 }
 
 PASSED=true
 # check <window size> <scenario>
 check() {
-  RESULT=$(browse "$1" --dump-dom "http://127.0.0.1:$PORT/ui-tests/harness.html?scenario=$2" 2>/dev/null \
+  RESULT=$(browse "$1" "$CHECK_BUDGET_MS" --dump-dom "http://127.0.0.1:$PORT/ui-tests/harness.html?scenario=$2" 2>/dev/null \
     | sed -n 's:.*<output id="result" hidden="">\(.*\)</output>.*:\1:p')
   echo "$2: ${RESULT:-no result}"
   if [ "$RESULT" != "PASS" ]; then
@@ -61,8 +65,8 @@ check() {
 # screenshots <window size> <file suffix> <scenario>
 screenshots() {
   url="http://127.0.0.1:$PORT/ui-tests/harness.html?scenario=$3"
-  browse "$1" --screenshot="$OUT/$3$2-light.png" "$url" 2>/dev/null
-  browse "$1" --force-dark-mode --blink-settings=preferredColorScheme=0 \
+  browse "$1" "$SCREENSHOT_BUDGET_MS" --screenshot="$OUT/$3$2-light.png" "$url" 2>/dev/null
+  browse "$1" "$SCREENSHOT_BUDGET_MS" --force-dark-mode --blink-settings=preferredColorScheme=0 \
     --screenshot="$OUT/$3$2-dark.png" "$url" 2>/dev/null
 }
 

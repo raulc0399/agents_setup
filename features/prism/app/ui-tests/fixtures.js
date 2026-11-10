@@ -82,6 +82,38 @@ const question = {
   answer: 'Not for batch 4: Docker Desktop resets the forwarded connection when a container stops. Pings would need a protocol rule first.',
 };
 
+const SYNC_ITEM = 'a0000000-0000-4000-8000-000000000005';
+const TABS_ITEM = 'a0000000-0000-4000-8000-000000000003';
+
+/** A question about the sync item (and `others`), asked at `revision`; request IDs are time-ordered (UUID v7). */
+function syncQuestion(request, revision, typed, outcome, { answer = null, others = [] } = {}) {
+  return {
+    request_id: `019a3f10-0000-7000-8000-${request}`,
+    workspace_id: 'e0000000-0000-4000-8000-000000000001',
+    generation: 1,
+    snapshot: {
+      selection: { document_id: PLAN, revision, ids: [SYNC_ITEM, ...others] },
+      document_title: 'App plan',
+      elements: {},
+      relationships: {},
+      groups: {},
+    },
+    text: `Item 5: Should hidden items sync between windows?\n> Hide is local view state per tab today.\n\n${typed}`,
+    mode: 'share',
+    outcome,
+    answer,
+  };
+}
+
+/** Latest first: 4, 3, 2, 1, then the one asked at an older revision despite its larger ID. */
+const syncQuestions = [
+  syncQuestion('000000000001', 3, 'Would a per-window hide confuse users?', { state: 'failed', reason: 'binding retired; explicitly resume the conversation' }),
+  syncQuestion('000000000002', 3, 'Does the tab list need the same rule?', { state: 'pending' }, { others: [TABS_ITEM] }),
+  syncQuestion('000000000003', 3, 'Can hide follow the tab when it moves?', { state: 'submitted' }, { answer: 'Yes: hidden items are view state of the tab, and that view moves with it.' }),
+  syncQuestion('000000000004', 3, 'Should the filter be shared as well?', { state: 'submitted' }),
+  syncQuestion('00000000000f', 2, 'Is this still open?', { state: 'refused', reason: 'native sending from Prism is disabled for Claude' }),
+];
+
 /** Release flow: three lanes, five arrows (one manual), two gate badges. */
 const releaseItem = (number) => `a4000000-0000-4000-8000-00000000000${number}`;
 const releaseLink = (number) => `b4000000-0000-4000-8000-00000000000${number}`;
@@ -90,9 +122,9 @@ const releaseGroup = (number) => `c4000000-0000-4000-8000-00000000000${number}`;
 const releaseElements = [
   element(releaseItem(1), 'step', 0, 'Capture readings', 'Sensor app records a reading every minute and queues it offline.', { source: 'device/src/capture.rs', semantic_revision: 2 }),
   element(releaseItem(2), 'step', 1, 'Upload batch', 'Sends the queued readings over HTTPS once the device is online.', { semantic_revision: 2 }),
-  element(releaseItem(3), 'step', 2, 'Validate batch', 'Schema and range checks reject readings outside the sensor limits.', { semantic_revision: 2 }),
+  element(releaseItem(3), 'step', 2, 'Validate batch', 'Schema and range checks reject readings outside the sensor limits.', { semantic_revision: 2, accepted_revision: 2 }),
   element(releaseItem(4), 'step', 3, 'Review anomalies', 'An operator checks flagged readings before they are released.', { semantic_revision: 2 }),
-  element(releaseItem(5), 'step', 4, 'Publish dashboard', 'Released readings appear on the public dashboard within a minute.', { semantic_revision: 2 }),
+  element(releaseItem(5), 'step', 4, 'Publish dashboard', 'Released readings appear on the public dashboard within a minute.', { semantic_revision: 2, accepted_revision: 1 }),
   element(releaseItem(6), 'text', 5, 'Archive raw batches', 'Raw uploads are kept for 90 days for audits.', { semantic_revision: 2 }),
   element(releaseItem(7), 'finding', 6, 'Clock drift on old devices', 'Devices older than 2021 drift up to 40 s a day; timestamps need the server clock.', { semantic_revision: 2 }),
   element(releaseItem(8), 'question', 7, 'Who approves a release?', 'The review step needs a named approver per shift.', { semantic_revision: 2 }),
@@ -202,7 +234,7 @@ const CONTENTS = {
       document(NOTES, 'Notes', 1, []),
       document(RELEASE, 'Release flow', 2, releaseElements, releaseLinks, releaseGroups),
     ],
-    questions: [question, releaseQuestion],
+    questions: [question, releaseQuestion, ...syncQuestions],
   },
   [CODEX]: { documents: [document('22222222-0000-4000-8000-000000000001', 'Invoice export', 1, codexElements)], questions: [] },
   [ENDED]: { documents: [document('33333333-0000-4000-8000-000000000001', 'Summary', 1, endedElements)], questions: [] },
@@ -227,18 +259,26 @@ function arrangement(active, views = {}) {
   };
 }
 
-export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW, RELEASE };
+export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW, NOTES, RELEASE, SYNC_ITEM, TABS_ITEM };
 export const RELEASE_IDS = { item: releaseItem, link: releaseLink, group: releaseGroup };
 
 /** View state of the live tab per diagram scenario. */
 const DIAGRAM_VIEWS = {
   diagram: { focus: null, mode: 'diagram', cameras: {} },
   'diagram-panel': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
+  'diagram-ask': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
   'diagram-zoomed': { focus: releaseItem(7), mode: 'diagram', cameras: { [RELEASE]: { x: 20, y: -20, scale: 1.9 } } },
   'diagram-checks': { focus: null, mode: 'list', cameras: {} },
   'narrow-checks': { focus: releaseItem(4), mode: 'diagram', cameras: {} },
 };
 export const CONTENTS_FOR_TESTS = CONTENTS;
+
+/** View state of the live tab per list scenario. */
+const LIST_VIEWS = {
+  focused: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004', hidden: [SYNC_ITEM], mode: 'list' },
+  questions: { document: PLAN, focus: SYNC_ITEM, hidden: [], mode: 'list' },
+  filter: { document: PLAN, focus: null, hidden: [], filter: 'pairing', mode: 'list' },
+};
 
 /** Fixture per scenario: `state` (AppState) and `contents` per session key. */
 export function fixture(scenario) {
@@ -264,7 +304,7 @@ export function fixture(scenario) {
     return { state, contents: CONTENTS };
   }
   const active = { ended: ENDED, disconnected: CODEX }[scenario] ?? LIVE;
-  const views = scenario === 'focused' ? { [LIVE]: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004', hidden: ['a0000000-0000-4000-8000-000000000005'], mode: 'list' } } : {};
+  const views = LIST_VIEWS[scenario] ? { [LIVE]: LIST_VIEWS[scenario] } : {};
   if (DIAGRAM_VIEWS[scenario]) {
     views[LIVE] = { document: RELEASE, hidden: [], ...DIAGRAM_VIEWS[scenario] };
   }
