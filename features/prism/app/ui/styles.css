@@ -619,6 +619,7 @@ button {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+  font-size: 15px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -671,11 +672,15 @@ button {
 }
 
 .excerpt {
+  /* Up to three lines of the item's text; the pane shows all of it. */
+  display: -webkit-box;
   margin: 2px 0 0 27px;
   overflow: hidden;
   color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 14px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 
 .card-source {
@@ -982,12 +987,13 @@ button {
 
 .panel-title {
   margin: 0;
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 650;
   overflow-wrap: anywhere;
 }
 
 .panel-body {
+  font-size: 14px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;

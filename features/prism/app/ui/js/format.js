@@ -17,6 +17,11 @@ export function shortConversation(conversation) {
   return conversation.slice(0, SHORT_CONVERSATION_CHARS);
 }
 
+/** The text's lines joined into one paragraph, for an excerpt clamped to a few lines. */
+export function flowText(text) {
+  return text.split('\n').map((line) => line.trim()).filter((line) => line !== '').join(' ');
+}
+
 export function firstLine(text) {
   return text.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? '';
 }

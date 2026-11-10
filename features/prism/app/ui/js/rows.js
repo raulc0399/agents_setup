@@ -1,4 +1,4 @@
-import { firstLine } from './format.js';
+import { flowText } from './format.js';
 
 /**
  * What the list shows for a document, as the terminal list did: elements in publication
@@ -33,7 +33,7 @@ function records(document) {
       id: item.id,
       kind: item.kind,
       title: item.title,
-      excerpt: firstLine(item.body),
+      excerpt: flowText(item.body),
       body: item.body,
       source: item.source,
       details: item.source ? `${item.body}\nSource: ${item.source}` : item.body,
