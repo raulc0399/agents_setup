@@ -37,6 +37,7 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 | 5 Diagram | **[done]**, Mac pass open (pinch, save dialog, Tab in WKWebView) | layout in the shell via `prism-core`; `LANE_GAP` grew to 48, arrows that skip a box run below the row |
 | 6 Ask, answer, drop, undo | **[done]**, Mac pass open (text selection, ⌘-click, prompt round trip) | multi-item ask lists every item; questions ordered by `(selection.revision, request_id)` with UUID v7 ids |
 | 7 Remove terminal UI | **[done]**, real loop open | needs: install binary, `/exit`, `claude -c`, app running on the Mac; steps in `docs/validation.md` |
+| 8 Packaging | **[done]**, builds open | build on the Mac and the PC per `app/README.md`; install on a clean account |
 | 9.2 Codex handover | **[done]** | `docs/codex-handover.md` |
 
 Gate results (2026-11-09, from the `d_claude` container):
@@ -148,7 +149,7 @@ the Linux container.
        `prism --agent` launcher, its supervisor and their tests.
    7.4 Update plugin texts, `SKILL.md`, README and `docs/validation.md`.
 
-8. **Packaging**
+8. **Packaging** **[done]** (builds on the user's machines open)
    8.1 macOS `.app` / `.dmg`, built on the user's Mac, unsigned.
    8.2 Windows installer, built on the user's Windows PC, unsigned.
    8.3 Version handshake so an old bridge and a new app refuse each other with a clear message.
