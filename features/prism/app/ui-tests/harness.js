@@ -533,7 +533,7 @@ async function actionChecks(backend, app) {
   key('Tab', { ctrlKey: true });
   await settle();
   const offline = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].map((node) => `${node.textContent}:${node.disabled}`);
-  expect(offline().join('|') === 'Ask:true|Accept:true|Hide:false|Drop:true', `shared actions are disabled: ${offline()}`);
+  expect(offline().join('|') === 'Ask:true|Accept:true|Drop:true', `shared actions are disabled: ${offline()}`);
   for (const name of ['a', 'x', 'u']) {
     key(name);
     await settle();
@@ -550,7 +550,7 @@ async function actionChecks(backend, app) {
   key(' ');
   await settle();
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `Space selects, got ${selectedCards()}`);
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask about 2|Accept 2|Hide 2|Drop 2', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask about 2|Accept 2|Drop 2', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
   expect(document.querySelector('.pane-controls .selection')?.textContent === '2 selected · clear', 'the pane counts the selection');
   ctrlClick(card(plan(6)));
   await settle();
@@ -880,7 +880,7 @@ async function actionChecks(backend, app) {
   expect(document.querySelector('.detail-panel .badge.stale')?.textContent === 'changed since accepted', 'the panel shows changed since accepted');
   shape(item(4)).dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await settle();
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Accept|Hide|Drop', `the panel has the item actions: ${buttons('.detail-panel .panel-actions')}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Accept|Drop', `the panel has the item actions: ${buttons('.detail-panel .panel-actions')}`);
   const panelQuote = selectText(document.querySelector('.detail-panel .panel-body'), 3, 40);
   key('Enter');
   await settle();

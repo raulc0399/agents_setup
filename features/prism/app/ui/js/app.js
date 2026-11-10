@@ -295,7 +295,6 @@ class App {
     return {
       onAsk: () => this.openAsk(key),
       onAccept: () => this.accept(key),
-      onHide: () => this.hide(key),
       onDrop: () => this.drop(key),
       onSend: (question) => this.sendAsk(key, question),
       onCancelAsk: () => this.cancelAsk(),

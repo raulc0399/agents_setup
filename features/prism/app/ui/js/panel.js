@@ -7,7 +7,7 @@ import { questionsFor, typedQuestion } from './rows.js';
  * with its text, actions or ask editor, and its questions. Without a focused item (only in
  * the diagram, where the user picks one) it shows an overview of the diagram.
  *
- * `actions`: onAsk(), onAccept(), onHide(), onDrop(), onSend(question), onCancelAsk(),
+ * `actions`: onAsk(), onAccept(), onDrop(), onSend(question), onCancelAsk(),
  * onDraft(text).
  */
 export class DetailPanel {
@@ -132,11 +132,11 @@ function itemActions(selection, readOnly, actions) {
   const many = selection > 0;
   const what = many ? `the ${selection} selected ${selection === 1 ? 'item' : 'items'}` : 'this item';
   const count = many ? ` ${selection}` : '';
-  const button = (className, text, title, action, shared = true) =>
+  const button = (className, text, title, action) =>
     h('button', {
       class: `button ${className}`,
-      disabled: shared && Boolean(readOnly),
-      title: shared && readOnly ? readOnly : title,
+      disabled: Boolean(readOnly),
+      title: readOnly ? readOnly : title,
       text,
       onclick: (event) => {
         event.stopPropagation();
@@ -149,7 +149,6 @@ function itemActions(selection, readOnly, actions) {
   return [
     ask,
     button('', `Accept${count}`, `Accept ${what}. ${ACCEPT_NOTE} (A)`, actions.onAccept),
-    button('', `Hide${count}`, `Hide ${what} in this tab (H)`, actions.onHide, false),
     button('danger', `Drop${count}`, `Drop ${what} for everyone; U undoes (X)`, actions.onDrop),
   ];
 }
