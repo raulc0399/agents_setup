@@ -17,7 +17,7 @@ const EARLY_REPLY_KEEP_MS = 10000;
  * shows the default for its content. `cameras`: the diagram's zoom and pan per document ID;
  * none fits it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
  */
-const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], modes: {}, cameras: {} };
+const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], modes: {}, cameras: {}, kept: {} };
 /** What a document shows: its entry in `modes`, else the diagram when it has something to draw; V switches. */
 const VIEWS = ['list', 'diagram'];
 const VIEW_LABELS = { list: 'List', diagram: 'Diagram' };
@@ -1079,12 +1079,19 @@ class App {
     this.showDocument(key, next.id);
   }
 
-  /** Another document of the tab: its own items, so no focus, selection or open question. */
+  /**
+   * Another document of the tab: no open question; the focus and selection of the document
+   * left are kept for it, and those kept for the one shown come back.
+   */
   showDocument(key, id) {
     if (this.ask?.key === key) {
       this.ask = null;
     }
-    this.updateView(key, { document: id, focus: null, selected: [] });
+    const view = this.view(key);
+    const left = this.current(key)?.document.id;
+    const kept = left ? { ...view.kept, [left]: { focus: view.focus, selected: view.selected } } : view.kept;
+    const back = kept[id] ?? { focus: null, selected: [] };
+    this.updateView(key, { document: id, focus: back.focus, selected: back.selected, kept });
   }
 
   focusFilter() {

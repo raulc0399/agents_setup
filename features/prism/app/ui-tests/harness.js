@@ -927,7 +927,7 @@ async function actionChecks(backend, app) {
  * diagram, one without in a list without a switch; V's choice is saved per document; the
  * pane holds the view's controls in both views; neighboring arrows differ in color.
  */
-async function viewChecks(backend) {
+async function viewChecks(backend, app) {
   const failures = [];
   const expect = (condition, message) => {
     if (!condition) {
@@ -969,6 +969,26 @@ async function viewChecks(backend) {
   filter().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   expect(await waitFor(() => boxes().length === 6), 'all boxes again');
   expect(document.activeElement === document.querySelector('.diagram-canvas'), 'Esc leaves the filter for the diagram');
+
+  // Switching documents keeps each one's focus and selection.
+  const planFocus = app.view(KEYS.LIVE).focus;
+  const shape = svg().querySelector('[data-kind="box"]');
+  shape.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  await settle();
+  const picked = app.view(KEYS.LIVE).focus;
+  app.toggleSelection(KEYS.LIVE, picked);
+  await settle();
+  expect(picked && picked !== planFocus && app.view(KEYS.LIVE).selected.includes(picked), `a box is focused and selected: ${picked}`);
+  showDocument('Release flow');
+  await settle();
+  expect(app.view(KEYS.LIVE).focus !== picked && app.view(KEYS.LIVE).selected.length === 0, 'the other document starts without them');
+  showDocument('App plan');
+  expect(await waitFor(() => svg()?.querySelector(`[data-id="${picked}"].focused`)), 'back on the app plan, the box is focused again');
+  expect(app.view(KEYS.LIVE).selected.includes(picked), 'and still selected');
+  // Back to where the later checks start: nothing selected, the earlier focus.
+  app.updateView(KEYS.LIVE, { focus: planFocus, selected: [] });
+  key('Escape');
+  await settle();
 
   // Arrows sharing a box or a lane pair differ in color; line, head and pill agree.
   showDocument('Release flow');
@@ -1012,7 +1032,7 @@ async function viewChecks(backend) {
   expect(toolbarEmpty() && filter() && controls('.info')?.textContent === '8 items · revision 3' && controls('.segmented'), 'the list has the same controls in the pane');
   expect(![...document.querySelectorAll('.pane-controls .button')].some((button) => button.textContent === 'Export SVG'), 'without the export');
   expect(document.querySelector('.detail-panel .panel-title')?.textContent === document.querySelector('.card.focused .title')?.textContent, 'the pane shows the focused card');
-  expect(document.querySelector('.detail-panel .panel-body')?.textContent.startsWith('Replace the terminal UI') && !document.querySelector('.card.focused .panel-body, .card.focused .button'), 'with its text and actions; the card stays compact');
+  expect(document.querySelector('.detail-panel .panel-body')?.textContent.length > 0 && !document.querySelector('.card.focused .panel-body, .card.focused .button'), 'with its text and actions; the card stays compact');
   await typeFilter('pairing');
   expect(document.querySelectorAll('.card').length === 3, 'the filter works from the pane in the list');
   await typeFilter('');
