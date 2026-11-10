@@ -700,8 +700,9 @@ fn arrows(boxes: u128, ends: &[(u128, u128)], manual: u128) -> (Document, BTreeS
 }
 
 #[test]
-fn arrows_of_one_path_share_a_color() {
-    // Connecting 1, Waiting 2, Connected 3, Retrying 4, Superseded 5, Closed 6.
+fn neighboring_arrows_differ_in_color() {
+    // Connecting 1, Waiting 2, Connected 3, Retrying 4, Superseded 5, Closed 6, all in one
+    // lane: every arrow is a neighbor of every other, so the first six differ.
     let ends = [
         (1, 2),
         (2, 1),
@@ -717,12 +718,12 @@ fn arrows_of_one_path_share_a_color() {
     let svg = layout.svg(None, &BTreeSet::new());
     let colors = arrow_colors(&svg);
     let expected: Vec<(Id, usize)> = (70..)
-        .zip([0, 0, 1, 2, 2, 2, 1, 3])
+        .zip([0, 1, 2, 3, 4, 5, 0, 1])
         .map(|(id, color)| (Id::from_u128(id), color))
         .collect();
     assert_eq!(
         colors, expected,
-        "a pair shares a color, a path continues it, a branch takes a new one"
+        "neighbors differ while a color is free, then the least used is reused"
     );
     assert_eq!(
         colors.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
@@ -750,25 +751,25 @@ fn arrows_of_one_path_share_a_color() {
     assert!(
         arrow
             .open
-            .contains(r#"class="prism-arrow prism-manual prism-arrow-c1""#)
+            .contains(r#"class="prism-arrow prism-manual prism-arrow-c2""#)
     );
     assert!(
         pill.open
-            .contains(r#"class="prism-pill prism-manual prism-arrow-c1""#)
+            .contains(r#"class="prism-pill prism-manual prism-arrow-c2""#)
     );
-    let color = ARROW_COLORS[1];
+    let color = ARROW_COLORS[2];
     assert!(arrow.inner.contains(&format!(r#"stroke="{color}""#)));
     assert!(arrow.inner.contains(r#"stroke-dasharray="6 5""#));
-    assert!(arrow.inner.contains(r#"marker-end="url(#prism-head-c1)""#));
+    assert!(arrow.inner.contains(r#"marker-end="url(#prism-head-c2)""#));
     assert!(svg.contains(&format!(
-        r#"<marker id="prism-head-c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
+        r#"<marker id="prism-head-c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
     )));
     assert!(pill.inner.contains(&format!(r#"fill="{color}""#)));
 }
 
 #[test]
 fn arrows_leaving_one_box_differ_while_a_color_is_free() {
-    // Into box 1 from 8, then out of it to 2..=7: the first continues, the rest branch.
+    // Into box 1 from 8, then out of it to 2..=7: every arrow touches box 1.
     let ends: Vec<(u128, u128)> = std::iter::once((8, 1))
         .chain((2..=7).map(|to| (1, to)))
         .collect();

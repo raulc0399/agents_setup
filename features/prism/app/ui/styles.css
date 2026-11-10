@@ -47,7 +47,7 @@
   --canvas: #fafbfc;
   --lane-a: var(--kind-step);
   --lane-b: var(--kind-link);
-  /* Arrow colors by path (prism-arrow-c0 ...): at least
+  /* Arrow colors; arrows sharing a box or a lane pair differ (prism-arrow-c0 ...): at least
      4.4:1 on the lane tints and 4.5:1 under the pill text; none is the focus blue. */
   --arrow-0: #475569;
   --arrow-1: #be185d;
