@@ -158,6 +158,17 @@ the Linux container.
    9.1 The MCP path uses the same bridge and app link; nothing app-specific in the adapter.
    9.2 Codex-only changes are listed in `docs/codex-handover.md` for the Codex agent. **[done]**
 
+## Follow-ups after the batches (2026-11-10)
+
+- **[done]** Default view by content: Diagram when the document has arrows or groups, else
+  List; toggle only when there is something to draw; mode saved per document.
+- **[done]** Toolbar keeps only the document strip; view toggle, filter, item count and
+  revision, hidden/selected counts and SVG export sit in the right pane in both views, with
+  the focused item's details below.
+- **[done]** Arrows inside one lane or between the same two lanes get distinct colors
+  (`prism-arrow-c0..5`, tokens `--arrow-0..5`); focus and selection marked by outline and
+  halo, not hue.
+
 ## Validation per batch
 
 - Batches 2, 3: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` for the touched crates.
