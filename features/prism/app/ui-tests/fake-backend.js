@@ -32,6 +32,14 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
     views: {},
     shown: [],
     exports: [],
+    /** The detail level of every layout asked for (null: the sizes alone), how many are on
+     * their way, and the sizes the last one gave. The test sets which levels fail and how
+     * long a layout takes. */
+    layouts: [],
+    pending: 0,
+    sizes: null,
+    failing: new Set(),
+    layoutDelay: 0,
     state: async () => structuredClone(current),
     content: async (key) => (contents[key] ? structuredClone(contents[key]) : null),
     async send(key, command) {
@@ -75,12 +83,24 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
     async setView(key, view) {
       this.views[key] = view;
     },
-    async diagram(document, visible) {
-      const response = await fetch('/diagram', { method: 'POST', body: JSON.stringify({ document, visible }) });
-      if (!response.ok) {
-        throw await response.text();
+    async diagram(document, visible, detail) {
+      this.layouts.push(detail);
+      this.pending += 1;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, this.layoutDelay));
+        if (this.failing.has(detail)) {
+          throw `no layout for ${detail}`;
+        }
+        const response = await fetch('/diagram', { method: 'POST', body: JSON.stringify({ document, visible, detail }) });
+        if (!response.ok) {
+          throw await response.text();
+        }
+        const diagram = await response.json();
+        this.sizes = diagram.sizes;
+        return diagram;
+      } finally {
+        this.pending -= 1;
       }
-      return response.json();
     },
     async exportSvg(title, svg) {
       this.exports.push({ title, svg });

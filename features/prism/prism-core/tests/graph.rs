@@ -1026,3 +1026,205 @@ fn a_box_shows_number_kind_title_and_one_line_of_text() {
         texts[3]
     );
 }
+
+/// The texts of one box, by class, in the SVG's order.
+fn box_texts(svg: &str, id: u128, class: &str) -> Vec<String> {
+    let (groups, _) = split(svg);
+    let inner = &groups
+        .iter()
+        .find(|group| group.kind == KIND_BOX && group.id == Id::from_u128(id))
+        .unwrap()
+        .inner;
+    inner
+        .split(&format!(r#"<text class="{class}""#))
+        .skip(1)
+        .map(|text| {
+            text.split('>')
+                .nth(1)
+                .unwrap()
+                .split('<')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn details_go_from_narrow_titles_to_wide_boxes_with_the_whole_text() {
+    let (mut document, visible) = steps(4);
+    document.elements.get_mut(&Id::from_u128(1)).unwrap().title =
+        "A title long enough to need a second line in the box".into();
+    let layouts = Detail::ALL.map(|detail| GraphLayout::new(&document, &visible, detail));
+    let widths = layouts
+        .each_ref()
+        .map(|layout| layout.rect_of(Id::from_u128(1)).unwrap().width);
+    assert!(widths[0] < widths[1] && widths[1] < widths[2], "{widths:?}");
+    assert!(layouts[0].bounds.width < layouts[1].bounds.width);
+    assert!(layouts[1].bounds.width < layouts[2].bounds.width);
+    let svgs = layouts
+        .each_ref()
+        .map(|layout| layout.svg(None, &BTreeSet::new()));
+    assert_eq!(box_texts(&svgs[0], 1, "prism-name").len(), 1);
+    assert!(box_texts(&svgs[0], 2, "prism-subtitle").is_empty());
+    assert_eq!(
+        box_texts(&svgs[1], 2, "prism-subtitle"),
+        ["Body text for the box"]
+    );
+    let title = box_texts(&svgs[2], 1, "prism-name");
+    assert!(
+        title.len() == 2 && !title.concat().contains('…'),
+        "the whole title: {title:?}"
+    );
+    assert_eq!(
+        box_texts(&svgs[2], 2, "prism-body"),
+        ["Body text for the box"]
+    );
+}
+
+#[test]
+fn the_full_detail_wraps_long_text_inside_its_box_and_clips_very_long_text() {
+    let (mut document, visible) = steps(3);
+    let long = "word ".repeat(40);
+    let word = "x".repeat(90);
+    document.elements.get_mut(&Id::from_u128(1)).unwrap().body = long.clone();
+    document.elements.get_mut(&Id::from_u128(2)).unwrap().body = "word ".repeat(400);
+    document.elements.get_mut(&Id::from_u128(3)).unwrap().body = word.clone();
+    let layout = GraphLayout::new(&document, &visible, Detail::Full);
+    let svg = layout.svg(None, &BTreeSet::new());
+
+    let text = box_texts(&svg, 1, "prism-body");
+    assert!(text.len() > 1, "wrapped: {text:?}");
+    assert_eq!(text.join(" "), long.trim(), "the whole text");
+    let clipped = box_texts(&svg, 2, "prism-body");
+    assert!(
+        clipped.last().unwrap().ends_with('…'),
+        "a very long text is clipped"
+    );
+    assert!(
+        clipped.join(" ").matches("word").count() < 400,
+        "within a sensible number of lines: {}",
+        clipped.len()
+    );
+    // A word longer than a line is broken into pieces of a whole line each: no line is longer.
+    let pieces = box_texts(&svg, 3, "prism-body");
+    assert!(pieces.len() > 1 && pieces.concat() == word, "{pieces:?}");
+    let line = pieces[0].chars().count();
+    assert!(
+        text.iter()
+            .chain(&clipped)
+            .all(|other| other.chars().count() <= line),
+        "lines are no longer than a line's width"
+    );
+    for id in 1..=3 {
+        let rect = layout.rect_of(Id::from_u128(id)).unwrap();
+        let rows = box_rows(&svg, id);
+        assert!(
+            rows.iter().all(|y| *y > rect.y && *y < rect.bottom()),
+            "box {id} holds its lines: {rows:?} in {rect:?}"
+        );
+    }
+    let heights: Vec<f32> = (1..=3)
+        .map(|id| layout.rect_of(Id::from_u128(id)).unwrap().height)
+        .collect();
+    assert!(
+        heights[0] < heights[1],
+        "each box is as tall as its text: {heights:?}"
+    );
+}
+
+/// The baseline of every text of one box.
+fn box_rows(svg: &str, id: u128) -> Vec<f32> {
+    let (groups, _) = split(svg);
+    let inner = &groups
+        .iter()
+        .find(|group| group.kind == KIND_BOX && group.id == Id::from_u128(id))
+        .unwrap()
+        .inner;
+    inner
+        .split("<text ")
+        .skip(1)
+        .map(|text| number(&attribute(&format!(" {text}"), "y").unwrap()))
+        .collect()
+}
+
+#[test]
+fn control_characters_in_the_text_are_escaped_at_every_detail() {
+    let (mut document, visible) = steps(1);
+    document.elements.get_mut(&Id::from_u128(1)).unwrap().body =
+        "Colored \u{1b}[31mred\u{7} text".into();
+    for detail in Detail::ALL {
+        let svg = GraphLayout::new(&document, &visible, detail).svg(None, &BTreeSet::new());
+        assert!(
+            !svg.contains(['\u{1b}', '\u{7}']),
+            "{detail:?} writes no control character"
+        );
+        if detail != Detail::Names {
+            assert!(
+                svg.contains(r"\u{1b}[31mred"),
+                "{detail:?} shows it escaped"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_bounds_come_from_placing_the_boxes_alone() {
+    let (document, visible) = three_lanes();
+    for detail in Detail::ALL {
+        assert_eq!(
+            GraphLayout::bounds_for(&document, &visible, detail),
+            GraphLayout::new(&document, &visible, detail).bounds,
+            "{detail:?}"
+        );
+    }
+}
+
+#[test]
+fn with_the_full_text_arrows_keep_clear_of_the_taller_boxes_of_a_row() {
+    // Rows of three: 1 (short), 2 (tall), 3 (short); 4 to 6 below. 1 → 5 turns below the
+    // row, 1 → 3 passes box 2, so both must run below the tall box 2.
+    let (mut document, mut visible) = steps(6);
+    document.elements.get_mut(&Id::from_u128(2)).unwrap().body = "word ".repeat(60);
+    for (id, from, to) in [(60, 1, 5), (61, 1, 3)] {
+        let (key, relationship) = link(id, from, to, "next", false);
+        document.relationships.insert(key, relationship);
+        visible.insert(key);
+    }
+    let layout = GraphLayout::new(&document, &visible, Detail::Full);
+    let boxes = box_rects(&layout, 6);
+    assert!(boxes[1].height > boxes[0].height + 100.0 && boxes[0].y == boxes[1].y);
+    let svg = layout.svg(None, &BTreeSet::new());
+    let arrows = lines(&svg);
+    assert_eq!(arrows.len(), 2);
+    for (id, points) in arrows {
+        for (a, b) in segments(&points) {
+            let line = WorldRect {
+                x: a.0.min(b.0),
+                y: a.1.min(b.1),
+                width: (a.0 - b.0).abs(),
+                height: (a.1 - b.1).abs(),
+            };
+            assert!(!overlaps(&line, &boxes[1]), "{id} crosses the tall box 2");
+        }
+    }
+    for id in [60, 61] {
+        let pill = layout.rect_of(Id::from_u128(id)).unwrap();
+        assert!(
+            boxes.iter().all(|rect| !overlaps(&pill, rect)),
+            "pill {id} on a box"
+        );
+    }
+}
+
+#[test]
+fn details_are_named_in_lower_case_for_the_app() {
+    assert_eq!(
+        serde_json::to_string(&Detail::ALL).unwrap(),
+        r#"["names","subtitles","full"]"#
+    );
+    assert_eq!(
+        serde_json::from_str::<Detail>(r#""full""#).unwrap(),
+        Detail::Full
+    );
+}

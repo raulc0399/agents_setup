@@ -252,6 +252,32 @@ async function diagramChecks(backend, app) {
   const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   const canvas = () => root.querySelector('.diagram-canvas');
   const close = (a, b) => Math.abs(a - b) < 0.5;
+  // The detail level and zoom the controls show, and pixels per world unit on screen.
+  const label = () => root.querySelector('.diagram-controls .zoom').textContent;
+  const level = () => label().replace(/ \d+%$/, '');
+  const scale = () => canvas().clientWidth / viewBox()[2];
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  // A level change waits for its layout: until no layout is on its way.
+  const settled = () => waitFor(() => backend.pending === 0);
+  const zoomKey = async (name) => {
+    key(name);
+    await settled();
+  };
+  // Box texts on screen within 80% to 125% of their designed size.
+  const readable = () =>
+    [...svg().querySelectorAll('[data-kind="box"] text')].every((text) => {
+      const designed = Number(text.getAttribute('font-size'));
+      return designed * scale() >= designed * 0.8 - 1e-6 && designed * scale() <= designed * 1.25 + 1e-6;
+    });
+  const textsInside = () =>
+    [...svg().querySelectorAll('[data-kind="box"]')].filter((box) => {
+      const outline = box.querySelector('.prism-shape').getBBox();
+      return [...box.querySelectorAll('text')].some((text) => {
+        const bounds = text.getBBox();
+        return bounds.x < outline.x || bounds.x + bounds.width > outline.x + outline.width || bounds.y < outline.y || bounds.y + bounds.height > outline.y + outline.height;
+      });
+    });
+  const releaseBody = (number) => CONTENTS_FOR_TESTS[KEYS.LIVE].documents.find((candidate) => candidate.id === KEYS.RELEASE).elements[item(number)].body;
   await settle();
 
   // V switches the document to its diagram; the choice is view state.
@@ -259,6 +285,13 @@ async function diagramChecks(backend, app) {
   const listNumbers = new Map([...root.querySelectorAll('.card')].map((card) => [card.dataset.id, card.querySelector('.number').textContent]));
   key('v');
   expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'V shows the diagram');
+  // Fit picks the most detailed level that fits the fit area (the canvas less 24 px around and
+  // the zoom controls) at 80% or more: on this canvas the full text does not, one line does.
+  const controlsHeight = root.querySelector('.diagram-controls').offsetHeight;
+  const fitsAt = (size) => Math.min((canvas().clientWidth - 48) / size.width, (canvas().clientHeight - 48 - controlsHeight) / size.height);
+  expect(level() === 'Summary' && scale() >= 0.8 && scale() <= 1, `it fits at the most detailed level that fits readably, got ${label()}`);
+  expect(fitsAt(backend.sizes.full) < 0.8 && fitsAt(backend.sizes.subtitles) >= 0.8, `the full text does not fit readably here: ${JSON.stringify(backend.sizes)}`);
+  expect(JSON.stringify(backend.layouts) === '[null,"subtitles"]', `the fit asks for the sizes, then lays out its level once: ${JSON.stringify(backend.layouts)}`);
   expect(root.querySelector('.segmented [aria-pressed="true"]')?.textContent === 'Diagram', 'the switch shows the diagram');
 
   // 5.1 Lanes per group, boxes, numbered pills, one dashed manual arrow, badges; themed by CSS.
@@ -274,23 +307,17 @@ async function diagramChecks(backend, app) {
   expect(boxNumbers.every(([shown, listed]) => shown === listed), `boxes show the list's numbers: ${JSON.stringify(boxNumbers)}`);
   expect(shape('box', item(1)).querySelector('.prism-kind')?.textContent === 'STEP', 'the kind label in capitals');
   expect(shape('box', item(1)).querySelector('.prism-subtitle')?.textContent === 'Sensor app records a reading e…', 'one clipped line of text');
-  const overflowing = boxes.filter((box) => {
-    const outline = box.querySelector('.prism-shape').getBBox();
-    return [...box.querySelectorAll('text')].some((text) => {
-      const bounds = text.getBBox();
-      return bounds.x < outline.x || bounds.x + bounds.width > outline.x + outline.width || bounds.y < outline.y || bounds.y + bounds.height > outline.y + outline.height;
-    });
-  });
-  expect(overflowing.length === 0, `box texts stay inside their box: ${overflowing.map((box) => box.dataset.id)}`);
+  expect(textsInside().length === 0, `box texts stay inside their box: ${textsInside().map((box) => box.dataset.id)}`);
   const paint = (node, property) => getComputedStyle(node).getPropertyValue(property);
   expect(paint(shape('box', item(1)).querySelector('.prism-shape'), 'fill') === 'rgb(255, 255, 255)', 'boxes take the surface token');
   expect(paint(shape('gate', item(7)).querySelector('.prism-shape'), 'fill') === 'rgb(232, 160, 32)', 'badges take the amber token');
   const frame = canvas().getBoundingClientRect();
-  const inside = [...svg().querySelectorAll('[data-kind="box"], [data-kind="gate"]')].every((node) => {
-    const rect = node.getBoundingClientRect();
-    return rect.left >= frame.left && rect.right <= frame.right && rect.top >= frame.top && rect.bottom <= frame.bottom;
-  });
-  expect(inside, 'the whole diagram fits at start');
+  const inView = () =>
+    [...svg().querySelectorAll('[data-kind="box"], [data-kind="gate"]')].every((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.left >= frame.left && rect.right <= frame.right && rect.top >= frame.top && rect.bottom <= frame.bottom;
+    });
+  expect(inView() && scale() >= 0.8 && scale() <= 1, `the whole diagram fits at start, readably: ${label()}`);
   const shared = sharedLines(svg());
   expect(shared.length === 0, `no two arrows run on one line: ${JSON.stringify(shared)}`);
 
@@ -336,16 +363,80 @@ async function diagramChecks(backend, app) {
   await settle();
   expect(panel('.panel-title') === 'upload', 'Tab onto a pill focuses its link');
 
-  // 5.2 Zoom and pan with keys, wheel, pinch and drag; 0 fits.
-  key('0');
-  await settle();
+  // 5.2 Zoom changes the detail, so text keeps its size: within a level it zooms in a band
+  // around 100%; past its end, the next level starts at 100%. 0 fits.
+  await zoomKey('0');
   const fit = viewBox();
+  expect(level() === 'Summary', `0 fits one line of text again, got ${label()}`);
   key('+');
   let box = viewBox();
-  expect(box[2] < fit[2] && close(box[0] + box[2] / 2, fit[0] + fit[2] / 2), '+ zooms in around the center');
-  key('-');
-  key('-');
-  expect(viewBox()[2] > fit[2], '- zooms out');
+  expect(level() === 'Summary' && box[2] < fit[2] && close(box[0] + box[2] / 2, fit[0] + fit[2] / 2), '+ zooms in around the center');
+  for (let presses = 0; presses < 4 && level() === 'Summary'; presses += 1) {
+    await zoomKey('+');
+    expect(readable(), `text stays readable zooming in: ${label()}`);
+  }
+  expect(level() === 'Full text' && near(scale(), 1), `past the band, + shows the full text at 100%, got ${label()}`);
+  const fullText = [...shape('box', item(1)).querySelectorAll('.prism-body')].map((line) => line.textContent);
+  expect(fullText.length > 1 && fullText.join(' ') === releaseBody(1), `the whole text, wrapped: ${fullText}`);
+  expect(textsInside().length === 0, `full texts stay inside their box: ${textsInside().map((node) => node.dataset.id)}`);
+  for (let presses = 0; presses < 4; presses += 1) {
+    await zoomKey('+');
+  }
+  expect(level() === 'Full text' && near(scale(), 1.25) && readable(), `the most detailed level stops at 125%, got ${label()}`);
+  const boxWidth = () => shape('box', item(1)).querySelector('.prism-shape').getBBox().width;
+  const fullWidth = boxWidth();
+  for (let presses = 0; presses < 6 && level() === 'Full text'; presses += 1) {
+    await zoomKey('-');
+    expect(readable(), `text stays readable zooming out: ${label()}`);
+  }
+  expect(level() === 'Summary' && near(scale(), 1), `past the band, - shows one line of text at 100%, got ${label()}`);
+  expect(shape('box', item(1)).querySelector('.prism-subtitle')?.textContent === 'Sensor app records a reading e…', 'one clipped line of text');
+  expect(boxWidth() < fullWidth && textsInside().length === 0, 'in smaller boxes, inside them');
+  for (let presses = 0; presses < 6 && level() === 'Summary'; presses += 1) {
+    await zoomKey('-');
+    expect(readable(), `text stays readable zooming out: ${label()}`);
+  }
+  expect(level() === 'Titles' && near(scale(), 1) && !svg().querySelector('.prism-subtitle, .prism-body'), `then the overview, titles only, got ${label()}`);
+  expect(textsInside().length === 0, 'titles stay inside their box');
+  for (let presses = 0; presses < 4; presses += 1) {
+    await zoomKey('-');
+  }
+  expect(level() === 'Titles' && near(scale(), 0.8), `an overview that fits stops at 80%, got ${label()}`);
+
+  // Ctrl+wheel past the band shows the next level with the box under the pointer kept there.
+  const outline = (number) => shape('box', item(number)).querySelector('.prism-shape').getBoundingClientRect();
+  const before = outline(4);
+  const pointerAt = { clientX: before.left + before.width * 0.3, clientY: before.top + before.height * 0.6 };
+  const zoomWheel = async (deltaY) => {
+    canvas().dispatchEvent(new WheelEvent('wheel', { deltaY, ctrlKey: true, bubbles: true, cancelable: true, ...pointerAt }));
+    await settled();
+  };
+  for (let notches = 0; notches < 6 && level() === 'Titles'; notches += 1) {
+    await zoomWheel(-100);
+  }
+  const after = outline(4);
+  const shares = [(pointerAt.clientX - after.left) / after.width, (pointerAt.clientY - after.top) / after.height];
+  expect(level() === 'Summary' && near(scale(), 1) && readable(), `ctrl+wheel past the band shows the next level, got ${label()}`);
+  expect(Math.abs(shares[0] - 0.3) < 0.02 && Math.abs(shares[1] - 0.6) < 0.02, `the box under the pointer stays under it: ${shares}`);
+
+  // Hysteresis: a new level starts a step from both ends of its band, so a small zoom back
+  // does not switch again, and one crossing switches once.
+  const asked = backend.layouts.length;
+  const levels = [];
+  for (const deltaY of [40, -40, 60, -60, -100, -40]) {
+    await zoomWheel(deltaY);
+    levels.push(level());
+  }
+  expect(levels.every((shown) => shown === 'Summary') && scale() > 1.2, `small zooms stay at the level: ${levels} ${label()}`);
+  for (const deltaY of [-20, 20, -20, 20]) {
+    await zoomWheel(deltaY);
+    levels.push(level());
+  }
+  expect(JSON.stringify(levels.slice(-4)) === JSON.stringify(Array(4).fill('Full text')), `crossing the threshold switches once, no flicker: ${levels}`);
+  expect(backend.layouts.length === asked, `levels shown before come without a new layout: ${backend.layouts.slice(asked)}`);
+
+  // Pan with arrow keys and the wheel; a wheel notch zooms one step around the pointer.
+  key('0');
   box = viewBox();
   key('ArrowRight');
   key('ArrowDown');
@@ -357,21 +448,118 @@ async function diagramChecks(backend, app) {
   expect(viewBox()[1] > box[1] && viewBox()[2] === box[2], 'the wheel pans');
   const at = { clientX: frame.left + 200, clientY: frame.top + 150 };
   const world = (vb) => [vb[0] + (200 / frame.width) * vb[2], vb[1] + (150 / frame.height) * vb[3]];
+  key('0');
   box = viewBox();
   canvas().dispatchEvent(new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true, ...at }));
   let zoomed = viewBox();
   expect(zoomed[2] < box[2] && close(world(zoomed)[0], world(box)[0]) && close(world(zoomed)[1], world(box)[1]), 'ctrl+wheel zooms around the pointer');
-  expect(Math.abs(box[2] / zoomed[2] - 1.25) < 1e-6, `one wheel notch is one zoom step, got ${box[2] / zoomed[2]}`);
+  expect(Math.abs(box[2] / zoomed[2] - 1.15) < 1e-6, `one wheel notch is one zoom step, got ${box[2] / zoomed[2]}`);
   canvas().dispatchEvent(new WheelEvent('wheel', { deltaY: -600, ctrlKey: true, bubbles: true, cancelable: true, ...at }));
-  expect(Math.abs(zoomed[2] / viewBox()[2] - 1.25) < 1e-6, 'a large wheel delta is capped to one step');
-  const gesture = (type, scale) => canvas().dispatchEvent(Object.assign(new Event(type, { bubbles: true, cancelable: true }), { scale, ...at }));
+  expect(Math.abs(zoomed[2] / viewBox()[2] - 1.15) < 1e-6, `a large wheel delta is capped to one step: ${label()}`);
+
+  // A pinch zooms around its center; pinching on past the band changes the level and goes on from there.
+  const gesture = (type, gestureScale) => canvas().dispatchEvent(Object.assign(new Event(type, { bubbles: true, cancelable: true }), { scale: gestureScale, ...at }));
   key('0');
   box = viewBox();
   gesture('gesturestart', 1);
-  gesture('gesturechange', 2);
-  gesture('gestureend', 2);
+  gesture('gesturechange', 1.1);
   zoomed = viewBox();
-  expect(close(zoomed[2], box[2] / 2) && close(world(zoomed)[0], world(box)[0]), 'a pinch gesture zooms');
+  expect(close(zoomed[2], box[2] / 1.1) && close(world(zoomed)[0], world(box)[0]), 'a pinch gesture zooms');
+  gesture('gesturechange', 0.5);
+  await settled();
+  expect(level() === 'Titles' && near(scale(), 1), `pinching out past the band shows less detail, got ${label()}`);
+  gesture('gesturechange', 0.45);
+  gesture('gesturechange', 0.5);
+  expect(level() === 'Titles' && near(scale(), 0.5 / 0.45), `and the pinch goes on from 100%, got ${label()}`);
+  gesture('gestureend', 0.5);
+  key('0');
+  await settled();
+
+  // + and - zoom around the focused box, into the next level too.
+  const middle = (number) => {
+    const rect = outline(number);
+    return [rect.left + rect.width / 2, rect.top + rect.height / 2];
+  };
+  const moved = (from, to) => Math.hypot(from[0] - to[0], from[1] - to[1]);
+  click(shape('box', item(2)));
+  await settle();
+  const focusedAt = middle(2);
+  key('+');
+  expect(level() === 'Summary' && moved(middle(2), focusedAt) < 0.5, `+ zooms around the focused box: ${label()}`);
+  for (let presses = 0; presses < 4 && level() === 'Summary'; presses += 1) {
+    await zoomKey('+');
+  }
+  expect(level() === 'Full text' && moved(middle(2), focusedAt) < 1, `and keeps it in place in the next level: ${moved(middle(2), focusedAt)}`);
+  key('Escape');
+  await zoomKey('0');
+
+  // A failed layout says so and keeps the level shown; zooming goes on, and asking again works.
+  // As published; `update` replaces the fixture's content.
+  const published = structuredClone(CONTENTS_FOR_TESTS[KEYS.LIVE]);
+  const revise = (revision, number, title) => {
+    const content = structuredClone(published);
+    const flow = content.documents.find((candidate) => candidate.id === KEYS.RELEASE);
+    flow.revision = revision;
+    flow.elements[item(number)].title = title;
+    backend.update(KEYS.LIVE, content);
+  };
+  const title = (number) => shape('box', item(number))?.querySelector('.prism-name')?.textContent;
+  revise(10, 2, 'Upload again');
+  expect(await waitFor(() => title(2) === 'Upload again') && level() === 'Summary', `a new revision is laid out anew: ${label()}`);
+  const message = () => root.querySelector('.diagram-message');
+  backend.failing.add('full');
+  for (let presses = 0; presses < 4 && backend.layouts.at(-1) !== 'full'; presses += 1) {
+    await zoomKey('+');
+  }
+  expect(level() === 'Summary' && !message().hidden && message().textContent.includes('could not be laid out'), `a failed layout is reported, the level stays: ${label()} ${message().textContent}`);
+  const failedAt = label();
+  await zoomKey('-');
+  expect(label() !== failedAt && level() === 'Summary', `zooming still works after a failed layout: ${label()}`);
+  backend.failing.clear();
+  for (let presses = 0; presses < 4 && level() === 'Summary'; presses += 1) {
+    await zoomKey('+');
+  }
+  expect(level() === 'Full text' && message().hidden, `asked again, the level comes: ${label()}`);
+
+  // A new revision while a level change waits: the change lands on the new layout, anchored.
+  backend.layoutDelay = 150;
+  await zoomKey('0');
+  const pointAt = (number) => {
+    const rect = outline(number);
+    return { clientX: rect.left + rect.width * 0.5, clientY: rect.top + rect.height * 0.4 };
+  };
+  const wheelAt = (point, deltaY) => canvas().dispatchEvent(new WheelEvent('wheel', { deltaY, ctrlKey: true, bubbles: true, cancelable: true, ...point }));
+  let point = pointAt(4);
+  for (let notches = 0; notches < 4 && backend.pending === 0; notches += 1) {
+    wheelAt(point, 100);
+  }
+  expect(backend.pending > 0 && level() === 'Summary', 'a level change waits for its layout');
+  revise(11, 4, 'Review again');
+  await settled();
+  const landed = outline(4);
+  expect(level() === 'Titles' && title(4) === 'Review again', `the waiting change shows the new revision: ${label()} ${title(4)}`);
+  expect(point.clientX > landed.left && point.clientX < landed.right && point.clientY > landed.top && point.clientY < landed.bottom, 'with the box under the pointer kept there');
+
+  // The anchored box hidden while the change waits: the world point under the pointer stays.
+  point = pointAt(5);
+  const worldAt = (vb) => [vb[0] + ((point.clientX - frame.left) / frame.width) * vb[2], vb[1] + ((point.clientY - frame.top) / frame.height) * vb[3]];
+  click(shape('box', item(5)));
+  await settled();
+  for (let notches = 0; notches < 4 && backend.pending === 0; notches += 1) {
+    wheelAt(point, -100);
+  }
+  const anchoredAt = worldAt(viewBox());
+  key('h');
+  await settled();
+  expect(level() === 'Summary' && !shape('box', item(5)), `the change lands without the hidden box: ${label()}`);
+  const keptAt = worldAt(viewBox());
+  expect(close(keptAt[0], anchoredAt[0]) && close(keptAt[1], anchoredAt[1]), `the world point under the pointer stays: ${anchoredAt} ${keptAt}`);
+  backend.layoutDelay = 0;
+  key('H');
+  backend.update(KEYS.LIVE, structuredClone(published));
+  expect(await waitFor(() => shape('box', item(5)) && title(4) === 'Review anomalies'), 'shown again, as published');
+  key('Escape');
+  await zoomKey('0');
   click(shape('box', item(3)));
   await settle();
   box = viewBox();
@@ -461,6 +649,16 @@ async function diagramChecks(backend, app) {
   expect(exported?.svg.includes('fill="rgb(255, 255, 255)"') && !exported.svg.includes('var('), 'with resolved colors');
   expect(!exported?.svg.includes('focused'), 'without the focus highlight');
   expect(root.querySelector('.statusbar .message').textContent.includes('Saved the diagram'), 'the saved path is shown');
+  expect(level() === 'Summary' && fileWidth === backend.sizes.subtitles.width && exported.svg.includes('class="prism-subtitle"') && !exported.svg.includes('class="prism-body"'), 'the export is of the level shown');
+  for (let presses = 0; presses < 6 && level() === 'Summary'; presses += 1) {
+    await zoomKey('+');
+  }
+  key('s');
+  await settle();
+  const full = backend.exports.at(-1).svg;
+  expect(level() === 'Full text' && full.includes('class="prism-body"') && !full.includes('class="prism-subtitle"'), 'zoomed in, the export has the full text');
+  key('0');
+  await settled();
 
   // Each document keeps its own zoom and pan.
   key('+');
@@ -480,11 +678,12 @@ async function diagramChecks(backend, app) {
   expect(root.querySelector('.cards'), 'V goes back to the list');
   key('v');
   await waitFor(() => svg());
+  await zoomKey('0');
   key('+');
   await new Promise((resolve) => setTimeout(resolve, 400));
   const saved = backend.views[KEYS.LIVE];
   const camera = saved?.cameras?.[KEYS.RELEASE];
-  expect(saved?.modes?.[KEYS.RELEASE] === 'diagram' && camera?.scale > 0, 'mode and camera are saved');
+  expect(saved?.modes?.[KEYS.RELEASE] === 'diagram' && camera?.detail === 'subtitles' && camera.scale > 1, `mode, level and camera are saved: ${JSON.stringify(camera)}`);
   const restored = fixture('diagram-checks');
   restored.state.arrangement.views = structuredClone(backend.views);
   root.hidden = true;
@@ -496,6 +695,8 @@ async function diagramChecks(backend, app) {
   const reopened = viewBox(again);
   const width = again.querySelector('.diagram-canvas').clientWidth;
   expect(close(reopened[0], camera.x) && close(reopened[1], camera.y) && close(width / reopened[2], camera.scale), 'with the saved zoom and pan');
+  const shownLabel = again.querySelector('.diagram-controls .zoom').textContent;
+  expect(shownLabel === `Summary ${Math.round(camera.scale * 100)}%` && again.querySelector('.diagram-svg .prism-subtitle'), `at the saved level: ${shownLabel}`);
 
   // A tab that leaves the window takes its views along.
   root.hidden = false;
@@ -1360,11 +1561,16 @@ async function narrowChecks() {
   };
   expect(await waitFor(() => document.querySelector('.diagram-svg [data-id]')), 'the diagram is shown');
   const zoom = document.querySelector('.diagram-controls').getBoundingClientRect();
-  const clear = [...document.querySelectorAll('.diagram-svg [data-kind="lane"], .diagram-svg [data-kind="box"]')].every((node) => {
-    const rect = node.getBoundingClientRect();
-    return rect.bottom <= zoom.top || rect.right <= zoom.left;
-  });
-  expect(clear, 'the fitted diagram leaves room for the zoom controls');
+  // No level fits this canvas readably: the overview is shown at 80% around the focused box, to pan from there.
+  const zoomLabel = () => document.querySelector('.diagram-controls .zoom').textContent;
+  const fitted = zoomLabel();
+  expect(fitted === 'Titles 80%', `the overview at a readable size, got ${fitted}`);
+  const frame = document.querySelector('.diagram-canvas').getBoundingClientRect();
+  const focused = document.querySelector('.diagram-svg [data-kind="box"].focused')?.getBoundingClientRect();
+  const shown = focused && focused.left >= frame.left && focused.right <= frame.right && focused.top >= frame.top && focused.bottom <= frame.bottom;
+  expect(shown && (focused.bottom <= zoom.top || focused.right <= zoom.left), 'around the focused box, clear of the zoom controls');
+  key('-');
+  expect(zoomLabel() === fitted, `zooming out stops there, got ${zoomLabel()}`);
   const canvas = document.querySelector('.diagram-canvas').getBoundingClientRect();
   const panel = document.querySelector('.side-pane').getBoundingClientRect();
   const svg = document.querySelector('.diagram-svg').getBoundingClientRect();

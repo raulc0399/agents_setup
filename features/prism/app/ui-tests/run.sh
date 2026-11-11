@@ -10,7 +10,7 @@ OUT=${1:-"$APP_DIR/target/ui-screenshots"}
 CHROMIUM=${CHROMIUM:-chromium}
 SIZE=1280,800
 CHECKS="checks diagram-checks view-checks action-checks status-checks document-checks"
-SCENARIOS="empty port-error mismatch no-tabs list plain focused ask select questions filter accepted dropped ended disconnected sessions menu error diagram diagram-panel diagram-zoomed diagram-arrow diagram-ask diagram-dropped documents closed-menu"
+SCENARIOS="empty port-error mismatch no-tabs list plain focused ask select questions filter accepted dropped ended disconnected sessions menu error diagram diagram-titles diagram-summary diagram-full diagram-long diagram-long-full diagram-panel diagram-zoomed diagram-arrow diagram-ask diagram-dropped documents closed-menu"
 # A narrow window: the side pane goes below the canvas or the list.
 NARROW_SIZE=600,760
 NARROW_CHECKS="narrow-checks"

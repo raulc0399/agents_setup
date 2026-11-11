@@ -922,7 +922,8 @@ button {
 }
 
 .diagram-controls .zoom {
-  min-width: 44px;
+  /* Room for the widest level and zoom, "Full text 125%", so the buttons stay put. */
+  min-width: 96px;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;

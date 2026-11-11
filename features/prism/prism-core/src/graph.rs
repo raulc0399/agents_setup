@@ -3,11 +3,15 @@
 //! and `data-kind` (one of the `KIND_*` values). Shapes and texts carry `prism-*` classes, so
 //! a stylesheet can theme what the presentation attributes paint by default. Archived
 //! (dropped) content keeps its place and number: it is drawn faded, with `prism-dropped`.
-use crate::model::{Direction, Document, ElementKind, Id, single_line};
+use crate::model::{Direction, Document, ElementKind, Id, Relationship, single_line};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+/// Box width with subtitles; the overview's boxes are narrower, those with the full text wider.
 pub const BOX_WIDTH: f32 = 300.0;
+const NAMES_BOX_WIDTH: f32 = 240.0;
+const FULL_BOX_WIDTH: f32 = 360.0;
 const BOX_GAP_X: f32 = 48.0;
 const BOX_GAP_Y: f32 = 64.0;
 pub const LANE_PADDING: f32 = 24.0;
@@ -45,10 +49,10 @@ const BASELINE_SHIFT: f32 = 0.35;
 /// Average character width per font size, generous so that clipped text stays in its box.
 const TITLE_CHAR_EM: f32 = 0.56;
 const TEXT_CHAR_EM: f32 = 0.52;
-const TEXT_WIDTH: f32 = BOX_WIDTH - TEXT_X - BOX_PADDING_RIGHT;
-const NAME_CHARS: usize = (TEXT_WIDTH / (TITLE_SIZE * TITLE_CHAR_EM)) as usize;
-const TEXT_CHARS: usize = (TEXT_WIDTH / (TEXT_SIZE * TEXT_CHAR_EM)) as usize;
-const BODY_MAX_LINES: usize = 8;
+/// The full detail wraps the title and the text into at most this many lines; a longer one
+/// ends in "…".
+const TITLE_MAX_LINES: usize = 3;
+const BODY_MAX_LINES: usize = 12;
 const MAX_COLUMNS: usize = 4;
 const PILL_HEIGHT: f32 = 20.0;
 const PILL_CHAR_WIDTH: f32 = 6.6;
@@ -62,8 +66,8 @@ const MORE_PADDING: f32 = 20.0;
 const GATE_GAP: f32 = 6.0;
 /// How far a badge reaches down into its box: it stays clear of the kind label.
 const GATE_OVERLAP: f32 = 5.0;
-/// Badges share the right part of their box's top edge; arrows enter left of them.
-const GATE_ROOM: f32 = BOX_WIDTH * 0.75;
+/// Badges share this right part of their box's top edge; arrows enter left of them.
+const GATE_ROOM_SHARE: f32 = 0.75;
 /// Badges shown per box; one "+N" badge stands for the rest.
 const MAX_GATES: usize = 2;
 /// Two arrows' lines closer than this, side by side, read as one. A line moves away from
@@ -80,9 +84,6 @@ const PORT_INSET: f32 = 12.0;
 /// Where along a segment a pill may sit, tried in this order.
 const PILL_POSITIONS: [f32; 3] = [0.5, 0.25, 0.75];
 const ARROW_HIT_DISTANCE: f32 = 8.0;
-/// Pixels per world unit below which boxes show names only, and above which full text.
-const SUBTITLE_SCALE: f32 = 0.45;
-const FULL_SCALE: f32 = 1.1;
 
 /// `data-kind` values of the clickable shapes; `data-id` is the content ID behind each.
 pub const KIND_LANE: &str = "lane";
@@ -125,23 +126,42 @@ pub const ARROW_COLORS: [&str; 6] = [
 const PILL_TEXT: &str = "#0d1117";
 const GATE_TEXT: &str = "#1b1b1b";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// How much of each item its box shows, least first. Text keeps its size at every detail;
+/// boxes grow with what they show, and the layout with them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Detail {
+    /// The overview: number, kind and title in a narrow box.
     #[default]
     Names,
+    /// Also the text on one line, as the list's card shows it.
     Subtitles,
+    /// The whole title and text, wrapped in a wider box.
     Full,
 }
 
 impl Detail {
-    pub fn for_scale(scale: f32) -> Self {
-        if scale >= FULL_SCALE {
-            Detail::Full
-        } else if scale >= SUBTITLE_SCALE {
-            Detail::Subtitles
-        } else {
-            Detail::Names
+    pub const ALL: [Detail; 3] = [Detail::Names, Detail::Subtitles, Detail::Full];
+
+    pub fn box_width(self) -> f32 {
+        match self {
+            Detail::Names => NAMES_BOX_WIDTH,
+            Detail::Subtitles => BOX_WIDTH,
+            Detail::Full => FULL_BOX_WIDTH,
         }
+    }
+
+    /// Characters of a title and of the text that fit on one line of its box.
+    fn title_chars(self) -> usize {
+        (self.text_width() / (TITLE_SIZE * TITLE_CHAR_EM)) as usize
+    }
+
+    fn text_chars(self) -> usize {
+        (self.text_width() / (TEXT_SIZE * TEXT_CHAR_EM)) as usize
+    }
+
+    fn text_width(self) -> f32 {
+        self.box_width() - TEXT_X - BOX_PADDING_RIGHT
     }
 }
 
@@ -204,9 +224,11 @@ struct Node {
     /// The number the list shows for the item.
     number: usize,
     rect: WorldRect,
+    /// The whole title on one line, for the accessible name; `title` is what the box shows.
     name: String,
-    subtitle: String,
-    body: Vec<String>,
+    title: Vec<String>,
+    /// The lines of text the detail shows: none, the subtitle, or the wrapped text.
+    text: Vec<String>,
     kind: ElementKind,
     color: &'static str,
     gates: Vec<Gate>,
@@ -229,6 +251,16 @@ struct Edge {
     dropped: bool,
 }
 
+/// What placing lanes and boxes leaves for routing the arrows.
+struct Placement<'a> {
+    layout: GraphLayout,
+    lane_of: BTreeMap<Id, usize>,
+    /// The visible relationships between shown boxes; `consumed_edges` became badges.
+    relationships: Vec<&'a Relationship>,
+    consumed_edges: BTreeSet<Id>,
+    lane_width: f32,
+}
+
 #[derive(Default)]
 pub struct GraphLayout {
     lanes: Vec<Lane>,
@@ -247,30 +279,70 @@ fn kind_color(kind: &ElementKind) -> &'static str {
     }
 }
 
-/// The item's text on one line, as the card's excerpt flows it, clipped to the box.
-fn subtitle(body: &str) -> String {
-    clip(
-        &body.split_whitespace().collect::<Vec<_>>().join(" "),
-        TEXT_CHARS,
-    )
+/// The lines of title the box shows: the whole title wrapped with the full detail, else one
+/// clipped line.
+fn title_lines(title: &str, detail: Detail) -> Vec<String> {
+    let lines = if detail == Detail::Full {
+        wrap_words(title, detail.title_chars(), TITLE_MAX_LINES)
+    } else {
+        vec![clip(title, detail.title_chars())]
+    };
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
 }
 
+/// The lines of text the box shows: none, the text on one line as the card's excerpt flows
+/// it, or all of it wrapped.
+fn text_lines(body: &str, detail: Detail) -> Vec<String> {
+    // Controls escaped first: the SVG must stay valid XML.
+    let body = single_line(body);
+    match detail {
+        Detail::Names => Vec::new(),
+        Detail::Subtitles => {
+            let line = clip(
+                &body.split_whitespace().collect::<Vec<_>>().join(" "),
+                detail.text_chars(),
+            );
+            if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![line]
+            }
+        }
+        Detail::Full => wrap_words(&body, detail.text_chars(), BODY_MAX_LINES),
+    }
+}
+
+/// `text` in lines of at most `chars` characters, broken between words; a word longer than a
+/// line is broken too. Beyond `max_lines` lines, the last one ends in "…".
 fn wrap_words(text: &str, chars: usize, max_lines: usize) -> Vec<String> {
+    let chars = chars.max(1);
+    let pieces = text.split_whitespace().flat_map(|word| {
+        let letters: Vec<char> = word.chars().collect();
+        letters
+            .chunks(chars)
+            .map(|piece| piece.iter().collect::<String>())
+            .collect::<Vec<_>>()
+    });
     let mut lines = Vec::new();
     let mut current = String::new();
-    for word in text.split_whitespace() {
-        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > chars {
+    for piece in pieces {
+        let length = current.chars().count();
+        if length > 0 && length + 1 + piece.chars().count() > chars {
             lines.push(std::mem::take(&mut current));
             if lines.len() == max_lines {
-                let last = lines.last_mut().expect("one line pushed");
-                last.push('…');
+                let last = lines.pop().expect("one line pushed");
+                lines.push(clip(&format!("{last}…"), chars));
                 return lines;
             }
         }
         if !current.is_empty() {
             current.push(' ');
         }
-        current.push_str(word);
+        current.push_str(&piece);
     }
     if !current.is_empty() {
         lines.push(current);
@@ -278,16 +350,17 @@ fn wrap_words(text: &str, chars: usize, max_lines: usize) -> Vec<String> {
     lines
 }
 
-/// Number and kind, the title, then the lines of text the detail shows.
-fn box_height(detail: Detail, body_lines: usize) -> f32 {
+/// Number and kind, the title, then the lines of text the detail shows: always one with
+/// subtitles, so that their boxes line up.
+fn box_height(detail: Detail, title_lines: usize, text_lines: usize) -> f32 {
     let text_lines = match detail {
         Detail::Names => 0,
         Detail::Subtitles => 1,
-        Detail::Full => body_lines,
+        Detail::Full => text_lines,
     };
     BOX_PADDING_Y * 2.0
         + HEAD_LINE_HEIGHT
-        + TITLE_LINE_HEIGHT
+        + title_lines as f32 * TITLE_LINE_HEIGHT
         + text_lines as f32 * TEXT_LINE_HEIGHT
 }
 
@@ -302,6 +375,108 @@ impl GraphLayout {
     /// the caller leaves out hidden and filtered-out content. An arrow is drawn only when both
     /// of its ends are.
     pub fn new(document: &Document, visible: &BTreeSet<Id>, detail: Detail) -> Self {
+        let Placement {
+            mut layout,
+            lane_of,
+            relationships,
+            consumed_edges,
+            lane_width,
+        } = Self::place(document, visible, detail);
+        let positions = document.positions();
+        let rects: BTreeMap<Id, WorldRect> = layout
+            .nodes
+            .iter()
+            .map(|node| (node.id, node.rect))
+            .collect();
+        // What a pill must not cover: boxes, badges and lane titles.
+        let titles = layout
+            .lanes
+            .iter()
+            .filter(|lane| !lane.title.is_empty())
+            .map(|lane| WorldRect {
+                x: lane.rect.x,
+                y: lane.rect.y,
+                width: lane.title.chars().count() as f32 * LANE_TITLE_CHAR_WIDTH
+                    + LANE_TITLE_PADDING,
+                height: LANE_TITLE_HEIGHT,
+            });
+        let blocked: Vec<WorldRect> = layout
+            .nodes
+            .iter()
+            .flat_map(|node| {
+                std::iter::once(node.rect).chain(node.gates.iter().map(|gate| gate.rect))
+            })
+            .chain(titles)
+            .collect();
+        let obstacles: Vec<WorldRect> = rects.values().copied().collect();
+        let lane_bands: Vec<(WorldRect, f32)> = layout
+            .lanes
+            .iter()
+            .map(|lane| (lane.rect, title_height(&lane.title)))
+            .collect();
+        let runs = Runs {
+            blocked: &blocked,
+            lanes: &lane_bands,
+            width: lane_width,
+        };
+        let mut sorted: Vec<_> = relationships
+            .iter()
+            .filter(|item| !consumed_edges.contains(&item.id))
+            .collect();
+        // Pills count the arrows in publication order, so a revised arrow keeps its number.
+        sorted.sort_by_key(|item| (positions[&item.id], item.id));
+        let mut ends = Vec::new();
+        for (index, relationship) in sorted.into_iter().enumerate() {
+            let (Some(from), Some(to)) =
+                (rects.get(&relationship.from), rects.get(&relationship.to))
+            else {
+                continue;
+            };
+            let lane = |id: &Id| layout.lanes[lane_of[id]].rect;
+            let lanes = (lane(&relationship.from), lane(&relationship.to));
+            let mut route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
+            separate_runs(&mut route, &layout.edges, &runs);
+            let points = route.points;
+            let label = single_line(&relationship.label);
+            let label = if label.starts_with(|character: char| character.is_ascii_digit()) {
+                label
+            } else {
+                format!("{} {label}", index + 1)
+            };
+            let (shown, pill) = place_pill(&points, &label, &blocked, &layout.edges);
+            let name = |id: &Id| single_line(&document.elements[id].title);
+            ends.push(ArrowEnds {
+                boxes: (relationship.from, relationship.to),
+                lanes: (lane_of[&relationship.from], lane_of[&relationship.to]),
+            });
+            layout.edges.push(Edge {
+                id: relationship.id,
+                points,
+                label,
+                shown,
+                ends: format!("{} to {}", name(&relationship.from), name(&relationship.to)),
+                dashed: relationship.manual,
+                direction: relationship.direction.clone(),
+                pill,
+                // Set below, once all arrows and their neighbors are known.
+                color: 0,
+                dropped: relationship.archived,
+            });
+        }
+        for (edge, color) in layout.edges.iter_mut().zip(arrow_colors(&ends)) {
+            edge.color = color;
+        }
+        layout
+    }
+
+    /// The bounds of the layout `new` makes, from placing lanes and boxes only, without
+    /// routing the arrows.
+    pub fn bounds_for(document: &Document, visible: &BTreeSet<Id>, detail: Detail) -> WorldRect {
+        Self::place(document, visible, detail).layout.bounds
+    }
+
+    /// Lanes and boxes with their badges, and the bounds; the arrows are left to `new`.
+    fn place<'a>(document: &'a Document, visible: &BTreeSet<Id>, detail: Detail) -> Placement<'a> {
         let elements: Vec<_> = {
             let mut items: Vec<_> = document
                 .elements
@@ -321,7 +496,6 @@ impl GraphLayout {
             .enumerate()
             .map(|(index, id)| (id, index + 1))
             .collect();
-        let positions = document.positions();
         let relationships: Vec<_> = document
             .relationships
             .values()
@@ -430,8 +604,9 @@ impl GraphLayout {
             .unwrap_or(1)
             .max(1);
         let columns = ((columns as f32).sqrt().ceil() as usize).clamp(1, MAX_COLUMNS);
+        let box_width = detail.box_width();
         let lane_width =
-            LANE_PADDING * 2.0 + columns as f32 * BOX_WIDTH + (columns - 1) as f32 * BOX_GAP_X;
+            LANE_PADDING * 2.0 + columns as f32 * box_width + (columns - 1) as f32 * BOX_GAP_X;
         let mut layout = GraphLayout {
             detail,
             ..Default::default()
@@ -446,12 +621,10 @@ impl GraphLayout {
             let mut row_height: f32 = 0.0;
             for (position, id) in members.iter().enumerate() {
                 let element = &document.elements[id];
-                let body = if detail == Detail::Full {
-                    wrap_words(&element.body, TEXT_CHARS, BODY_MAX_LINES)
-                } else {
-                    Vec::new()
-                };
-                let height = box_height(detail, body.len());
+                let name = single_line(&element.title);
+                let title = title_lines(&name, detail);
+                let text = text_lines(&element.body, detail);
+                let height = box_height(detail, title.len(), text.len());
                 let column = position % columns;
                 if column == 0 && position > 0 {
                     row_y += row_height + BOX_GAP_Y;
@@ -459,9 +632,9 @@ impl GraphLayout {
                 }
                 row_height = row_height.max(height);
                 let rect = WorldRect {
-                    x: LANE_PADDING + column as f32 * (BOX_WIDTH + BOX_GAP_X),
+                    x: LANE_PADDING + column as f32 * (box_width + BOX_GAP_X),
                     y: row_y,
-                    width: BOX_WIDTH,
+                    width: box_width,
                     height,
                 };
                 let node_gates = place_gates(gates.remove(id).unwrap_or_default(), &rect);
@@ -470,9 +643,9 @@ impl GraphLayout {
                     id: *id,
                     number: numbers[id],
                     rect,
-                    name: single_line(&element.title),
-                    subtitle: subtitle(&single_line(&element.body)),
-                    body,
+                    name,
+                    title,
+                    text,
                     kind: element.kind.clone(),
                     color: kind_color(&element.kind),
                     gates: node_gates,
@@ -504,89 +677,6 @@ impl GraphLayout {
             y = lane_top + lane_height + LANE_GAP;
         }
 
-        let rects: BTreeMap<Id, WorldRect> = layout
-            .nodes
-            .iter()
-            .map(|node| (node.id, node.rect))
-            .collect();
-        // What a pill must not cover: boxes, badges and lane titles.
-        let titles = layout
-            .lanes
-            .iter()
-            .filter(|lane| !lane.title.is_empty())
-            .map(|lane| WorldRect {
-                x: lane.rect.x,
-                y: lane.rect.y,
-                width: lane.title.chars().count() as f32 * LANE_TITLE_CHAR_WIDTH
-                    + LANE_TITLE_PADDING,
-                height: LANE_TITLE_HEIGHT,
-            });
-        let blocked: Vec<WorldRect> = layout
-            .nodes
-            .iter()
-            .flat_map(|node| {
-                std::iter::once(node.rect).chain(node.gates.iter().map(|gate| gate.rect))
-            })
-            .chain(titles)
-            .collect();
-        let obstacles: Vec<WorldRect> = rects.values().copied().collect();
-        let lane_bands: Vec<(WorldRect, f32)> = layout
-            .lanes
-            .iter()
-            .map(|lane| (lane.rect, title_height(&lane.title)))
-            .collect();
-        let runs = Runs {
-            blocked: &blocked,
-            lanes: &lane_bands,
-            width: lane_width,
-        };
-        let mut sorted: Vec<_> = relationships
-            .iter()
-            .filter(|item| !consumed_edges.contains(&item.id))
-            .collect();
-        // Pills count the arrows in publication order, so a revised arrow keeps its number.
-        sorted.sort_by_key(|item| (positions[&item.id], item.id));
-        let mut ends = Vec::new();
-        for (index, relationship) in sorted.into_iter().enumerate() {
-            let (Some(from), Some(to)) =
-                (rects.get(&relationship.from), rects.get(&relationship.to))
-            else {
-                continue;
-            };
-            let lane = |id: &Id| layout.lanes[lane_of[id]].rect;
-            let lanes = (lane(&relationship.from), lane(&relationship.to));
-            let mut route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
-            separate_runs(&mut route, &layout.edges, &runs);
-            let points = route.points;
-            let label = single_line(&relationship.label);
-            let label = if label.starts_with(|character: char| character.is_ascii_digit()) {
-                label
-            } else {
-                format!("{} {label}", index + 1)
-            };
-            let (shown, pill) = place_pill(&points, &label, &blocked, &layout.edges);
-            let name = |id: &Id| single_line(&document.elements[id].title);
-            ends.push(ArrowEnds {
-                boxes: (relationship.from, relationship.to),
-                lanes: (lane_of[&relationship.from], lane_of[&relationship.to]),
-            });
-            layout.edges.push(Edge {
-                id: relationship.id,
-                points,
-                label,
-                shown,
-                ends: format!("{} to {}", name(&relationship.from), name(&relationship.to)),
-                dashed: relationship.manual,
-                direction: relationship.direction.clone(),
-                pill,
-                // Set below, once all arrows and their neighbors are known.
-                color: 0,
-                dropped: relationship.archived,
-            });
-        }
-        for (edge, color) in layout.edges.iter_mut().zip(arrow_colors(&ends)) {
-            edge.color = color;
-        }
         let height = layout.lanes.last().map_or(0.0, |lane| lane.rect.bottom());
         layout.bounds = WorldRect {
             x: 0.0,
@@ -598,7 +688,13 @@ impl GraphLayout {
             },
             height,
         };
-        layout
+        Placement {
+            layout,
+            lane_of,
+            relationships,
+            consumed_edges,
+            lane_width,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -828,27 +924,30 @@ impl GraphLayout {
                 );
             }
             let title = head + HEAD_LINE_HEIGHT;
-            let _ = write!(
-                svg,
-                r#"<text class="prism-name" x="{}" y="{}" fill="{TEXT}" font-weight="600" font-size="{TITLE_SIZE}">{}</text>"#,
-                r.x + TEXT_X,
-                baseline(title, TITLE_LINE_HEIGHT, TITLE_SIZE),
-                escape(&clip(&node.name, NAME_CHARS))
-            );
-            let text = title + TITLE_LINE_HEIGHT;
-            if self.detail == Detail::Subtitles && !node.subtitle.is_empty() {
+            for (index, line) in node.title.iter().enumerate() {
                 let _ = write!(
                     svg,
-                    r#"<text class="prism-subtitle" x="{}" y="{}" fill="{DIM}" font-size="{TEXT_SIZE}">{}</text>"#,
+                    r#"<text class="prism-name" x="{}" y="{}" fill="{TEXT}" font-weight="600" font-size="{TITLE_SIZE}">{}</text>"#,
                     r.x + TEXT_X,
-                    baseline(text, TEXT_LINE_HEIGHT, TEXT_SIZE),
-                    escape(&node.subtitle)
+                    baseline(
+                        title + index as f32 * TITLE_LINE_HEIGHT,
+                        TITLE_LINE_HEIGHT,
+                        TITLE_SIZE
+                    ),
+                    escape(line)
                 );
             }
-            for (index, line) in node.body.iter().enumerate() {
+            let text = title + node.title.len() as f32 * TITLE_LINE_HEIGHT;
+            // The one line of the subtitles is themed apart from the wrapped full text.
+            let class = if self.detail == Detail::Subtitles {
+                "prism-subtitle"
+            } else {
+                "prism-body"
+            };
+            for (index, line) in node.text.iter().enumerate() {
                 let _ = write!(
                     svg,
-                    r#"<text class="prism-body" x="{}" y="{}" fill="{DIM}" font-size="{TEXT_SIZE}">{}</text>"#,
+                    r#"<text class="{class}" x="{}" y="{}" fill="{DIM}" font-size="{TEXT_SIZE}">{}</text>"#,
                     r.x + TEXT_X,
                     baseline(
                         text + index as f32 * TEXT_LINE_HEIGHT,
@@ -937,7 +1036,7 @@ impl GraphLayout {
 
 /// Lays the badges of one box along the right part of its top edge, right to left. Beyond
 /// `MAX_GATES`, one "+N" badge stands for the rest. Labels are clipped to their share of
-/// `GATE_ROOM`.
+/// the `GATE_ROOM_SHARE` of the box's width.
 fn place_gates(mut gates: Vec<Gate>, rect: &WorldRect) -> Vec<Gate> {
     if gates.len() > MAX_GATES {
         let rest = gates.split_off(MAX_GATES);
@@ -957,7 +1056,7 @@ fn place_gates(mut gates: Vec<Gate>, rect: &WorldRect) -> Vec<Gate> {
     let reserved: f32 = gates.iter().filter(|gate| gate.more).map(more_width).sum();
     let labelled = gates.iter().filter(|gate| !gate.more).count().max(1) as f32;
     let gaps = GATE_GAP * gates.len().saturating_sub(1) as f32;
-    let share = (GATE_ROOM - reserved - gaps) / labelled;
+    let share = (rect.width * GATE_ROOM_SHARE - reserved - gaps) / labelled;
     let chars = ((share - GATE_PADDING) / PILL_CHAR_WIDTH).floor().max(0.0) as usize;
     let mut right = rect.right();
     for gate in &mut gates {
@@ -1357,7 +1456,8 @@ fn escape(text: &str) -> String {
 /// turns once: in the gap below the row inside one lane, or in the middle of the gap between
 /// two lanes, never on a lane's edge; a run that would cross another box detours through the
 /// gap beside the column. Beside the target it runs from side to side; past a box in between
-/// it runs below the row, clear of the badges on top.
+/// it runs below the row, clear of the badges on top. Below a row means below its tallest box:
+/// with the full text, boxes of one row differ in height.
 fn route(
     from: &WorldRect,
     to: &WorldRect,
@@ -1382,8 +1482,10 @@ fn route(
         } else {
             (from.y, to.bottom(), -1.0, (Side::Top, Side::Bottom))
         };
-        let turn = if from_lane == to_lane {
-            leave + sign * BOX_GAP_Y / 2.0
+        let turn = if from_lane == to_lane && downwards {
+            row_bottom(from, obstacles) + BOX_GAP_Y / 2.0
+        } else if from_lane == to_lane {
+            leave - BOX_GAP_Y / 2.0
         } else if downwards {
             from_lane.bottom() + LANE_GAP / 2.0
         } else {
@@ -1439,7 +1541,7 @@ fn route(
             && other.bottom() > from.y.min(to.y)
     });
     if between {
-        let below = from.bottom().max(to.bottom()) + BOX_GAP_Y / 4.0;
+        let below = row_bottom(from, obstacles) + BOX_GAP_Y / 4.0;
         return Route {
             points: vec![
                 (from.center_x(), from.bottom()),
@@ -1468,6 +1570,16 @@ fn route(
     }
 }
 
+/// The bottom of the row of `rect`: boxes of one row share their top edge, the tallest one
+/// sets the bottom.
+fn row_bottom(rect: &WorldRect, obstacles: &[WorldRect]) -> f32 {
+    obstacles
+        .iter()
+        .filter(|other| other.y == rect.y)
+        .map(WorldRect::bottom)
+        .fold(rect.bottom(), f32::max)
+}
+
 fn segment_distance(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let length = dx * dx + dy * dy;
@@ -1488,6 +1600,12 @@ mod tests {
     fn wrapping_limits_lines_and_marks_truncation() {
         let lines = wrap_words("one two three four five six seven eight", 9, 2);
         assert_eq!(lines, vec!["one two".to_owned(), "three…".to_owned()]);
+    }
+
+    #[test]
+    fn wrapping_breaks_a_word_longer_than_a_line() {
+        let lines = wrap_words("see abcdefghij", 4, 5);
+        assert_eq!(lines, vec!["see", "abcd", "efgh", "ij"]);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use prism_app_host::arrangement::CloseWindow;
 use prism_app_host::diagram::{Diagram, SVG_EXTENSION, diagram, export_file_name};
 use prism_app_host::registry::{Command, Content, HostEvent};
 use prism_app_host::{AppState, EventSink, Host, HostConfig};
+use prism_core::graph::Detail;
 use prism_core::model::{Document, Id};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,11 +103,16 @@ fn set_view(host: State<'_, Host>, key: String, view: serde_json::Value) {
     host.set_view(&key, view);
 }
 
-/// Lays out the document as the tab lists it, on a blocking thread: a large diagram neither
-/// holds up the main thread nor the async runtime.
+/// Sizes the document as the tab lists it at every detail and lays it out at the detail of
+/// its zoom, if one is given, on a blocking thread: a large diagram neither holds up the main
+/// thread nor the async runtime.
 #[tauri::command]
-async fn diagram_layout(document: Document, visible: BTreeSet<Id>) -> Result<Diagram, String> {
-    tauri::async_runtime::spawn_blocking(move || diagram(&document, &visible))
+async fn diagram_layout(
+    document: Document,
+    visible: BTreeSet<Id>,
+    detail: Option<Detail>,
+) -> Result<Diagram, String> {
+    tauri::async_runtime::spawn_blocking(move || diagram(&document, &visible, detail))
         .await
         .map_err(|error| error.to_string())
 }

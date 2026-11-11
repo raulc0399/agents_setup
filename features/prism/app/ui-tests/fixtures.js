@@ -272,7 +272,14 @@ const DIAGRAM_VIEWS = {
   diagram: { focus: null, cameras: {} },
   'diagram-panel': { focus: releaseItem(4), cameras: {} },
   'diagram-ask': { focus: releaseItem(4), cameras: {} },
-  'diagram-zoomed': { focus: releaseItem(7), cameras: { [RELEASE]: { x: 20, y: -20, scale: 1.9 } } },
+  'diagram-zoomed': { focus: releaseItem(7), cameras: { [RELEASE]: { detail: 'full', x: 20, y: -20, scale: 1.2 } } },
+  // The same document at each detail level, at the designed size.
+  'diagram-titles': { focus: null, cameras: { [RELEASE]: { detail: 'names', x: -40, y: -24, scale: 1 } } },
+  'diagram-full': { focus: null, cameras: { [RELEASE]: { detail: 'full', x: -40, y: -24, scale: 1 } } },
+  'diagram-summary': { focus: null, cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -24, scale: 1 } } },
+  // Long texts: fitted, and the full text of the longest box.
+  'diagram-long': { focus: null, cameras: {} },
+  'diagram-long-full': { focus: releaseItem(4), cameras: { [RELEASE]: { detail: 'full', x: -40, y: 180, scale: 1 } } },
   // A focused and a selected arrow between the same two lanes: marked by more than their color.
   'diagram-arrow': { focus: releaseLink(4), selected: [releaseLink(5)], cameras: {} },
   'diagram-checks': { focus: null, modes: { [RELEASE]: 'list' }, cameras: {} },
@@ -300,6 +307,28 @@ const DROPPED_SCENARIOS = {
   dropped: [PLAN, ['a0000000-0000-4000-8000-000000000004'], []],
   'diagram-dropped': [RELEASE, [releaseItem(6)], [releaseLink(5)]],
 };
+
+/** Scenarios whose release flow has long texts: a title on two lines, a long text, one too long for its box, and a long word. */
+const LONG_TEXT_SCENARIOS = ['diagram-long', 'diagram-long-full'];
+const LONG_TEXTS = {
+  [releaseItem(1)]: { title: 'Capture readings on the device and keep them while it is offline' },
+  [releaseItem(2)]: {
+    body: 'Sends the queued readings over HTTPS once the device is online. A batch holds at most 500 readings; a failed upload is retried with backoff, and the device keeps the batch until the server confirms it.',
+  },
+  [releaseItem(4)]: {
+    body: 'An operator checks flagged readings before they are released. '.repeat(3) +
+      'Flags come from the range checks of the validation step and from the drift detector, which compares device time with the server clock. The operator either releases a reading, corrects its timestamp, or rejects it with a reason that goes back to the device owner. Rejected readings stay in the archive for the audit trail, with the reason and the operator who rejected them.',
+  },
+  [releaseItem(6)]: { body: 'Raw uploads are kept for 90 days for audits: s3://sensor-archive/raw-batches/by-device-and-day/' },
+};
+
+/** The fixture's contents with the release flow's long texts. */
+function longTextContents() {
+  const live = structuredClone(CONTENTS[LIVE]);
+  const release = live.documents.find((candidate) => candidate.id === RELEASE);
+  Object.entries(LONG_TEXTS).forEach(([id, change]) => Object.assign(release.elements[id], change));
+  return { ...CONTENTS, [LIVE]: live };
+}
 
 /** The fixture's contents with the given content of one document dropped (archived). */
 function droppedContents([documentId, elements, relationships]) {
@@ -356,6 +385,9 @@ export function fixture(scenario) {
   if (DIAGRAM_VIEWS[scenario]) {
     views[LIVE] = { document: RELEASE, hidden: [], ...DIAGRAM_VIEWS[scenario] };
   }
-  const contents = DROPPED_SCENARIOS[scenario] ? droppedContents(DROPPED_SCENARIOS[scenario]) : CONTENTS;
+  let contents = DROPPED_SCENARIOS[scenario] ? droppedContents(DROPPED_SCENARIOS[scenario]) : CONTENTS;
+  if (LONG_TEXT_SCENARIOS.includes(scenario)) {
+    contents = longTextContents();
+  }
   return { state: { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) }, contents };
 }

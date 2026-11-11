@@ -14,8 +14,8 @@ const TAB_DRAG_PREFIX = 'prism-tab:';
 const EARLY_REPLY_KEEP_MS = 10000;
 /**
  * Per tab, saved by the host. `modes`: list or diagram per document ID, chosen with V; none
- * shows the default for its content. `cameras`: the diagram's zoom and pan per document ID;
- * none fits it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
+ * shows the default for its content. `cameras`: the diagram's detail level, zoom and pan per
+ * document ID; none fits it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
  */
 const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], modes: {}, cameras: {}, kept: {} };
 /** What a document shows: its entry in `modes`, else the diagram when it has something to draw; V switches. */
@@ -334,7 +334,7 @@ class App {
         key,
         new DiagramView(
           {
-            layout: (document, visible) => this.backend.diagram(document, visible),
+            layout: (document, visible, detail) => this.backend.diagram(document, visible, detail),
             onFocus: (id) => this.focus(key, id),
             onToggle: (id) => this.toggleSelection(key, id),
             onClear: () => this.focus(key, null),

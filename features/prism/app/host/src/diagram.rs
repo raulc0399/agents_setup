@@ -1,35 +1,64 @@
-//! The diagram of one document as a tab shows it. `prism_core::graph` lays it out with names
-//! and subtitles and writes the SVG; the UI only places, themes and zooms it.
+//! The diagram of one document as a tab shows it. `prism_core::graph` lays it out at the
+//! detail the UI's zoom asks for and writes the SVG; the UI only places, themes and zooms it.
 use prism_core::graph::{Detail, GraphLayout};
 use prism_core::model::{Document, Id};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const SVG_EXTENSION: &str = "svg";
 /// Longest file name the export suggests, without the extension.
 const FILE_STEM_CHARS: usize = 48;
 const DEFAULT_FILE_STEM: &str = "diagram";
 
+/// What the shell's `diagram_layout` returns: the size of the whole diagram at every detail,
+/// from placing its boxes alone, and the layout of the detail asked for. The UI's fit picks
+/// the most detailed one that fits its canvas from the sizes before it asks for a layout.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Diagram {
-    pub svg: String,
+    pub sizes: BTreeMap<Detail, Size>,
+    /// None when no detail was asked for.
+    pub layout: Option<Layout>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Size {
     pub width: f32,
     pub height: f32,
+}
+
+/// The diagram laid out at one detail; its size is in `Diagram::sizes`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Layout {
+    pub detail: Detail,
+    pub svg: String,
     /// Boxes in lane order, each followed by its badges, then arrows: the order J and K
     /// follow. Lanes are not in it; the SVG's Tab order puts them first.
     pub order: Vec<Id>,
 }
 
-/// Lays out what the tab lists: `visible` leaves out hidden and filtered-out items; dropped
-/// (archived) ones stay in their place, drawn faded.
-pub fn diagram(document: &Document, visible: &BTreeSet<Id>) -> Diagram {
-    let layout = GraphLayout::new(document, visible, Detail::Subtitles);
-    Diagram {
-        svg: layout.svg(None, &BTreeSet::new()),
-        width: layout.bounds.width,
-        height: layout.bounds.height,
-        order: layout.ids(),
-    }
+/// What the tab lists, sized at every detail and laid out at `detail`: `visible` leaves out
+/// hidden and filtered-out items; dropped (archived) ones stay in their place, drawn faded.
+pub fn diagram(document: &Document, visible: &BTreeSet<Id>, detail: Option<Detail>) -> Diagram {
+    let sizes = Detail::ALL
+        .into_iter()
+        .map(|level| {
+            let bounds = GraphLayout::bounds_for(document, visible, level);
+            let size = Size {
+                width: bounds.width,
+                height: bounds.height,
+            };
+            (level, size)
+        })
+        .collect();
+    let layout = detail.map(|detail| {
+        let layout = GraphLayout::new(document, visible, detail);
+        Layout {
+            detail,
+            svg: layout.svg(None, &BTreeSet::new()),
+            order: layout.ids(),
+        }
+    });
+    Diagram { sizes, layout }
 }
 
 /// `<document title>.svg` in lower case, with dashes for anything but letters and digits
