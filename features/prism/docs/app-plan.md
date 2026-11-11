@@ -174,6 +174,12 @@ the Linux container.
   (`prism-arrow-c0..5`, tokens `--arrow-0..5`); focus and selection marked by outline and
   halo, not hue.
 
+## Later (not planned yet)
+
+- Free-form documents (2026-11-11): the agent publishes its own SVG or HTML, shown as it
+  is without scripts; boxes and arrows carry item IDs so the side pane, ask and drop still
+  work. For polished diagrams; no automatic layout, numbering or detail levels.
+
 ## Validation per batch
 
 - Batches 2, 3: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` for the touched crates.
