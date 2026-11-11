@@ -10,10 +10,11 @@
  *   activateTab(key), closeTab(key), reopenTab(key), moveTab(key, target | null),
  *   showWindow(windowId), setView(key, view)
  *   diagram(document, visibleIds, detail | null)
- *                                 -> {sizes: {<detail>: {width, height}}, layout: {detail,
- *                                 svg, order} | null}: from prism-core, the size of the
- *                                 whole diagram at every detail level and the layout of
- *                                 the one asked for
+ *                                 -> {sizes: {<detail>: {width, height}}, steps: {<link
+ *                                 ID>: step}, layout: {detail, svg, order} | null}: from
+ *                                 prism-core, the size of the whole diagram at every detail
+ *                                 level, the number each arrow's pill shows and the layout
+ *                                 of the one asked for
  *   exportSvg(title, svg)         -> the path saved to, or null when the user cancelled
  *   onEvent(callback)             host events: {type: "state"}, {type: "content", key},
  *                                 {type: "reply", key, id, error}

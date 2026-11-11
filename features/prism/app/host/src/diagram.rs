@@ -11,11 +11,15 @@ const FILE_STEM_CHARS: usize = 48;
 const DEFAULT_FILE_STEM: &str = "diagram";
 
 /// What the shell's `diagram_layout` returns: the size of the whole diagram at every detail,
-/// from placing its boxes alone, and the layout of the detail asked for. The UI's fit picks
-/// the most detailed one that fits its canvas from the sizes before it asks for a layout.
+/// from placing its boxes alone, the step number of every arrow, and the layout of the
+/// detail asked for. The UI's fit picks the most detailed one that fits its canvas from the
+/// sizes before it asks for a layout; the list shows the steps without a layout.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Diagram {
     pub sizes: BTreeMap<Detail, Size>,
+    /// The number each arrow's pill shows, by relationship ID, the same at every detail;
+    /// relationships drawn as badges have none.
+    pub steps: BTreeMap<Id, usize>,
     /// None when no detail was asked for.
     pub layout: Option<Layout>,
 }
@@ -39,10 +43,13 @@ pub struct Layout {
 /// What the tab lists, sized at every detail and laid out at `detail`: `visible` leaves out
 /// hidden and filtered-out items; dropped (archived) ones stay in their place, drawn faded.
 pub fn diagram(document: &Document, visible: &BTreeSet<Id>, detail: Option<Detail>) -> Diagram {
+    // The same at every detail: any placement gives them.
+    let mut steps = BTreeMap::new();
     let sizes = Detail::ALL
         .into_iter()
         .map(|level| {
-            let bounds = GraphLayout::bounds_for(document, visible, level);
+            let (bounds, level_steps) = GraphLayout::bounds_and_steps(document, visible, level);
+            steps = level_steps;
             let size = Size {
                 width: bounds.width,
                 height: bounds.height,
@@ -58,7 +65,11 @@ pub fn diagram(document: &Document, visible: &BTreeSet<Id>, detail: Option<Detai
             order: layout.ids(),
         }
     });
-    Diagram { sizes, layout }
+    Diagram {
+        sizes,
+        steps,
+        layout,
+    }
 }
 
 /// `<document title>.svg` in lower case, with dashes for anything but letters and digits

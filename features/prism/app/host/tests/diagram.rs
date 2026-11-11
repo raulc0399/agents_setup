@@ -4,8 +4,8 @@ mod common;
 use common::document;
 use prism_app_host::diagram::{Diagram, Layout, Size, diagram, export_file_name};
 use prism_core::graph::{Detail, GraphLayout};
-use prism_core::model::{Document, Id};
-use std::collections::BTreeSet;
+use prism_core::model::{Direction, Document, Id, Relationship};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The layout of `diagram` at `detail`.
 fn laid_out(document: &Document, visible: &BTreeSet<Id>, detail: Detail) -> (Diagram, Layout) {
@@ -85,6 +85,40 @@ fn without_a_detail_only_the_sizes_are_given() {
         serde_json::to_value(&sizes).unwrap()["layout"],
         serde_json::Value::Null
     );
+}
+
+#[test]
+fn the_arrows_steps_come_with_the_sizes_alone_and_at_every_detail() {
+    let mut document = document(1, 1, &["Collect", "Store"]);
+    let arrow = Id::from_u128(150);
+    let relationship = Relationship {
+        id: arrow,
+        from: Id::from_u128(100),
+        to: Id::from_u128(101),
+        label: "hands over".into(),
+        direction: Direction::Directed,
+        manual: false,
+        order: None,
+        semantic_revision: 1,
+        accepted_revision: None,
+        archived: false,
+    };
+    document.relationships.insert(arrow, relationship);
+    let visible: BTreeSet<Id> = [100, 101, 150].into_iter().map(Id::from_u128).collect();
+    let sizes = diagram(&document, &visible, None);
+    assert_eq!(sizes.steps, BTreeMap::from([(arrow, 1)]));
+    for detail in Detail::ALL {
+        assert_eq!(
+            diagram(&document, &visible, Some(detail)).steps,
+            sizes.steps
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(&sizes).unwrap()["steps"][arrow.to_string()],
+        1
+    );
+    let without_arrow = BTreeSet::from([Id::from_u128(100), Id::from_u128(101)]);
+    assert!(diagram(&document, &without_arrow, None).steps.is_empty());
 }
 
 #[test]

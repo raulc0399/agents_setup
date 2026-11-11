@@ -1008,9 +1008,11 @@ button {
   --kind: var(--kind-group);
 }
 
+/* "· link 12" after "STEP 4" stays in lower case. */
 .panel-tag .number {
   color: var(--faint);
   font-variant-numeric: tabular-nums;
+  text-transform: none;
 }
 
 .panel-title {

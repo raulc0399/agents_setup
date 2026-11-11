@@ -283,6 +283,44 @@ async function diagramChecks(backend, app) {
   // V switches the document to its diagram; the choice is view state.
   expect(root.querySelector('.cards'), 'the document starts in the list, as chosen before');
   const listNumbers = new Map([...root.querySelectorAll('.card')].map((card) => [card.dataset.id, card.querySelector('.number').textContent]));
+  // A link drawn as an arrow shows its step as its kind, from the sizes alone; a link drawn as a badge stays a link.
+  const linkKinds = () => JSON.stringify([...root.querySelectorAll('.card.kind-link')].map((card) => card.querySelector('.kind').textContent));
+  const allSteps = JSON.stringify(['Step 1', 'Step 2', 'Step 3', 'Step 4', 'Step 5', 'Link', 'Link']);
+  expect(await waitFor(() => linkKinds() === allSteps), `the list shows the arrows' steps: ${linkKinds()}`);
+  expect(JSON.stringify(backend.layouts) === '[null]', `the list asks for the sizes alone: ${JSON.stringify(backend.layouts)}`);
+  const listSteps = new Map([...root.querySelectorAll('.card.kind-link')].map((card) => [card.dataset.id, card.querySelector('.kind').textContent]));
+  expect(listSteps.get(link(6)) === 'Link' && listSteps.get(link(7)) === 'Link', `badge links show no step: ${listSteps.get(link(6))}, ${listSteps.get(link(7))}`);
+  // The steps follow what the list shows, as the diagram would draw it: a hidden or filtered-out
+  // box leaves its arrows out and the rest count on; a new revision brings its own steps.
+  click(root.querySelector(`.card[data-id="${item(1)}"]`));
+  key('h');
+  expect(await waitFor(() => linkKinds() === JSON.stringify(['Link', 'Step 1', 'Step 2', 'Step 3', 'Step 4', 'Link', 'Link'])), `hiding a box renumbers the steps: ${linkKinds()}`);
+  key('H');
+  expect(await waitFor(() => linkKinds() === allSteps), `showing it again restores them: ${linkKinds()}`);
+  const typeFilter = (text) => {
+    const input = root.querySelector('.filter');
+    input.value = text;
+    input.dispatchEvent(new Event('input'));
+  };
+  typeFilter('batch');
+  expect(await waitFor(() => linkKinds() === JSON.stringify(['Link', 'Step 1', 'Link', 'Step 2'])), `filtering renumbers the steps: ${linkKinds()}`);
+  typeFilter('');
+  expect(await waitFor(() => linkKinds() === allSteps), `clearing the filter restores them: ${linkKinds()}`);
+  const listedContent = structuredClone(CONTENTS_FOR_TESTS[KEYS.LIVE]);
+  const relinked = structuredClone(listedContent);
+  const relinkedFlow = relinked.documents.find((candidate) => candidate.id === KEYS.RELEASE);
+  relinkedFlow.revision = 7;
+  const second = 'b4000000-0000-4000-8000-00000000000a';
+  // A second link makes the finding a box, so its first link becomes an arrow too.
+  relinkedFlow.relationships[second] = { ...relinkedFlow.relationships[link(6)], id: second, to: item(2), label: 'affects too' };
+  backend.update(KEYS.LIVE, relinked);
+  expect(await waitFor(() => linkKinds() === JSON.stringify(['Step 1', 'Step 2', 'Step 3', 'Step 4', 'Step 5', 'Step 6', 'Link', 'Step 7'])), `a new revision brings its steps: ${linkKinds()}`);
+  backend.update(KEYS.LIVE, listedContent);
+  expect(await waitFor(() => linkKinds() === allSteps), `the restored content shows its steps again: ${linkKinds()}`);
+  click(root.querySelector(`.card[data-id="${link(6)}"]`));
+  await settle();
+  expect(panel('.panel-tag') === `Link${listNumbers.get(link(6))}`, `a badge link's panel tag shows no step: ${panel('.panel-tag')}`);
+  const listed = backend.layouts.length;
   key('v');
   expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'V shows the diagram');
   // Fit picks the most detailed level that fits the fit area (the canvas less 24 px around and
@@ -291,7 +329,7 @@ async function diagramChecks(backend, app) {
   const fitsAt = (size) => Math.min((canvas().clientWidth - 48) / size.width, (canvas().clientHeight - 48 - controlsHeight) / size.height);
   expect(level() === 'Summary' && scale() >= 0.8 && scale() <= 1, `it fits at the most detailed level that fits readably, got ${label()}`);
   expect(fitsAt(backend.sizes.full) < 0.8 && fitsAt(backend.sizes.subtitles) >= 0.8, `the full text does not fit readably here: ${JSON.stringify(backend.sizes)}`);
-  expect(JSON.stringify(backend.layouts) === '[null,"subtitles"]', `the fit asks for the sizes, then lays out its level once: ${JSON.stringify(backend.layouts)}`);
+  expect(JSON.stringify(backend.layouts.slice(listed)) === '["subtitles"]', `the fit takes the list's sizes and lays out its level once: ${JSON.stringify(backend.layouts.slice(listed))}`);
   expect(root.querySelector('.segmented [aria-pressed="true"]')?.textContent === 'Diagram', 'the switch shows the diagram');
 
   // 5.1 Lanes per group, boxes, numbered pills, one dashed manual arrow, badges; themed by CSS.
@@ -300,6 +338,9 @@ async function diagramChecks(backend, app) {
   expect(svg().querySelectorAll('[data-kind="gate"]').length === 2, 'the finding and the question are badges');
   const pills = [...svg().querySelectorAll('[data-kind="pill"] .prism-label')].map((label) => label.textContent);
   expect(pills.every((label, index) => label.startsWith(String(index + 1))), `pills are numbered: ${pills}`);
+  // Every pill's number is the step its list row and its panel tag show.
+  const pillSteps = [...svg().querySelectorAll('[data-kind="pill"]')].map((pill) => [pill.dataset.id, pill.querySelector('.prism-label').textContent.split(' ')[0]]);
+  expect(pillSteps.length === 5 && pillSteps.every(([id, step]) => listSteps.get(id) === `Step ${step}`), `list rows show the pills' steps: ${JSON.stringify(pillSteps)}`);
   expect(svg().querySelectorAll('.prism-arrow.prism-manual [stroke-dasharray]').length === 1, 'the manual arrow is dashed');
   // Boxes read like cards: number, kind, title and one clipped line of text, all inside.
   const boxes = [...svg().querySelectorAll('[data-kind="box"]')];
@@ -341,6 +382,13 @@ async function diagramChecks(backend, app) {
   expect(panel('.panel-title') === 'approve release', 'an arrow focuses its link');
   expect(document.activeElement === shape('pill', link(4)), 'its pill takes the keyboard');
   expect(shape('arrow', link(4)).classList.contains('focused') && shape('pill', link(4)).classList.contains('focused'), 'line and pill are highlighted');
+  const tagSteps = [];
+  for (const [id] of pillSteps) {
+    click(shape('pill', id));
+    await settle();
+    tagSteps.push([panel('.panel-tag'), `${listSteps.get(id)}· link ${listNumbers.get(id)}`]);
+  }
+  expect(tagSteps.every(([shown, wanted]) => shown === wanted), `panel tags show step and list number: ${JSON.stringify(tagSteps)}`);
   click(shape('gate', item(7)));
   await settle();
   expect(panel('.panel-title') === 'Clock drift on old devices', 'a badge focuses its finding');
@@ -354,7 +402,8 @@ async function diagramChecks(backend, app) {
   const order = [group(1), group(2), group(3), item(1), item(7), item(2), item(3), item(4), item(8), item(5), item(6), link(1), link(2), link(3), link(4), link(5)];
   expect(JSON.stringify(stops) === JSON.stringify(order), `tab order ${stops.length} stops`);
   expect([...svg().querySelectorAll('[data-kind="arrow"]')].every((node) => node.getAttribute('tabindex') === '-1'), 'arrow lines are no tab stops');
-  expect(shape('pill', link(4)).getAttribute('aria-label') === 'Arrow 4 approve release: Review anomalies to Publish dashboard', 'pills are named');
+  expect(shape('pill', link(4)).getAttribute('aria-label') === 'Step 4, link 12, approve release: Review anomalies to Publish dashboard', `pills are named by step and list number: ${shape('pill', link(4)).getAttribute('aria-label')}`);
+  expect(shape('pill', link(4)).querySelector('title').textContent === 'Step 4, link 12, approve release', 'and so is their tooltip');
   key('j');
   key('j');
   await settle();
@@ -362,6 +411,18 @@ async function diagramChecks(backend, app) {
   shape('pill', link(2)).focus();
   await settle();
   expect(panel('.panel-title') === 'upload', 'Tab onto a pill focuses its link');
+  // On an arrow, J and K go to the next and the previous step; at the last one J stays.
+  const focusedStep = () => panel('.panel-tag .kind');
+  const walked = [focusedStep()];
+  for (const name of ['j', 'j', 'j', 'j', 'k']) {
+    key(name);
+    await settle();
+    walked.push(focusedStep());
+  }
+  expect(JSON.stringify(walked) === JSON.stringify(['Step 2', 'Step 3', 'Step 4', 'Step 5', 'Step 5', 'Step 4']), `J and K follow the steps: ${walked}`);
+  expect(document.activeElement === shape('pill', link(4)), 'and the pill takes the keyboard');
+  shape('pill', link(2)).focus();
+  await settle();
 
   // 5.2 Zoom changes the detail, so text keeps its size: within a level it zooms in a band
   // around 100%; past its end, the next level starts at 100%. 0 fits.

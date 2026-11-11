@@ -33,11 +33,12 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
     shown: [],
     exports: [],
     /** The detail level of every layout asked for (null: the sizes alone), how many are on
-     * their way, and the sizes the last one gave. The test sets which levels fail and how
-     * long a layout takes. */
+     * their way, and the sizes and steps the last one gave. The test sets which levels fail
+     * and how long a layout takes. */
     layouts: [],
     pending: 0,
     sizes: null,
+    steps: null,
     failing: new Set(),
     layoutDelay: 0,
     state: async () => structuredClone(current),
@@ -97,6 +98,7 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
         }
         const diagram = await response.json();
         this.sizes = diagram.sizes;
+        this.steps = diagram.steps;
         return diagram;
       } finally {
         this.pending -= 1;

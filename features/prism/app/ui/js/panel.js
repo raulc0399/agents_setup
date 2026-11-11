@@ -1,5 +1,5 @@
 import { MOD_KEY, h } from './dom.js';
-import { ACCEPT_NOTE, DROPPED_NOTE, stateBadges, questionState } from './list.js';
+import { ACCEPT_NOTE, DROPPED_NOTE, kindText, stateBadges, questionState } from './list.js';
 import { questionsFor, typedQuestion } from './rows.js';
 
 /**
@@ -68,7 +68,7 @@ export class DetailPanel {
 function itemPanel(row, questions, actions) {
   const badges = stateBadges(row);
   return [
-    h('div', { class: `panel-tag kind-${row.kind}` }, h('span', { class: 'kind', text: row.kindLabel }), h('span', { class: 'number', text: String(row.number) })),
+    h('div', { class: `panel-tag kind-${row.kind}` }, h('span', { class: 'kind', text: kindText(row) }), h('span', { class: 'number', text: row.step !== null ? `· link ${row.number}` : String(row.number) })),
     h('h2', { class: 'panel-title', text: row.title }),
     badges.length > 0 ? h('div', { class: 'badges' }, badges) : null,
     row.body ? h('div', { class: 'panel-body', text: row.body }) : null,
@@ -97,7 +97,7 @@ function overviewPanel(title, counts, selected, actions) {
     h(
       'p',
       { class: 'hint' },
-      'Click a box, an arrow’s number or a badge, or press ',
+      'Click a box, an arrow’s step number or a badge, or press ',
       h('kbd', { text: 'Tab' }),
       '; ',
       h('kbd', { text: 'Space' }),

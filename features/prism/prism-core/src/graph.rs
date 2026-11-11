@@ -237,9 +237,14 @@ struct Node {
 
 struct Edge {
     id: Id,
+    /// The number the list shows for the relationship.
+    number: usize,
+    /// The number the pill always shows, from `arrow_steps`.
+    step: usize,
     points: Vec<(f32, f32)>,
-    /// Number and label; `shown` is what fits on the pill.
-    label: String,
+    /// The relationship's label on one line.
+    text: String,
+    /// What fits on the pill of its step number and label.
     shown: String,
     /// `<from> to <to>`, for the accessible name.
     ends: String,
@@ -255,6 +260,8 @@ struct Edge {
 struct Placement<'a> {
     layout: GraphLayout,
     lane_of: BTreeMap<Id, usize>,
+    /// The list's number of every visible record.
+    numbers: BTreeMap<Id, usize>,
     /// The visible relationships between shown boxes; `consumed_edges` became badges.
     relationships: Vec<&'a Relationship>,
     consumed_edges: BTreeSet<Id>,
@@ -375,14 +382,15 @@ impl GraphLayout {
     /// the caller leaves out hidden and filtered-out content. An arrow is drawn only when both
     /// of its ends are.
     pub fn new(document: &Document, visible: &BTreeSet<Id>, detail: Detail) -> Self {
+        let placement = Self::place(document, visible, detail);
+        let arrows = arrow_steps(document, &placement);
         let Placement {
             mut layout,
             lane_of,
-            relationships,
-            consumed_edges,
+            numbers,
             lane_width,
-        } = Self::place(document, visible, detail);
-        let positions = document.positions();
+            ..
+        } = placement;
         let rects: BTreeMap<Id, WorldRect> = layout
             .nodes
             .iter()
@@ -419,14 +427,8 @@ impl GraphLayout {
             lanes: &lane_bands,
             width: lane_width,
         };
-        let mut sorted: Vec<_> = relationships
-            .iter()
-            .filter(|item| !consumed_edges.contains(&item.id))
-            .collect();
-        // Pills count the arrows in publication order, so a revised arrow keeps its number.
-        sorted.sort_by_key(|item| (positions[&item.id], item.id));
         let mut ends = Vec::new();
-        for (index, relationship) in sorted.into_iter().enumerate() {
+        for (relationship, step) in arrows {
             let (Some(from), Some(to)) =
                 (rects.get(&relationship.from), rects.get(&relationship.to))
             else {
@@ -437,12 +439,8 @@ impl GraphLayout {
             let mut route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
             separate_runs(&mut route, &layout.edges, &runs);
             let points = route.points;
-            let label = single_line(&relationship.label);
-            let label = if label.starts_with(|character: char| character.is_ascii_digit()) {
-                label
-            } else {
-                format!("{} {label}", index + 1)
-            };
+            let text = single_line(&relationship.label);
+            let label = format!("{step} {text}");
             let (shown, pill) = place_pill(&points, &label, &blocked, &layout.edges);
             let name = |id: &Id| single_line(&document.elements[id].title);
             ends.push(ArrowEnds {
@@ -451,8 +449,10 @@ impl GraphLayout {
             });
             layout.edges.push(Edge {
                 id: relationship.id,
+                number: numbers[&relationship.id],
+                step,
                 points,
-                label,
+                text,
                 shown,
                 ends: format!("{} to {}", name(&relationship.from), name(&relationship.to)),
                 dashed: relationship.manual,
@@ -473,6 +473,21 @@ impl GraphLayout {
     /// routing the arrows.
     pub fn bounds_for(document: &Document, visible: &BTreeSet<Id>, detail: Detail) -> WorldRect {
         Self::place(document, visible, detail).layout.bounds
+    }
+
+    /// `bounds_for`, with the step number each arrow's pill shows, by relationship ID: it is
+    /// the same at every detail. Relationships drawn as badges have none.
+    pub fn bounds_and_steps(
+        document: &Document,
+        visible: &BTreeSet<Id>,
+        detail: Detail,
+    ) -> (WorldRect, BTreeMap<Id, usize>) {
+        let placement = Self::place(document, visible, detail);
+        let steps = arrow_steps(document, &placement)
+            .into_iter()
+            .map(|(relationship, step)| (relationship.id, step))
+            .collect();
+        (placement.layout.bounds, steps)
     }
 
     /// Lanes and boxes with their badges, and the bounds; the arrows are left to `new`.
@@ -691,6 +706,7 @@ impl GraphLayout {
         Placement {
             layout,
             lane_of,
+            numbers,
             relationships,
             consumed_edges,
             lane_width,
@@ -1003,14 +1019,18 @@ impl GraphLayout {
         for edge in &self.edges {
             let (stroke, _) = edge_paint(edge, focus == Some(edge.id));
             let p = edge.pill;
+            // Named by its step and its list number, as the list and the panel name it.
+            let mut name = format!("Step {}, link {}", edge.step, edge.number);
+            if !edge.text.trim().is_empty() {
+                let _ = write!(name, ", {}", edge.text.trim());
+            }
             open_clickable(
                 &mut svg,
                 edge.id,
                 KIND_PILL,
                 &edge_modifiers(edge),
                 Some(&format!(
-                    "Arrow {}: {}{}",
-                    edge.label,
+                    "{name}: {}{}",
                     edge.ends,
                     dropped_suffix(edge.dropped)
                 )),
@@ -1019,7 +1039,7 @@ impl GraphLayout {
             let _ = write!(
                 svg,
                 r#"<title>{}</title><rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="10" fill="{stroke}"/><text class="prism-label" x="{}" y="{}" text-anchor="middle" fill="{PILL_TEXT}" font-size="11" font-weight="700">{}</text></g>"#,
-                escape(&edge.label),
+                escape(&name),
                 p.x,
                 p.y,
                 p.width,
@@ -1244,6 +1264,30 @@ fn separate_runs(route: &mut Route, earlier: &[Edge], runs: &Runs) {
             route.points[index + 1] = d;
         }
     }
+}
+
+/// The relationships drawn as arrows, each with its step number: pills count them from 1 in
+/// publication order, so a revised arrow keeps its number. A label's own digits are text.
+fn arrow_steps<'a>(
+    document: &Document,
+    placement: &Placement<'a>,
+) -> Vec<(&'a Relationship, usize)> {
+    let positions = document.positions();
+    let mut sorted: Vec<&'a Relationship> = placement
+        .relationships
+        .iter()
+        .copied()
+        .filter(|item| !placement.consumed_edges.contains(&item.id))
+        .collect();
+    sorted.sort_by_key(|item| (positions[&item.id], item.id));
+    sorted
+        .into_iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            placement.lane_of.contains_key(&item.from) && placement.lane_of.contains_key(&item.to)
+        })
+        .map(|(index, relationship)| (relationship, index + 1))
+        .collect()
 }
 
 /// Puts the pill on the arrow where it covers no box, badge or earlier pill: on its longest

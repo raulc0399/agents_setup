@@ -1,4 +1,4 @@
-import { DiagramView } from './diagram.js';
+import { DiagramView, layoutKey } from './diagram.js';
 import { h } from './dom.js';
 import { agentLabel, projectName, shortConversation } from './format.js';
 import { ACCEPT_NOTE, DROPPED_NOTE, ListView } from './list.js';
@@ -101,6 +101,11 @@ class App {
     this.views = new Map();
     this.listViews = new Map();
     this.diagramViews = new Map();
+    /**
+     * Per tab, `{key, steps, sizes}`: the arrows' step numbers and the diagram's sizes for what
+     * it lists (`layoutKey`), from prism-core; both are null while asked.
+     */
+    this.sized = new Map();
     this.panels = new Map();
     this.shownPanel = null;
     this.focusIndex = new Map();
@@ -193,7 +198,7 @@ class App {
   /** The list, diagram and detail panel of a tab that left this window are rebuilt if it comes back. */
   forgetViews() {
     const tabs = new Set(this.myWindow()?.tabs ?? []);
-    for (const views of [this.listViews, this.panels]) {
+    for (const views of [this.listViews, this.panels, this.sized]) {
       for (const key of [...views.keys()].filter((key) => !tabs.has(key))) {
         views.delete(key);
       }
@@ -334,7 +339,7 @@ class App {
         key,
         new DiagramView(
           {
-            layout: (document, visible, detail) => this.backend.diagram(document, visible, detail),
+            layout: (document, visible, detail) => this.diagramLayout(key, document, visible, detail),
             onFocus: (id) => this.focus(key, id),
             onToggle: (id) => this.toggleSelection(key, id),
             onClear: () => this.focus(key, null),
@@ -357,6 +362,48 @@ class App {
     return this.diagramViews.get(key);
   }
 
+  /** Lays out a tab's diagram in prism-core; every response also brings the arrows' step numbers and the sizes. */
+  async diagramLayout(key, document, visible, detail) {
+    const diagram = await this.backend.diagram(document, visible, detail);
+    this.storeSized(key, layoutKey(document, visible), diagram);
+    return diagram;
+  }
+
+  /**
+   * The list shows the arrows' step numbers without drawing the diagram: it asks for the
+   * sizes alone, once per thing listed. The diagram starts from those sizes.
+   */
+  requestSized(key, current) {
+    const visible = current.rows.map((row) => row.id);
+    const wanted = layoutKey(current.document, visible);
+    if (Object.keys(current.document.relationships).length === 0 || this.sized.get(key)?.key === wanted) {
+      return;
+    }
+    this.sized.set(key, { key: wanted, steps: null, sizes: null });
+    // Without them the list shows no steps; the next change of what it lists asks again.
+    this.diagramLayout(key, current.document, visible, null).catch(() => {});
+  }
+
+  /** Keeps and shows steps and sizes that arrived for what the tab lists now; those of what it listed before are dropped. */
+  storeSized(key, wanted, { steps, sizes }) {
+    const current = this.current(key);
+    if (!current || layoutKey(current.document, current.rows.map((row) => row.id)) !== wanted) {
+      return;
+    }
+    const entry = this.sized.get(key);
+    if (entry?.key === wanted && entry.steps !== null) {
+      return;
+    }
+    this.sized.set(key, { key: wanted, steps, sizes });
+    this.render();
+  }
+
+  /** What prism-core gave for what a tab lists now, or null. */
+  sizedFor(key, document, rows) {
+    const entry = this.sized.get(key);
+    return entry?.key === layoutKey(document, rows.map((row) => row.id)) && entry.steps !== null ? entry : null;
+  }
+
   /** The document, its visible rows, the focused and the selected rows of a tab; null before content. */
   current(key) {
     const content = this.contents.get(key);
@@ -366,7 +413,10 @@ class App {
     }
     const view = this.view(key);
     const document = documents.find((candidate) => candidate.id === view.document) ?? documents[0];
-    const rows = buildRows(document, new Set(view.hidden), view.filter);
+    const listed = buildRows(document, new Set(view.hidden), view.filter);
+    // A link drawn as an arrow also has the step number its pill shows, once prism-core gave it.
+    const steps = this.sizedFor(key, document, listed)?.steps ?? {};
+    const rows = listed.map((row) => ({ ...row, step: steps[row.id] ?? null }));
     let focusIndex = rows.findIndex((row) => row.id === view.focus);
     if (focusIndex === -1 && rows.length > 0) {
       // The focused item left (hidden, filtered out): its neighbour takes over.
@@ -576,10 +626,11 @@ class App {
       const diagramView = this.diagramView(key);
       this.showBody(diagramView, key);
       // Only an item the user picked: without one the panel shows the overview.
-      diagramView.render({ ...details, focus: view.focus, camera: view.cameras?.[current.document.id] ?? null });
+      diagramView.render({ ...details, focus: view.focus, camera: view.cameras?.[current.document.id] ?? null, sizes: this.sizedFor(key, current.document, current.rows)?.sizes ?? null });
       panel.render({ ...details, focus: view.focus, counts: diagramView.counts() });
       return;
     }
+    this.requestSized(key, current);
     const listView = this.listView(key);
     this.showBody(listView, key);
     const focus = current.focus?.id ?? null;
@@ -1227,7 +1278,7 @@ class App {
     return this.current(key)?.rows.find((row) => row.id === this.view(key).focus) ?? null;
   }
 
-  /** J and K in the diagram follow the layout's order: boxes with their badges, then arrows (lanes are left out). */
+  /** J and K in the diagram follow the layout's order: boxes with their badges, then arrows in step order (lanes are left out). */
   moveDiagramFocus(key, step) {
     const order = this.diagramView(key).diagram?.order ?? [];
     if (order.length === 0) {

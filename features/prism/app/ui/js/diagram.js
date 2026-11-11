@@ -52,6 +52,11 @@ const XML_PROLOG = '<?xml version="1.0" encoding="UTF-8"?>\n';
 /** Classes the view adds to shapes, left out of an export. */
 const VIEW_CLASSES = ['focused', 'selected'];
 
+/** What a tab lists, as layouts, sizes and steps are kept for: another revision or other items shown is another key. */
+export function layoutKey(document, visible) {
+  return JSON.stringify([document.id, document.revision, visible]);
+}
+
 /**
  * The diagram view of one tab: the SVG that `prism-core` laid out at one detail level,
  * panned and zoomed through its viewBox, themed by `styles.css`; the tab's side pane shows
@@ -142,13 +147,14 @@ export class DiagramView {
 
   /**
    * `model`: {document, rows, focus: the focused item's ID or null, selected: Set of selected
-   * item IDs, camera: the camera saved for this document or null}.
+   * item IDs, camera: the camera saved for this document or null, sizes: the sizes of what is
+   * shown, when the list already asked for them, or null}.
    */
   render(model) {
     const previousFocus = this.model?.focus ?? null;
     this.model = model;
     const visible = model.rows.map((row) => row.id);
-    const key = JSON.stringify([model.document.id, model.document.revision, visible]);
+    const key = layoutKey(model.document, visible);
     if (key !== this.layoutKey) {
       // Sizes and a level change of another document do not apply to this one.
       if (this.source?.document.id !== model.document.id) {
@@ -159,6 +165,10 @@ export class DiagramView {
       this.source = { document: model.document, visible };
       this.layouts = new Map();
       this.requests = new Set();
+    }
+    // Sizes the list asked for spare asking again.
+    if (model.sizes) {
+      this.sizes = model.sizes;
     }
     // A saved camera this view could not have made does not apply: the diagram starts fitted.
     this.camera = usableCamera(model.camera) ? model.camera : null;

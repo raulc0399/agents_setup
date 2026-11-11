@@ -112,12 +112,17 @@ export class ListView {
       'div',
       { class: 'card-head' },
       h('span', { class: 'number', text: String(row.number) }),
-      h('span', { class: 'kind', text: row.kindLabel }),
+      h('span', { class: 'kind', text: kindText(row) }),
       h('span', { class: 'title', text: row.title }),
       h('span', { class: 'badges' }, badges),
     );
     card.replaceChildren(...[head, row.excerpt ? h('div', { class: 'excerpt', text: row.excerpt }) : null].filter(Boolean));
   }
+}
+
+/** The kind a card and the panel tag show: "Step 4" for a link drawn as an arrow, the number its pill shows. */
+export function kindText(row) {
+  return row.step !== null ? `Step ${row.step}` : row.kindLabel;
 }
 
 /** "dropped", "accepted" or "changed since accepted", as cards and the detail panel show them. */

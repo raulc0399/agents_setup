@@ -116,7 +116,7 @@ fn arrows_are_numbered_dashed_when_manual_and_clickable_on_their_pill() {
     let layout = GraphLayout::new(&document, &visible, Detail::Names);
     let svg = layout.svg(Some(Id::from_u128(FLOW)), &BTreeSet::new());
     assert!(svg.contains("stroke-dasharray"));
-    assert!(svg.contains(r#"aria-label="Arrow 1 hands over: Collect to Store""#));
+    assert!(svg.contains(r#"aria-label="Step 1, link 4, hands over: Collect to Store""#));
     assert!(svg.contains(">DEVICE<"));
     assert!(
         !svg.contains("blocks"),
@@ -127,6 +127,44 @@ fn arrows_are_numbered_dashed_when_manual_and_clickable_on_their_pill() {
         layout.hit(pill.x + pill.width / 2.0, pill.y + pill.height / 2.0),
         Some(Id::from_u128(FLOW))
     );
+}
+
+#[test]
+fn steps_give_the_number_every_pill_shows_and_none_for_a_badge() {
+    let (mut document, mut visible) = fixture();
+    let (own, relationship) = link(12, STEP_B, STEP_A, "5 attach", false);
+    document.relationships.insert(own, relationship);
+    visible.insert(own);
+    let (_, steps) = GraphLayout::bounds_and_steps(&document, &visible, Detail::Names);
+    assert_eq!(
+        steps,
+        BTreeMap::from([(Id::from_u128(FLOW), 1), (own, 2)]),
+        "arrows count from 1 in publication order; the badge's link has none"
+    );
+    for detail in Detail::ALL {
+        let layout = GraphLayout::new(&document, &visible, detail);
+        assert_eq!(
+            layout.ids()[layout.ids().len() - 2..],
+            [Id::from_u128(FLOW), own],
+            "J and K go through the arrows in step order"
+        );
+        let svg = layout.svg(None, &BTreeSet::new());
+        let (groups, _) = split(&svg);
+        let pills: BTreeMap<Id, usize> = groups
+            .iter()
+            .filter(|group| group.kind == KIND_PILL)
+            .map(|group| {
+                let shown = group.inner.rsplit_once("\">").unwrap().1;
+                let number = shown.trim_end_matches("</text>").split(' ').next().unwrap();
+                (group.id, number.parse().unwrap())
+            })
+            .collect();
+        assert_eq!(pills, steps, "{detail:?}");
+    }
+    // A label's own number is text after the step.
+    let svg = GraphLayout::new(&document, &visible, Detail::Full).svg(None, &BTreeSet::new());
+    assert!(svg.contains(r#"aria-label="Step 2, link 6, 5 attach: Store to Collect""#));
+    assert!(svg.contains("<title>Step 2, link 6, 5 attach</title>"));
 }
 
 #[test]
@@ -174,7 +212,7 @@ fn dropped_content_keeps_its_place_and_number_and_is_drawn_faded() {
     );
     let svg = layout.svg(None, &BTreeSet::new());
     assert!(svg.contains(r#"stroke-dasharray="2 4""#));
-    assert!(svg.contains(r#"aria-label="Arrow 1 hands over: Collect to Store (dropped)""#));
+    assert!(svg.contains(r#"aria-label="Step 1, link 4, hands over: Collect to Store (dropped)""#));
 
     // A dropped box keeps its place and number, with its arrow and the dropped label.
     document
@@ -310,7 +348,9 @@ fn every_clickable_shape_is_tagged_and_wraps_its_own_shape() {
             .contains(">! Token missing<")
     );
     let pill = &group(KIND_PILL, FLOW).inner;
-    assert!(pill.contains("<title>1 hands over</title>") && pill.contains(">1</text>"));
+    assert!(
+        pill.contains("<title>Step 1, link 4, hands over</title>") && pill.contains(">1</text>")
+    );
     let arrow = &group(KIND_ARROW, FLOW).inner;
     assert_eq!(arrow.matches("<path ").count(), 2);
     assert!(arrow.contains(r#"stroke-width="16" pointer-events="stroke""#));
@@ -414,7 +454,9 @@ fn a_pill_between_side_by_side_boxes_shows_its_number_and_covers_no_box() {
     assert!(boxes.iter().all(|rect| !overlaps(&pill, rect)));
     let svg = layout.svg(None, &BTreeSet::new());
     assert!(svg.contains(r#"font-weight="700">1</text>"#));
-    assert!(svg.contains(r#"aria-label="Arrow 1 long label for the arrow: Step 1 to Step 2""#));
+    assert!(
+        svg.contains(r#"aria-label="Step 1, link 3, long label for the arrow: Step 1 to Step 2""#)
+    );
 }
 
 #[test]
@@ -993,8 +1035,8 @@ fn every_record_is_numbered_in_publication_order_as_the_list_numbers_it() {
         ])
     );
     // Pills count the arrows in that order too, not by ID.
-    assert!(svg.contains(r#"aria-label="Arrow 1 first: Step 1 to Step 2""#));
-    assert!(svg.contains(r#"aria-label="Arrow 2 second: Step 2 to Step 3""#));
+    assert!(svg.contains(r#"aria-label="Step 1, link 2, first: Step 1 to Step 2""#));
+    assert!(svg.contains(r#"aria-label="Step 2, link 5, second: Step 2 to Step 3""#));
 }
 
 #[test]

@@ -19,7 +19,8 @@ automatically extract conversation content or open another agent conversation.
 - List relationships in the order the data flows: diagrams number arrows in
   publication order and never renumber them. When a flow changes in the
   middle, publish the diagram as a new document rather than adding a mid-flow
-  arrow to the old one.
+  arrow to the old one. Do not put step numbers into relationship labels:
+  Prism numbers the arrows.
 - Treat acceptance as content feedback, never permission to implement changes.
 - All Prism content and document state is shared through the bridge store: a
   close, drop, accept, question or answer is seen by you and every app view;
