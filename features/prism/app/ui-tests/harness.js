@@ -991,7 +991,7 @@ async function actionChecks(backend, app) {
   key(' ');
   await settle();
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `Space selects, got ${selectedCards()}`);
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask about 2|Accept 2|Drop 2', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask (2)|Accept (2)|Drop (2)', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
   expect(document.querySelector('.pane-controls .selection')?.textContent === '2 selected · clear', 'the pane counts the selection');
   ctrlClick(card(plan(6)));
   await settle();
@@ -1083,7 +1083,7 @@ async function actionChecks(backend, app) {
   expect(card(plan(2))?.classList.contains('dropped') && card(plan(2)).querySelector('.badge.dropped')?.textContent === 'dropped', 'the dropped card is marked');
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `and stays selected: ${selectedCards()}`);
   const hint = () => document.querySelector('.detail-panel .panel-actions .hint')?.textContent;
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask about 1|Accept 1|Drop 1' && hint() === '1 dropped item takes no part', `the buttons leave it out: ${buttons('.detail-panel .panel-actions')} ${hint()}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Accept|Drop' && hint() === '1 dropped item takes no part', `the buttons leave it out: ${buttons('.detail-panel .panel-actions')} ${hint()}`);
   key('Enter');
   await settle();
   const partial = backend.sent.at(-1);
@@ -1379,7 +1379,7 @@ async function actionChecks(backend, app) {
   await settle();
   expect(shape(item(4)).classList.contains('selected') && shape(item(2)).classList.contains('selected'), 'selected boxes are marked');
   expect(shape(item(4)).getAttribute('aria-label').startsWith('Selected: ') && !shape(item(3)).getAttribute('aria-label').startsWith('Selected'), 'and named selected');
-  expect(buttons('.detail-panel .panel-actions')[0] === 'Ask about 2', 'the panel counts the selection');
+  expect(buttons('.detail-panel .panel-actions')[0] === 'Ask (2)', 'the panel counts the selection');
   document.querySelector('.detail-panel .panel-actions .button.primary').click();
   await settle();
   const both = backend.sent.at(-1);

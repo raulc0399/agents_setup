@@ -127,7 +127,8 @@ function selectionInside(container) {
 function itemActions(selection, unavailable, actions) {
   const many = selection > 0;
   const what = many ? `the ${selection} selected ${selection === 1 ? 'item' : 'items'}` : 'this item';
-  const count = many ? ` ${selection}` : '';
+  // The count shows only for several items; one selected item reads like the focused one.
+  const count = selection > 1 ? ` (${selection})` : '';
   const button = (className, text, title, action) =>
     h('button', {
       class: `button ${className}`,
@@ -139,7 +140,7 @@ function itemActions(selection, unavailable, actions) {
         action();
       },
     });
-  const ask = button('primary', many ? `Ask about${count}` : 'Ask', `Ask about ${what} (Enter)`, actions.onAsk);
+  const ask = button('primary', `Ask${count}`, `Ask about ${what} (Enter)`, actions.onAsk);
   // Keeps a text selection inside the item, which becomes the quote.
   ask.addEventListener('mousedown', (event) => event.preventDefault());
   return [
