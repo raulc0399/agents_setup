@@ -597,10 +597,10 @@ button {
   min-height: 0;
 }
 
-/* Split view: two documents side by side, the left one's share set by app.js. Where two do
-   not fit (`compact`), only the active one shows. */
+/* Split view: two documents side by side, the left one's share and the divider's width set by
+   app.js. Where two do not fit (`compact`), only the active one shows. */
 .content.split {
-  grid-template-columns: calc((100% - 1px) * var(--split-ratio, 0.5)) 1px minmax(0, 1fr);
+  grid-template-columns: calc((100% - var(--divider-width)) * var(--split-ratio, 0.5)) var(--divider-width) minmax(0, 1fr);
 }
 
 .content.split.compact {
@@ -619,6 +619,8 @@ button {
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+  /* Focused only without items to show; the active pane's ring marks it. */
+  outline: none;
 }
 
 .pane-body {
@@ -658,6 +660,13 @@ button {
   font-weight: 550;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pane-heading .chip {
+  flex: none;
+  height: 18px;
+  padding: 0 7px;
+  font-size: 11px;
 }
 
 .pane-heading .close {

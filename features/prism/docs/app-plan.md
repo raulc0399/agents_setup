@@ -174,6 +174,15 @@ the Linux container.
   (`prism-arrow-c0..5`, tokens `--arrow-0..5`); focus and selection marked by outline and
   halo, not hue.
 
+- **[done]** (2026-11-11) Close and reopen documents as shared state; numbers never change;
+  dropped items stay in place; ask goes straight to the CLI prompt box; answers stay in the
+  chat.
+- **[done]** (2026-11-11) Diagram: card-style boxes, smooth zoom with an explicit detail
+  level, step numbers on arrows, pills clear of each other, rounded arrows, lanes as rows
+  or columns (stored at the first publish), `manual: true` for any dashed arrow.
+- **[done]** (2026-11-11) App: resizable side pane, two documents side by side, restored
+  tabs show whether their conversation ended.
+
 ## Later (not planned yet)
 
 - Free-form documents (2026-11-11): the agent publishes its own SVG or HTML, shown as it

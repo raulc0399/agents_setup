@@ -82,22 +82,22 @@ const FOCUS_HEAD_PROPERTY = '--head-focus';
 /** Diagram views made so far: each prefixes its marker IDs with its number. */
 let viewCount = 0;
 
-/** What a tab lists, as layouts, sizes and steps are kept for: another revision or other items shown is another key. */
+/** What a pane lists, as layouts, sizes and steps are kept for: another revision or other items shown is another key. */
 export function layoutKey(document, visible) {
   return JSON.stringify([document.id, document.revision, visible]);
 }
 
 /**
- * The diagram view of one tab: the SVG that `prism-core` laid out at one detail level,
- * panned and zoomed through its viewBox, themed by `styles.css`; the tab's side pane shows
- * the focused item. A camera `{x, y, scale}` is the world point at the top left and pixels
- * per world unit; `null` fits the whole diagram. Each document saves its level with its
- * camera, `{detail, x, y, scale}`, or `{detail}` when fitted. Layouts of the levels shown are
- * kept until the document or what the tab lists changes.
+ * The diagram view of one pane: the SVG that `prism-core` laid out at one detail level,
+ * panned and zoomed through its viewBox, themed by `styles.css`; the side pane shows the
+ * focused item while its pane is active. A camera `{x, y, scale}` is the world point at the
+ * top left and pixels per world unit; `null` fits the whole diagram. Each document saves its
+ * level with its camera, `{detail, x, y, scale}`, or `{detail}` when fitted. Layouts of the levels shown are
+ * kept until the document or what the pane lists changes.
  *
  * `actions`: layout(document, visibleIds, detail) -> Diagram, onFocus(id), onToggle(id),
  * onClear(), onCamera(documentId, camera), onLayout(): a new layout is shown (its `counts()`
- * changed). `panel`: the tab's detail panel, which keeps the keyboard in the diagram as the
+ * changed). `panel`: the pane's detail panel, which keeps the keyboard in the diagram as the
  * canvas does.
  */
 export class DiagramView {
@@ -191,6 +191,15 @@ export class DiagramView {
       cancelAnimationFrame(this.animation.frame);
       this.animation = null;
     }
+  }
+
+  /**
+   * The pane is no longer shown: the next `render` reads the saved camera and level again, as
+   * for another document, since another view may have changed them meanwhile. The layouts stay.
+   */
+  forget() {
+    this.stopAnimation();
+    this.model = null;
   }
 
   /**
