@@ -5,7 +5,7 @@
 //! (dropped) content keeps its place and number: it is drawn faded, with `prism-dropped`.
 use crate::model::{Direction, Document, ElementKind, Id, Relationship, single_line};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 /// Box width with subtitles; the overview's boxes are narrower, those with the full text wider.
@@ -59,12 +59,15 @@ const PILL_CHAR_WIDTH: f32 = 6.6;
 const PILL_PADDING: f32 = 16.0;
 /// Free space a pill keeps to boxes and badges; a pill without it shows only its number.
 const PILL_MARGIN: f32 = 4.0;
+/// Free space a pill keeps to every other pill, so that each reads as its own.
+const PILL_GAP: f32 = 6.0;
 const GATE_HEIGHT: f32 = 18.0;
 /// Room around a badge's "! " and label; a "+N" badge has no "! ".
 const GATE_PADDING: f32 = 26.0;
 const MORE_PADDING: f32 = 20.0;
 const GATE_GAP: f32 = 6.0;
-/// How far a badge reaches down into its box: it stays clear of the kind label.
+/// How far a badge reaches down into its box: it stays clear of the kind label, and of the
+/// title of a box without head line.
 const GATE_OVERLAP: f32 = 5.0;
 /// Badges share this right part of their box's top edge; arrows enter left of them.
 const GATE_ROOM_SHARE: f32 = 0.75;
@@ -84,8 +87,10 @@ const RUN_MARGIN: f32 = 4.0;
 const LANE_BOTTOM_PADDING: f32 = ARROW_END_RUN + RUN_SPACING + RUN_MARGIN;
 /// Room an arrow's end keeps to the corners of its box side.
 const PORT_INSET: f32 = 12.0;
-/// Where along a segment a pill may sit, tried in this order.
-const PILL_POSITIONS: [f32; 3] = [0.5, 0.25, 0.75];
+/// A pill slides along its segment from the middle outwards in steps of this length, at most
+/// `PILL_SLIDE_STEPS` to either side: it stays near the middle, where it reads as its arrow's.
+const PILL_SLIDE_STEP: f32 = 6.0;
+const PILL_SLIDE_STEPS: usize = 64;
 const ARROW_HIT_DISTANCE: f32 = 8.0;
 
 /// `data-kind` values of the clickable shapes; `data-id` is the content ID behind each.
@@ -107,6 +112,9 @@ const MODIFIER_DROPPED: &str = "dropped";
 const DROPPED_OPACITY: f32 = 0.45;
 const DROPPED_DASH: &str = "2 4";
 const DROPPED_LABEL: &str = "dropped";
+/// Width the dropped label takes at the right end of a title line, with room before it: a
+/// box without head line keeps it free on all its title lines.
+const DROPPED_LABEL_ROOM: f32 = 64.0;
 /// Arrowhead markers: one per arrow color (see `COLOR_MARK`), and the focused one.
 const HEAD: &str = "prism-head";
 const HEAD_FOCUS: &str = "prism-head-focus";
@@ -174,6 +182,9 @@ impl Detail {
         self.box_width() - TEXT_X - BOX_PADDING_RIGHT
     }
 }
+
+/// A straight piece of line, from one point to the next.
+type Segment = ((f32, f32), (f32, f32));
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WorldRect {
@@ -296,13 +307,13 @@ fn kind_color(kind: &ElementKind) -> &'static str {
     }
 }
 
-/// The lines of title the box shows: the whole title wrapped with the full detail, else one
-/// clipped line.
-fn title_lines(title: &str, detail: Detail) -> Vec<String> {
+/// The lines of title the box shows, of at most `chars` characters: the whole title wrapped
+/// with the full detail, else one clipped line.
+fn title_lines(title: &str, detail: Detail, chars: usize) -> Vec<String> {
     let lines = if detail == Detail::Full {
-        wrap_words(title, detail.title_chars(), TITLE_MAX_LINES)
+        wrap_words(title, chars, TITLE_MAX_LINES)
     } else {
-        vec![clip(title, detail.title_chars())]
+        vec![clip(title, chars)]
     };
     if lines.is_empty() {
         vec![String::new()]
@@ -368,17 +379,30 @@ fn wrap_words(text: &str, chars: usize, max_lines: usize) -> Vec<String> {
 }
 
 /// Number and kind, the title, then the lines of text the detail shows: always one with
-/// subtitles, so that their boxes line up.
-fn box_height(detail: Detail, title_lines: usize, text_lines: usize) -> f32 {
+/// subtitles, so that their boxes line up. A box without head line (see `has_head_line`) is
+/// that line shorter.
+fn box_height(detail: Detail, kind: &ElementKind, title_lines: usize, text_lines: usize) -> f32 {
     let text_lines = match detail {
         Detail::Names => 0,
         Detail::Subtitles => 1,
         Detail::Full => text_lines,
     };
+    let head_line = if has_head_line(kind) {
+        HEAD_LINE_HEIGHT
+    } else {
+        0.0
+    };
     BOX_PADDING_Y * 2.0
-        + HEAD_LINE_HEIGHT
+        + head_line
         + title_lines as f32 * TITLE_LINE_HEIGHT
         + text_lines as f32 * TEXT_LINE_HEIGHT
+}
+
+/// Whether a box has the head line with its number and kind label. A text box stands for an
+/// actor or a store, which its title names well enough: its number sits in the title's first
+/// line.
+fn has_head_line(kind: &ElementKind) -> bool {
+    *kind != ElementKind::Text
 }
 
 /// The baseline of a text of `size` in the line that starts at `top`.
@@ -434,10 +458,14 @@ impl GraphLayout {
             .collect();
         let runs = Runs {
             blocked: &blocked,
+            boxes: &obstacles,
+            blocked_grid: Grid::of(&blocked),
+            box_grid: Grid::of(&obstacles),
             lanes: &lane_bands,
             width: lane_width,
         };
-        let mut ends = Vec::new();
+        // All routes first: straight arrows on one line spread apart before any is separated.
+        let mut routes = Vec::new();
         for (relationship, step) in arrows {
             let (Some(from), Some(to)) =
                 (rects.get(&relationship.from), rects.get(&relationship.to))
@@ -446,7 +474,12 @@ impl GraphLayout {
             };
             let lane = |id: &Id| layout.lanes[lane_of[id]].rect;
             let lanes = (lane(&relationship.from), lane(&relationship.to));
-            let mut route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
+            let route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
+            routes.push((relationship, step, route));
+        }
+        spread_straight_runs(&mut routes, &obstacles);
+        let mut ends = Vec::new();
+        for (relationship, step, mut route) in routes {
             let heads = match relationship.direction {
                 Direction::Directed => (false, true),
                 Direction::Bidirectional => (true, true),
@@ -455,8 +488,6 @@ impl GraphLayout {
             separate_runs(&mut route, heads, &layout.edges, &runs);
             let points = route.points;
             let text = single_line(&relationship.label);
-            let label = format!("{step} {text}");
-            let (shown, pill) = place_pill(&points, &label, &blocked, &layout.edges);
             let name = |id: &Id| single_line(&document.elements[id].title);
             ends.push(ArrowEnds {
                 boxes: (relationship.from, relationship.to),
@@ -468,15 +499,39 @@ impl GraphLayout {
                 step,
                 points,
                 text,
-                shown,
+                // Pill and color are set below, once all arrows are known.
+                shown: String::new(),
                 ends: format!("{} to {}", name(&relationship.from), name(&relationship.to)),
                 dashed: relationship.manual,
                 direction: relationship.direction.clone(),
-                pill,
-                // Set below, once all arrows and their neighbors are known.
+                pill: WorldRect::default(),
                 color: 0,
                 dropped: relationship.archived,
             });
+        }
+        // In step order: each pill keeps clear of the pills before it, and where it can of
+        // every line and lane border.
+        let borders: Vec<_> = layout
+            .lanes
+            .iter()
+            .flat_map(|lane| {
+                let r = lane.rect;
+                let corners = [
+                    (r.x, r.y),
+                    (r.right(), r.y),
+                    (r.right(), r.bottom()),
+                    (r.x, r.bottom()),
+                ];
+                (0..corners.len()).map(move |side| (corners[side], corners[(side + 1) % 4]))
+            })
+            .collect();
+        let mut room = PillRoom::new(&layout.edges, &blocked, borders);
+        for index in 0..layout.edges.len() {
+            let (shown, pill) = place_pill(index, &layout.edges, &room);
+            room.pill_grid.insert(index, &pill);
+            let edge = &mut layout.edges[index];
+            edge.shown = shown;
+            edge.pill = pill;
         }
         for (edge, color) in layout.edges.iter_mut().zip(arrow_colors(&ends)) {
             edge.color = color;
@@ -652,9 +707,16 @@ impl GraphLayout {
             for (position, id) in members.iter().enumerate() {
                 let element = &document.elements[id];
                 let name = single_line(&element.title);
-                let title = title_lines(&name, detail);
+                // Without a head line, the dropped label shares the title's lines.
+                let chars = if element.archived && !has_head_line(&element.kind) {
+                    let room = (DROPPED_LABEL_ROOM / (TITLE_SIZE * TITLE_CHAR_EM)).ceil() as usize;
+                    detail.title_chars().saturating_sub(room)
+                } else {
+                    detail.title_chars()
+                };
+                let title = title_lines(&name, detail, chars);
                 let text = text_lines(&element.body, detail);
-                let height = box_height(detail, title.len(), text.len());
+                let height = box_height(detail, &element.kind, title.len(), text.len());
                 let column = position % columns;
                 if column == 0 && position > 0 {
                     row_y += row_height + BOX_GAP_Y;
@@ -934,28 +996,46 @@ impl GraphLayout {
                 node.color
             );
             let head = r.y + BOX_PADDING_Y;
+            // Number and the dropped label sit in the head line, or without one on the
+            // baseline of the title's first line.
+            let (title, number_line, label_line) = if has_head_line(&node.kind) {
+                (
+                    head + HEAD_LINE_HEIGHT,
+                    baseline(head, HEAD_LINE_HEIGHT, NUMBER_SIZE),
+                    baseline(head, HEAD_LINE_HEIGHT, KIND_SIZE),
+                )
+            } else {
+                let line = baseline(head, TITLE_LINE_HEIGHT, TITLE_SIZE);
+                (head, line, line)
+            };
             let _ = write!(
                 svg,
-                r#"<text class="prism-number" x="{}" y="{}" text-anchor="end" fill="{FAINT}" font-size="{NUMBER_SIZE}">{}</text><text class="prism-kind" x="{}" y="{}" fill="{}" font-size="{KIND_SIZE}" font-weight="650" letter-spacing="{KIND_LETTER_SPACING}">{}</text>"#,
+                r#"<text class="prism-number" x="{}" y="{}" text-anchor="end" fill="{FAINT}" font-size="{NUMBER_SIZE}">{}</text>"#,
                 r.x + NUMBER_RIGHT,
-                baseline(head, HEAD_LINE_HEIGHT, NUMBER_SIZE),
-                node.number,
-                r.x + TEXT_X,
-                baseline(head, HEAD_LINE_HEIGHT, KIND_SIZE),
-                node.color,
-                kind_label(&node.kind).to_uppercase()
+                number_line,
+                node.number
             );
-            // Right-aligned in the head line, as the card's badge sits at its right end.
+            if has_head_line(&node.kind) {
+                let _ = write!(
+                    svg,
+                    r#"<text class="prism-kind" x="{}" y="{}" fill="{}" font-size="{KIND_SIZE}" font-weight="650" letter-spacing="{KIND_LETTER_SPACING}">{}</text>"#,
+                    r.x + TEXT_X,
+                    baseline(head, HEAD_LINE_HEIGHT, KIND_SIZE),
+                    node.color,
+                    kind_label(&node.kind).to_uppercase()
+                );
+            }
+            // Right-aligned in the head line (else the title's first line), as the card's badge
+            // sits at its right end.
             if node.dropped {
                 let _ = write!(
                     svg,
                     r#"<text class="prism-dropped-label" x="{}" y="{}" text-anchor="end" fill="{DIM}" font-size="{KIND_SIZE}" font-weight="650" letter-spacing="{KIND_LETTER_SPACING}">{}</text>"#,
                     r.right() - BOX_PADDING_RIGHT,
-                    baseline(head, HEAD_LINE_HEIGHT, KIND_SIZE),
+                    label_line,
                     DROPPED_LABEL.to_uppercase()
                 );
             }
-            let title = head + HEAD_LINE_HEIGHT;
             for (index, line) in node.title.iter().enumerate() {
                 let _ = write!(
                     svg,
@@ -1128,6 +1208,11 @@ fn title_height(title: &str) -> f32 {
 /// What arrow lines keep clear of (boxes, badges, lane titles) and where they may run.
 struct Runs<'a> {
     blocked: &'a [WorldRect],
+    /// No line runs through a box, not even through one of its own ends.
+    boxes: &'a [WorldRect],
+    /// `blocked` and `boxes` by place.
+    blocked_grid: Grid,
+    box_grid: Grid,
     /// Each lane with the height of its title.
     lanes: &'a [(WorldRect, f32)],
     width: f32,
@@ -1176,6 +1261,110 @@ fn on_side(point: (f32, f32), rect: &WorldRect, side: Side) -> bool {
         }
         Side::Left | Side::Right => {
             point.1 >= rect.y + PORT_INSET && point.1 <= rect.bottom() - PORT_INSET
+        }
+    }
+}
+
+/// Spreads straight arrows that run on one line apart, symmetric around it: both ways between
+/// side-by-side boxes, or several between boxes of one column. Their pills have nowhere else
+/// to go, so the lines keep `PILL_HEIGHT` and `PILL_GAP` apart when level, the widest number
+/// pill and `PILL_GAP` when upright. Where side-by-side boxes leave room for fewer level
+/// lines, the later arrows run below the row (`below_row`). Where the upright lines' boxes
+/// leave less room, they share it evenly; closer than `RUN_SPACING`, `separate_runs` places
+/// them instead.
+fn spread_straight_runs(routes: &mut [(&Relationship, usize, Route)], obstacles: &[WorldRect]) {
+    // Level or not, the line's level, and the stretch it covers.
+    let straight = |route: &Route| -> Option<(bool, f32, (f32, f32))> {
+        let points = &route.points;
+        let (first, last) = (points[0], points[points.len() - 1]);
+        let stretch = |a: f32, b: f32| (a.min(b), a.max(b));
+        if points.iter().all(|point| point.1 == first.1) {
+            Some((true, first.1, stretch(first.0, last.0)))
+        } else if points.iter().all(|point| point.0 == first.0) {
+            Some((false, first.0, stretch(first.1, last.1)))
+        } else {
+            None
+        }
+    };
+    let mut spread = vec![false; routes.len()];
+    for index in 0..routes.len() {
+        if spread[index] {
+            continue;
+        }
+        let Some((level_line, level, stretch)) = straight(&routes[index].2) else {
+            continue;
+        };
+        let group: Vec<usize> = (index..routes.len())
+            .filter(|other| {
+                !spread[*other]
+                    && straight(&routes[*other].2).is_some_and(|(line, at, other)| {
+                        line == level_line
+                            && at == level
+                            && other.0 < stretch.1
+                            && stretch.0 < other.1
+                    })
+            })
+            .collect();
+        for member in &group {
+            spread[*member] = true;
+        }
+        if group.len() < 2 {
+            continue;
+        }
+
+        // The room on the box sides that all their ends sit on.
+        let room = group
+            .iter()
+            .flat_map(|member| [routes[*member].2.from.0, routes[*member].2.to.0])
+            .fold((f32::MIN, f32::MAX), |(low, high), rect| {
+                if level_line {
+                    (
+                        low.max(rect.y + PORT_INSET),
+                        high.min(rect.bottom() - PORT_INSET),
+                    )
+                } else {
+                    (
+                        low.max(rect.x + PORT_INSET),
+                        high.min(rect.right() - PORT_INSET),
+                    )
+                }
+            });
+        let wanted = if level_line {
+            PILL_HEIGHT + PILL_GAP
+        } else {
+            group
+                .iter()
+                .map(|member| pill_rect((0.0, 0.0), &routes[*member].1.to_string()).width)
+                .fold(0.0, f32::max)
+                + PILL_GAP
+        };
+        let mut group = group;
+        if level_line {
+            let fit = ((room.1 - room.0).max(0.0) / wanted).floor() as usize + 1;
+            for member in group.split_off(fit.min(group.len())) {
+                let (from, to) = (routes[member].2.from.0, routes[member].2.to.0);
+                routes[member].2 = below_row(&from, &to, obstacles);
+            }
+            if group.len() < 2 {
+                continue;
+            }
+        }
+        let gaps = (group.len() - 1) as f32;
+        let spacing = wanted.min((room.1 - room.0) / gaps);
+        if spacing < RUN_SPACING {
+            continue;
+        }
+        let half = spacing * gaps / 2.0;
+        let middle = level.clamp(room.0 + half, room.1 - half);
+        for (position, member) in group.iter().enumerate() {
+            let offset = middle - half + position as f32 * spacing - level;
+            for point in &mut routes[*member].2.points {
+                if level_line {
+                    point.1 += offset;
+                } else {
+                    point.0 += offset;
+                }
+            }
         }
     }
 }
@@ -1235,6 +1424,29 @@ fn separate_runs(route: &mut Route, heads: (bool, bool), earlier: &[Edge], runs:
         if index + 2 == count {
             ends.push((1, route.to));
         }
+        // What the segment and its neighbors may meet as it moves.
+        let moved = &route.points[index.saturating_sub(1)..(index + 3).min(count)];
+        let reach = RUN_STEPS as f32 * RUN_STEP + RUN_MARGIN;
+        let region = moved.iter().fold(span(a, b), |region, point| {
+            let x = region.x.min(point.0 - reach);
+            let y = region.y.min(point.1 - reach);
+            WorldRect {
+                x,
+                y,
+                width: region.right().max(point.0 + reach) - x,
+                height: region.bottom().max(point.1 + reach) - y,
+            }
+        });
+        let near = |grid: &Grid, rects: &[WorldRect]| -> Vec<WorldRect> {
+            grid.near(&region)
+                .into_iter()
+                .map(|index| rects[index])
+                .collect()
+        };
+        let (blocked, boxes) = (
+            near(&runs.blocked_grid, runs.blocked),
+            near(&runs.box_grid, runs.boxes),
+        );
         let shift = |offset: f32| {
             if horizontal {
                 ((a.0, a.1 + offset), (b.0, b.1 + offset))
@@ -1251,19 +1463,21 @@ fn separate_runs(route: &mut Route, heads: (bool, bool), earlier: &[Edge], runs:
                 ends.iter()
                     .all(|(end, (rect, side))| on_side(if *end == 0 { c } else { d }, rect, *side))
             };
-            let line = WorldRect {
-                x: c.0.min(d.0),
-                y: c.1.min(d.1),
-                width: (c.0 - d.0).abs(),
-                height: (c.1 - d.1).abs(),
-            };
-            let clear = runs.blocked.iter().all(|other| {
+            let line = span(c, d);
+            let clear = blocked.iter().all(|other| {
                 ends.iter().any(|(_, (rect, _))| rect == other)
                     || !overlaps(&line, other, RUN_MARGIN)
             });
+            // Moving the segment stretches its neighbors: neither may cross a box.
+            let before = (index > 0).then(|| span(route.points[index - 1], c));
+            let after = (index + 2 < count).then(|| span(d, route.points[index + 2]));
+            let through = std::iter::once(line)
+                .chain(before)
+                .chain(after)
+                .any(|stretch| boxes.iter().any(|rect| overlaps(&stretch, rect, 0.0)));
             let kept = (!heads.0 || index != 1 || keeps_end_run(route.points[0], a, c))
                 && (!heads.1 || index + 3 != count || keeps_end_run(route.points[count - 1], b, d));
-            placed && clear && kept
+            placed && clear && !through && kept
         };
         if fits(0.0) && shared(a, b, earlier) == 0.0 {
             continue;
@@ -1283,6 +1497,16 @@ fn separate_runs(route: &mut Route, heads: (bool, bool), earlier: &[Edge], runs:
             route.points[index] = c;
             route.points[index + 1] = d;
         }
+    }
+}
+
+/// The rectangle a level or upright line from `a` to `b` covers: zero high or wide.
+fn span(a: (f32, f32), b: (f32, f32)) -> WorldRect {
+    WorldRect {
+        x: a.0.min(b.0),
+        y: a.1.min(b.1),
+        width: (a.0 - b.0).abs(),
+        height: (a.1 - b.1).abs(),
     }
 }
 
@@ -1319,46 +1543,336 @@ fn arrow_steps<'a>(
         .collect()
 }
 
-/// Puts the pill on the arrow where it covers no box, badge or earlier pill: on its longest
-/// segment if it can, in the middle before nearer one end. Where the whole label fits
-/// nowhere (beside boxes the gap is narrow) the pill shows only its number; the whole label
-/// stays in its accessible name.
-fn place_pill(
-    points: &[(f32, f32)],
-    label: &str,
-    blocked: &[WorldRect],
-    earlier: &[Edge],
-) -> (String, WorldRect) {
-    let mut segments: Vec<_> = points.windows(2).map(|pair| (pair[0], pair[1])).collect();
+/// Puts the pill of arrow `index` on its line, clear of boxes, badges and lane titles by
+/// `PILL_MARGIN` and of the pills of earlier steps by `PILL_GAP`: with its step number and
+/// label, else with its number only (beside boxes the gap is narrow); the whole label stays in
+/// its accessible name. It tries the arrow's segments longest first, each from its middle
+/// outwards (see `slide_positions`), and of the free places takes the first that covers the
+/// least of the other arrows' lines, of its own arrowheads and of the lane `borders`. Where
+/// no place is free, it takes the one that overlaps least, so that pills stack only as a last
+/// resort.
+fn place_pill(index: usize, edges: &[Edge], room: &PillRoom) -> (String, WorldRect) {
+    let edge = &edges[index];
+    let label = format!("{} {}", edge.step, edge.text);
+    let number = edge.step.to_string();
+    let mut segments: Vec<_> = edge
+        .points
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
     segments.sort_by(|a, b| length(b).total_cmp(&length(a)));
-    let number = label.split_whitespace().next().unwrap_or("").to_owned();
-    let free = |pill: &WorldRect| {
-        blocked
-            .iter()
-            .chain(earlier.iter().map(|edge| &edge.pill))
-            .all(|other| !overlaps(pill, other, PILL_MARGIN))
-    };
-    for text in [label, number.as_str()] {
-        for ((x1, y1), (x2, y2)) in &segments {
-            for position in PILL_POSITIONS {
-                let center = (x1 + (x2 - x1) * position, y1 + (y2 - y1) * position);
+    let heads = head_runs(edge);
+    let mut best: Option<((f32, usize, f32), String, WorldRect)> = None;
+    for (form, text) in [label.as_str(), number.as_str()].into_iter().enumerate() {
+        // A free place for the whole label comes before any for the number.
+        if form > 0 && best.as_ref().is_some_and(|(least, _, _)| least.0 == 0.0) {
+            break;
+        }
+        let size = pill_rect((0.0, 0.0), text);
+        for segment in &segments {
+            // What is near, by the window of `GRID_CELL` along the segment the pill is in.
+            let mut windows: HashMap<i32, Near> = HashMap::new();
+            for center in slide_positions(segment, (size.width, size.height)) {
+                let along = if segment.0.1 == segment.1.1 {
+                    center.0
+                } else {
+                    center.1
+                };
+                let window = (along / GRID_CELL).floor() as i32;
+                let near = windows
+                    .entry(window)
+                    .or_insert_with(|| room.near(segment, window, &size, index));
                 let pill = pill_rect(center, text);
-                if free(&pill) {
+                let area = near.overlap(&pill, room, edges);
+                if best.as_ref().is_some_and(|(least, _, _)| area > least.0) {
+                    continue;
+                }
+                let cost = (area, form, near.covered(&pill, room, &heads));
+                // Free and on no other line: nothing comes before it.
+                if cost == (0.0, 0, 0.0) {
                     return (text.to_owned(), pill);
+                }
+                // Overlap first, then the label before the number, then the lines covered.
+                let better = best.as_ref().is_none_or(|(least, _, _)| {
+                    let order = cost.0.total_cmp(&least.0);
+                    let order = order.then(cost.1.cmp(&least.1));
+                    order.then(cost.2.total_cmp(&least.2)).is_lt()
+                });
+                if better {
+                    best = Some((cost, text.to_owned(), pill));
                 }
             }
         }
     }
-    let ((x1, y1), (x2, y2)) = segments.first().copied().unwrap_or_default();
-    (
-        number.clone(),
-        pill_rect(((x1 + x2) / 2.0, (y1 + y2) / 2.0), &number),
+    best.map_or_else(
+        || (number.clone(), pill_rect((0.0, 0.0), &number)),
+        |(_, text, pill)| (text, pill),
     )
+}
+
+/// Side of the square cells `Grid` sorts rectangles into.
+const GRID_CELL: f32 = 128.0;
+
+/// Indices of rectangles by the square cells of `GRID_CELL` they touch, to find the ones near
+/// a place without going through all of them.
+#[derive(Default)]
+struct Grid {
+    cells: HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl Grid {
+    fn cells(rect: &WorldRect) -> impl Iterator<Item = (i32, i32)> {
+        let cell = |value: f32| (value / GRID_CELL).floor() as i32;
+        let (columns, rows) = (
+            cell(rect.x)..=cell(rect.right()),
+            cell(rect.y)..=cell(rect.bottom()),
+        );
+        columns.flat_map(move |column| rows.clone().map(move |row| (column, row)))
+    }
+
+    fn of(rects: &[WorldRect]) -> Self {
+        let mut grid = Grid::default();
+        for (index, rect) in rects.iter().enumerate() {
+            grid.insert(index, rect);
+        }
+        grid
+    }
+
+    fn insert(&mut self, index: usize, rect: &WorldRect) {
+        for cell in Self::cells(rect) {
+            self.cells.entry(cell).or_default().push(index);
+        }
+    }
+
+    /// The indices of the rectangles in the cells `rect` touches, each once, in increasing
+    /// order: sums over them add up as over all of them in order.
+    fn near(&self, rect: &WorldRect) -> Vec<usize> {
+        let mut found: Vec<usize> = Self::cells(rect)
+            .filter_map(|cell| self.cells.get(&cell))
+            .flatten()
+            .copied()
+            .collect();
+        found.sort_unstable();
+        found.dedup();
+        found
+    }
+}
+
+/// What pills keep clear of, by place: boxes, badges and lane titles (`blocked`) and the
+/// pills placed so far, and where they can every arrow's line and the lane borders.
+struct PillRoom<'a> {
+    blocked: &'a [WorldRect],
+    blocked_grid: Grid,
+    /// Every arrow's segments with the index of its arrow, then the lane borders.
+    lines: Vec<(Option<usize>, Segment)>,
+    line_grid: Grid,
+    /// The pills placed so far, by the index of their arrow.
+    pill_grid: Grid,
+}
+
+impl<'a> PillRoom<'a> {
+    fn new(edges: &[Edge], blocked: &'a [WorldRect], borders: Vec<Segment>) -> Self {
+        let blocked_grid = Grid::of(blocked);
+        let lines: Vec<(Option<usize>, Segment)> = edges
+            .iter()
+            .enumerate()
+            .flat_map(|(index, edge)| {
+                edge.points
+                    .windows(2)
+                    .map(move |pair| (Some(index), (pair[0], pair[1])))
+            })
+            .chain(borders.into_iter().map(|border| (None, border)))
+            .collect();
+        let mut line_grid = Grid::default();
+        for (index, (_, (a, b))) in lines.iter().enumerate() {
+            line_grid.insert(index, &span(*a, *b));
+        }
+        PillRoom {
+            blocked,
+            blocked_grid,
+            lines,
+            line_grid,
+            pill_grid: Grid::default(),
+        }
+    }
+
+    /// What a pill of `size` on `segment` of arrow `index` may touch while its center is in
+    /// `window`, the stretch of `GRID_CELL` along the segment that starts at `window` times it.
+    fn near(&self, segment: &Segment, window: i32, size: &WorldRect, index: usize) -> Near {
+        let reach = size.width.max(size.height) / 2.0 + PILL_GAP.max(PILL_MARGIN);
+        let mut line = span(segment.0, segment.1);
+        let (start, end) = (window as f32 * GRID_CELL, (window + 1) as f32 * GRID_CELL);
+        if segment.0.1 == segment.1.1 {
+            let x = line.x.max(start);
+            line.width = line.right().min(end) - x;
+            line.x = x;
+        } else {
+            let y = line.y.max(start);
+            line.height = line.bottom().min(end) - y;
+            line.y = y;
+        }
+        let sweep = WorldRect {
+            x: line.x - reach,
+            y: line.y - reach,
+            width: line.width + 2.0 * reach,
+            height: line.height + 2.0 * reach,
+        };
+        let (lines, borders) = self
+            .line_grid
+            .near(&sweep)
+            .into_iter()
+            .filter(|line| self.lines[*line].0 != Some(index))
+            .partition(|line| self.lines[*line].0.is_some());
+        Near {
+            blocked: self.blocked_grid.near(&sweep),
+            pills: self.pill_grid.near(&sweep),
+            lines,
+            borders,
+        }
+    }
+}
+
+/// Indices into a `PillRoom` of what is near one segment.
+struct Near {
+    blocked: Vec<usize>,
+    pills: Vec<usize>,
+    lines: Vec<usize>,
+    borders: Vec<usize>,
+}
+
+impl Near {
+    /// The area `pill` shares with boxes, badges and lane titles grown by `PILL_MARGIN`, and
+    /// with the pills placed so far grown by `PILL_GAP`.
+    fn overlap(&self, pill: &WorldRect, room: &PillRoom, edges: &[Edge]) -> f32 {
+        let boxes: f32 = self
+            .blocked
+            .iter()
+            .map(|other| overlap_area(pill, &room.blocked[*other], PILL_MARGIN))
+            .sum();
+        let pills: f32 = self
+            .pills
+            .iter()
+            .map(|other| overlap_area(pill, &edges[*other].pill, PILL_GAP))
+            .sum();
+        boxes + pills
+    }
+
+    /// The length of other arrows' lines, of the arrow's own `heads` and of lane borders
+    /// within `PILL_MARGIN` that `pill` covers.
+    fn covered(&self, pill: &WorldRect, room: &PillRoom, heads: &[Segment]) -> f32 {
+        let on = |rect: &WorldRect, lines: &[usize]| -> f32 {
+            lines
+                .iter()
+                .map(|line| {
+                    let (a, b) = room.lines[*line].1;
+                    covered_length(rect, a, b)
+                })
+                .sum()
+        };
+        let grown = WorldRect {
+            x: pill.x - PILL_MARGIN,
+            y: pill.y - PILL_MARGIN,
+            width: pill.width + 2.0 * PILL_MARGIN,
+            height: pill.height + 2.0 * PILL_MARGIN,
+        };
+        let own: f32 = heads
+            .iter()
+            .map(|(a, b)| covered_length(pill, *a, *b))
+            .sum();
+        on(pill, &self.lines) + own + on(&grown, &self.borders)
+    }
+}
+
+/// The stretches of an arrow's line its heads cover: the last `ARROW_HEAD_SIZE` before each
+/// end with a head.
+fn head_runs(edge: &Edge) -> Vec<Segment> {
+    let points = &edge.points;
+    let (start, end) = match edge.direction {
+        Direction::Directed => (false, true),
+        Direction::Bidirectional => (true, true),
+        Direction::Undirected => (false, false),
+    };
+    let reversed: Vec<(f32, f32)> = points.iter().rev().copied().collect();
+    [(start, &reversed), (end, points)]
+        .into_iter()
+        .filter(|(head, line)| *head && line.len() >= 2)
+        .map(|(_, line)| {
+            let (tip, before) = (line[line.len() - 1], line[line.len() - 2]);
+            let total = (tip.0 - before.0).abs() + (tip.1 - before.1).abs();
+            let share = if total > 0.0 {
+                (ARROW_HEAD_SIZE / total).min(1.0)
+            } else {
+                0.0
+            };
+            let base = (
+                tip.0 + (before.0 - tip.0) * share,
+                tip.1 + (before.1 - tip.1) * share,
+            );
+            (base, tip)
+        })
+        .collect()
+}
+
+/// The centers a pill of `size` (width, height) may take on a segment: its middle, then
+/// outwards in steps of `PILL_SLIDE_STEP` to either side, nearer the start first, at most
+/// `PILL_SLIDE_STEPS` and as far as the pill stays within the segment's ends.
+fn slide_positions(segment: &Segment, size: (f32, f32)) -> Vec<(f32, f32)> {
+    let ((x1, y1), (x2, y2)) = *segment;
+    let total = length(segment);
+    let extent = if y1 == y2 { size.0 } else { size.1 };
+    let reach = ((total - extent) / 2.0).max(0.0);
+    let steps = ((reach / PILL_SLIDE_STEP).floor() as usize).min(PILL_SLIDE_STEPS);
+    let at = |offset: f32| {
+        let share = if total > 0.0 {
+            0.5 + offset / total
+        } else {
+            0.5
+        };
+        (x1 + (x2 - x1) * share, y1 + (y2 - y1) * share)
+    };
+    std::iter::once(at(0.0))
+        .chain((1..=steps).flat_map(|step| {
+            let offset = step as f32 * PILL_SLIDE_STEP;
+            [at(-offset), at(offset)]
+        }))
+        .collect()
 }
 
 fn length(segment: &((f32, f32), (f32, f32))) -> f32 {
     let ((x1, y1), (x2, y2)) = *segment;
     (x2 - x1).abs() + (y2 - y1).abs()
+}
+
+/// The area `a`, grown by `margin` on every side, shares with `b`.
+fn overlap_area(a: &WorldRect, b: &WorldRect, margin: f32) -> f32 {
+    let width = (a.right() + margin).min(b.right()) - (a.x - margin).max(b.x);
+    let height = (a.bottom() + margin).min(b.bottom()) - (a.y - margin).max(b.y);
+    width.max(0.0) * height.max(0.0)
+}
+
+/// The length of the line `a`-`b` that runs inside `rect`. Arrows run level or upright.
+fn covered_length(rect: &WorldRect, a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (level, across, start, end, along) = if a.1 == b.1 {
+        (
+            a.1,
+            (rect.y, rect.bottom()),
+            a.0,
+            b.0,
+            (rect.x, rect.right()),
+        )
+    } else {
+        (
+            a.0,
+            (rect.x, rect.right()),
+            a.1,
+            b.1,
+            (rect.y, rect.bottom()),
+        )
+    };
+    if level <= across.0 || level >= across.1 {
+        return 0.0;
+    }
+    (start.max(end).min(along.1) - start.min(end).max(along.0)).max(0.0)
 }
 
 fn pill_rect(center: (f32, f32), text: &str) -> WorldRect {
@@ -1614,17 +2128,7 @@ fn route(
             && other.bottom() > from.y.min(to.y)
     });
     if between {
-        let below = row_bottom(from, obstacles) + ARROW_END_RUN;
-        return Route {
-            points: vec![
-                (from.center_x(), from.bottom()),
-                (from.center_x(), below),
-                (to.center_x(), below),
-                (to.center_x(), to.bottom()),
-            ],
-            from: (*from, Side::Bottom),
-            to: (*to, Side::Bottom),
-        };
+        return below_row(from, to, obstacles);
     }
     // Boxes of one row share their top edge: the line runs level, through the lower one's middle.
     let y = from.y.max(to.y) + from.height.min(to.height) / 2.0;
@@ -1640,6 +2144,22 @@ fn route(
             from: (*from, Side::Left),
             to: (*to, Side::Right),
         }
+    }
+}
+
+/// From the bottom of `from` down below its row, along it and up into the bottom of `to`, a box
+/// of the same row.
+fn below_row(from: &WorldRect, to: &WorldRect, obstacles: &[WorldRect]) -> Route {
+    let below = row_bottom(from, obstacles) + ARROW_END_RUN;
+    Route {
+        points: vec![
+            (from.center_x(), from.bottom()),
+            (from.center_x(), below),
+            (to.center_x(), below),
+            (to.center_x(), to.bottom()),
+        ],
+        from: (*from, Side::Bottom),
+        to: (*to, Side::Bottom),
     }
 }
 

@@ -655,6 +655,50 @@ fn lane_rects(svg: &str) -> Vec<WorldRect> {
 
 type Segment = ((f32, f32), (f32, f32));
 
+/// The rectangle a level or upright line from `a` to `b` covers: zero high or wide.
+fn span(a: (f32, f32), b: (f32, f32)) -> WorldRect {
+    WorldRect {
+        x: a.0.min(b.0),
+        y: a.1.min(b.1),
+        width: (a.0 - b.0).abs(),
+        height: (a.1 - b.1).abs(),
+    }
+}
+
+/// Nine ungrouped boxes in rows of three and 14 arrows: side by side, past a box in the row,
+/// several into one side, up and down rows; the third is manual.
+fn dense() -> (Document, BTreeSet<Id>) {
+    arrows(9, &DENSE, 72)
+}
+
+const DENSE: [(u128, u128); 14] = [
+    (1, 2),
+    (2, 3),
+    (1, 3),
+    (3, 1),
+    (1, 5),
+    (2, 5),
+    (3, 5),
+    (4, 5),
+    (6, 5),
+    (9, 5),
+    (7, 5),
+    (5, 1),
+    (8, 2),
+    (7, 3),
+];
+
+/// `three_lanes` with more arrows across lanes, both ways, into one side.
+fn crossing_lanes() -> (Document, BTreeSet<Id>) {
+    let (mut document, mut visible) = three_lanes();
+    for (id, from, to) in [(65, 1, 6), (66, 6, 1), (67, 5, 2), (68, 2, 6), (69, 1, 4)] {
+        let (key, relationship) = link(id, from, to, "more", false);
+        document.relationships.insert(key, relationship);
+        visible.insert(key);
+    }
+    (document, visible)
+}
+
 fn segments(points: &[(f32, f32)]) -> Vec<Segment> {
     points
         .windows(2)
@@ -742,12 +786,7 @@ fn lines_stay_in_their_lane_or_the_middle_of_a_gap_and_clear_of_badges() {
         .collect();
     for (id, points) in lines(&svg) {
         for (a, b) in segments(&points) {
-            let line = WorldRect {
-                x: a.0.min(b.0),
-                y: a.1.min(b.1),
-                width: (a.0 - b.0).abs(),
-                height: (a.1 - b.1).abs(),
-            };
+            let line = span(a, b);
             for badge in &badges {
                 assert!(!overlaps(&line, badge), "{id} crosses a badge");
             }
@@ -1267,12 +1306,7 @@ fn with_the_full_text_arrows_keep_clear_of_the_taller_boxes_of_a_row() {
     assert_eq!(arrows.len(), 2);
     for (id, points) in arrows {
         for (a, b) in segments(&points) {
-            let line = WorldRect {
-                x: a.0.min(b.0),
-                y: a.1.min(b.1),
-                width: (a.0 - b.0).abs(),
-                height: (a.1 - b.1).abs(),
-            };
+            let line = span(a, b);
             assert!(!overlaps(&line, &boxes[1]), "{id} crosses the tall box 2");
         }
     }
@@ -1321,33 +1355,9 @@ fn end_run(points: &[(f32, f32)]) -> f32 {
 #[test]
 fn arrows_run_straight_into_their_heads() {
     // Side by side, past a box in the row, several arrows into one side, up and down rows.
-    let mut one_lane = arrows(
-        9,
-        &[
-            (1, 2),
-            (2, 3),
-            (1, 3),
-            (3, 1),
-            (1, 5),
-            (2, 5),
-            (3, 5),
-            (4, 5),
-            (6, 5),
-            (9, 5),
-            (7, 5),
-            (5, 1),
-            (8, 2),
-            (7, 3),
-        ],
-        0,
-    );
+    let mut one_lane = arrows(9, &DENSE, 0);
     // Across lanes, both ways, into one side.
-    let mut lanes = three_lanes();
-    for (id, from, to) in [(65, 1, 6), (66, 6, 1), (67, 5, 2), (68, 2, 6), (69, 1, 4)] {
-        let (key, relationship) = link(id, from, to, "more", false);
-        lanes.0.relationships.insert(key, relationship);
-        lanes.1.insert(key);
-    }
+    let mut lanes = crossing_lanes();
     for (document, _) in [&mut one_lane, &mut lanes] {
         for (index, relationship) in document.relationships.values_mut().enumerate() {
             if index % 3 == 0 {
@@ -1377,4 +1387,351 @@ fn arrows_run_straight_into_their_heads() {
             }
         }
     }
+}
+
+/// Asserts that no two of the layout's pills overlap, at every detail, and that the layout is
+/// the same when made again.
+fn assert_no_pills_overlap(document: &Document, visible: &BTreeSet<Id>, count: usize) {
+    for detail in Detail::ALL {
+        let layout = GraphLayout::new(document, visible, detail);
+        let svg = layout.svg(None, &BTreeSet::new());
+        let pills: Vec<(Id, WorldRect)> = lines(&svg)
+            .into_iter()
+            .map(|(id, _)| (id, layout.rect_of(id).unwrap()))
+            .collect();
+        assert_eq!(pills.len(), count, "{detail:?}");
+        for (index, (first, rect)) in pills.iter().enumerate() {
+            for (second, other) in &pills[index + 1..] {
+                assert!(
+                    !overlaps(rect, other),
+                    "{detail:?}: pill {first} {rect:?} overlaps pill {second} {other:?}"
+                );
+            }
+        }
+        assert_eq!(
+            GraphLayout::new(document, visible, detail).svg(None, &BTreeSet::new()),
+            svg,
+            "{detail:?}: the same document gets the same layout"
+        );
+    }
+}
+
+#[test]
+fn pills_of_several_arrows_between_the_same_two_boxes_do_not_overlap() {
+    // Rows of two: 1 and 4 sit diagonally apart, joined both ways.
+    let (document, visible) = arrows(4, &[(1, 4), (1, 4), (4, 1), (1, 4)], 71);
+    assert_no_pills_overlap(&document, &visible, 4);
+}
+
+#[test]
+fn pills_of_many_arrows_into_one_box_side_do_not_overlap() {
+    // Rows of three: 1, 2 and 3 into the top of 5, 7, 8 and 9 into its bottom.
+    let (document, visible) = arrows(9, &[(1, 5), (2, 5), (3, 5), (7, 5), (8, 5), (9, 5)], 0);
+    assert_no_pills_overlap(&document, &visible, 6);
+}
+
+#[test]
+fn pills_of_crossing_arrows_between_lanes_do_not_overlap() {
+    let (mut document, mut visible) = three_lanes();
+    // Staging (3, 4) and Live (5, 6): arrows cross between the lanes both ways.
+    for (id, from, to) in [
+        (65, 3, 5),
+        (66, 4, 6),
+        (67, 3, 6),
+        (68, 4, 5),
+        (69, 6, 3),
+        (70, 5, 4),
+    ] {
+        let (key, relationship) = link(id, from, to, "crosses over", false);
+        document.relationships.insert(key, relationship);
+        visible.insert(key);
+    }
+    assert_no_pills_overlap(&document, &visible, 11);
+}
+
+#[test]
+fn pills_of_a_dense_diagram_do_not_overlap() {
+    let (document, visible) = dense();
+    assert_no_pills_overlap(&document, &visible, 14);
+}
+
+#[test]
+fn a_text_box_shows_its_number_beside_the_title_and_is_one_line_shorter() {
+    // Rows of three: step 1, text 2, step 3; 4 below. Arrows join the boxes of mixed height.
+    let (mut document, mut visible) = steps(4);
+    document.elements.get_mut(&Id::from_u128(2)).unwrap().kind = ElementKind::Text;
+    for (id, from, to) in [(60, 1, 2), (61, 2, 3), (62, 2, 4), (63, 1, 3)] {
+        let (key, relationship) = link(id, from, to, "next", false);
+        document.relationships.insert(key, relationship);
+        visible.insert(key);
+    }
+    for detail in Detail::ALL {
+        let layout = GraphLayout::new(&document, &visible, detail);
+        let boxes = box_rects(&layout, 4);
+        assert_eq!(boxes[0].y, boxes[1].y, "{detail:?}: one row");
+        assert_eq!(
+            boxes[0].height - boxes[1].height,
+            19.0,
+            "{detail:?}: one head line shorter"
+        );
+        let svg = layout.svg(None, &BTreeSet::new());
+        assert!(box_texts(&svg, 2, "prism-kind").is_empty(), "{detail:?}");
+        assert_eq!(box_texts(&svg, 1, "prism-kind"), ["STEP"], "{detail:?}");
+        assert_eq!(box_texts(&svg, 2, "prism-number"), ["2"], "{detail:?}");
+        let rows = box_rows(&svg, 2);
+        assert_eq!(rows[0], rows[1], "{detail:?}: number on the title's line");
+        assert!(
+            rows.iter()
+                .all(|y| *y > boxes[1].y && *y < boxes[1].bottom()),
+            "{detail:?}: the box holds its lines: {rows:?} in {:?}",
+            boxes[1]
+        );
+        let step_rows = box_rows(&svg, 1);
+        assert_eq!(
+            step_rows[2] - boxes[0].y,
+            rows[1] - boxes[1].y + 19.0,
+            "{detail:?}: the title moves up by the head line"
+        );
+        for (id, points) in lines(&svg) {
+            let relationship = &document.relationships[&id];
+            for (a, b) in segments(&points) {
+                let line = span(a, b);
+                for (index, rect) in boxes.iter().enumerate() {
+                    let own = [relationship.from, relationship.to]
+                        .contains(&Id::from_u128(index as u128 + 1));
+                    assert!(
+                        own || !overlaps(&line, rect),
+                        "{detail:?}: {id} crosses box {}",
+                        index + 1
+                    );
+                }
+            }
+        }
+    }
+
+    // Dropped, it keeps its number and says so on the title's line.
+    document
+        .elements
+        .get_mut(&Id::from_u128(2))
+        .unwrap()
+        .archived = true;
+    document.elements.get_mut(&Id::from_u128(2)).unwrap().title = "A".repeat(60);
+    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+    assert_eq!(box_texts(&svg, 2, "prism-dropped-label"), ["DROPPED"]);
+    assert_eq!(box_texts(&svg, 2, "prism-number"), ["2"]);
+    let title = &box_texts(&svg, 2, "prism-name")[0];
+    assert!(
+        title.ends_with('…') && title.chars().count() < 20,
+        "the title leaves room for the label: {title}"
+    );
+}
+
+#[test]
+fn pills_of_two_arrows_both_ways_between_side_by_side_boxes_do_not_overlap() {
+    let (document, visible) = arrows(2, &[(1, 2), (2, 1)], 0);
+    assert_no_pills_overlap(&document, &visible, 2);
+}
+
+#[test]
+fn pills_of_several_arrows_in_one_column_do_not_overlap() {
+    // Rows of two: 1 above 3.
+    let (document, visible) = arrows(3, &[(1, 3), (3, 1), (1, 3)], 0);
+    assert_no_pills_overlap(&document, &visible, 3);
+}
+
+/// The rectangle of every box, from the layout.
+fn all_boxes(layout: &GraphLayout, svg: &str) -> Vec<(Id, WorldRect)> {
+    let (groups, _) = split(svg);
+    groups
+        .iter()
+        .filter(|group| group.kind == KIND_BOX)
+        .map(|group| (group.id, layout.rect_of(group.id).unwrap()))
+        .collect()
+}
+
+#[test]
+fn no_arrow_runs_through_a_box() {
+    let neighbors = [
+        (1, 2),
+        (2, 1),
+        (1, 3),
+        (1, 4),
+        (4, 3),
+        (3, 4),
+        (3, 5),
+        (3, 6),
+    ];
+    let documents = [
+        fixture(),
+        three_lanes(),
+        crossing_lanes(),
+        dense(),
+        arrows(6, &neighbors, 72),
+        arrows(9, &[(7, 9), (9, 7)], 0),
+        arrows(4, &[(1, 4), (1, 4), (4, 1), (1, 4)], 71),
+        arrows(2, &[(1, 2), (2, 1)], 0),
+        arrows(3, &[(1, 3), (3, 1), (1, 3)], 0),
+        side_by_side(&[(1, 2), (2, 1)], true),
+        side_by_side(&[(1, 2), (2, 1), (1, 2)], false),
+        side_by_side(&[(1, 2), (2, 1), (1, 2)], true),
+    ];
+    for (document, visible) in &documents {
+        for detail in Detail::ALL {
+            let layout = GraphLayout::new(document, visible, detail);
+            let svg = layout.svg(None, &BTreeSet::new());
+            let boxes = all_boxes(&layout, &svg);
+            for (id, points) in lines(&svg) {
+                for (a, b) in segments(&points) {
+                    let line = span(a, b);
+                    for (node, rect) in &boxes {
+                        assert!(
+                            !overlaps(&line, rect),
+                            "{detail:?}: {id} runs through box {node}: {points:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pills_keep_off_lane_borders_where_they_can() {
+    // The app's release flow: its labels, box 6 a store.
+    let (mut document, visible) = three_lanes();
+    for (id, label) in [
+        (60, "queue"),
+        (61, "upload"),
+        (62, "flag anomalies"),
+        (63, "approve release"),
+        (64, "store raw batch"),
+    ] {
+        document
+            .relationships
+            .get_mut(&Id::from_u128(id))
+            .unwrap()
+            .label = label.into();
+    }
+    document.elements.get_mut(&Id::from_u128(6)).unwrap().kind = ElementKind::Text;
+    for detail in Detail::ALL {
+        let layout = GraphLayout::new(&document, &visible, detail);
+        let svg = layout.svg(None, &BTreeSet::new());
+        let lanes = lane_rects(&svg);
+        for (id, _) in lines(&svg) {
+            let pill = layout.rect_of(id).unwrap();
+            for lane in &lanes {
+                // Not on it, nor flush against it.
+                for y in [lane.y, lane.bottom()] {
+                    assert!(
+                        !(pill.y - 4.0 < y && y < pill.bottom() + 4.0),
+                        "{detail:?}: pill {id} {pill:?} on the lane border at {y}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Side-by-side boxes 1 and 2 joined by arrows with these ends; box 2 a store if `text`.
+fn side_by_side(ends: &[(u128, u128)], text: bool) -> (Document, BTreeSet<Id>) {
+    let (mut document, visible) = arrows(2, ends, 0);
+    if text {
+        document.elements.get_mut(&Id::from_u128(2)).unwrap().kind = ElementKind::Text;
+    }
+    (document, visible)
+}
+
+#[test]
+fn pills_of_arrows_between_side_by_side_boxes_with_short_sides_do_not_overlap() {
+    // Too short a side for the lines' pills: the extra arrows run below the row.
+    for (ends, text) in [
+        (&[(1, 2), (2, 1)][..], true),
+        (&[(1, 2), (2, 1), (1, 2)][..], false),
+        (&[(1, 2), (2, 1), (1, 2)][..], true),
+    ] {
+        let (document, visible) = side_by_side(ends, text);
+        assert_no_pills_overlap(&document, &visible, ends.len());
+    }
+}
+
+#[test]
+fn a_dropped_text_box_wraps_its_whole_title_beside_the_label() {
+    let (mut document, visible) = steps(1);
+    let title = "Archive raw batches for the audit trail of every device";
+    let element = document.elements.get_mut(&Id::from_u128(1)).unwrap();
+    element.kind = ElementKind::Text;
+    element.archived = true;
+    element.title = title.into();
+    let svg = GraphLayout::new(&document, &visible, Detail::Full).svg(None, &BTreeSet::new());
+    assert_eq!(box_texts(&svg, 1, "prism-dropped-label"), ["DROPPED"]);
+    let lines = box_texts(&svg, 1, "prism-name");
+    assert_eq!(lines.join(" "), title, "every word: {lines:?}");
+}
+
+/// `boxes` boxes of every kind in `lanes` lanes, some dropped, and `links` arrows between
+/// boxes picked by a fixed pseudo-random sequence.
+fn large(boxes: u128, links: u128, lanes: u128) -> (Document, BTreeSet<Id>) {
+    let (mut document, mut visible) = steps(boxes);
+    let kinds = [ElementKind::Text, ElementKind::Step, ElementKind::Finding];
+    for (id, element) in document.elements.iter_mut() {
+        element.kind = kinds[(id.as_u128() % 3) as usize].clone();
+        element.archived = id.as_u128() % 17 == 0;
+    }
+    let per_lane = boxes / lanes;
+    for lane in 0..lanes {
+        let group = Group {
+            id: Id::from_u128(1_000_000 + lane),
+            title: format!("Lane {lane}"),
+            members: (lane * per_lane + 1..=(lane + 1) * per_lane)
+                .map(Id::from_u128)
+                .collect(),
+            order: None,
+            semantic_revision: REVISION,
+            accepted_revision: None,
+            archived: false,
+        };
+        visible.insert(group.id);
+        document.groups.insert(group.id, group);
+    }
+    let mut seed: u64 = 7;
+    let mut pick = || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as u128 % boxes + 1
+    };
+    for index in 0..links {
+        let from = pick();
+        let mut to = pick();
+        while to == from {
+            to = pick();
+        }
+        let (key, mut relationship) = link(2_000_000 + index, from, to, "label", index % 5 == 0);
+        relationship.direction = [
+            Direction::Directed,
+            Direction::Bidirectional,
+            Direction::Undirected,
+        ][(index % 3) as usize]
+            .clone();
+        document.relationships.insert(key, relationship);
+        visible.insert(key);
+    }
+    (document, visible)
+}
+
+/// A bound far above what laying out a large diagram takes in the test profile (some seconds),
+/// far below what a search through everything for each pill takes (minutes).
+const LARGE_LAYOUT_SECONDS: u64 = 60;
+
+#[test]
+fn a_large_diagram_lays_out_in_time() {
+    let (document, visible) = large(500, 1000, 20);
+    let start = std::time::Instant::now();
+    let layout = GraphLayout::new(&document, &visible, Detail::Names);
+    let elapsed = start.elapsed();
+    assert!(layout.edge_count() > 900);
+    assert!(
+        elapsed < std::time::Duration::from_secs(LARGE_LAYOUT_SECONDS),
+        "500 boxes and 1000 arrows took {elapsed:?}"
+    );
 }
