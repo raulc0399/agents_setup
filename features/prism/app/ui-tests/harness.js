@@ -1555,7 +1555,7 @@ async function viewChecks(backend, app) {
   expect([1, 2, 3, 4, 5].every((number) => colorClass('pill', link(number)) === classes[number - 1]), 'pills carry their arrow color');
   expect(stroke(link(4)) !== stroke(link(5)), `arrows between the same lanes differ: ${stroke(link(4))}, ${stroke(link(5))}`);
   expect([4, 5].every((number) => pillFill(link(number)) === stroke(link(number))), 'each pill takes its line color');
-  const head = getComputedStyle(svg().querySelector('#prism-head-c2 path')).fill;
+  const head = getComputedStyle(svg().querySelector('.prism-head-c2 path')).fill;
   expect(head === stroke(link(5)), `the arrowhead too: ${head}`);
   expect(svg().querySelector(`[data-kind="arrow"][data-id="${link(4)}"]`).classList.contains('prism-manual') && svg().querySelector(`[data-id="${link(4)}"] [stroke-dasharray]`), 'the manual arrow stays dashed');
 
@@ -2281,6 +2281,45 @@ async function splitChecks(backend, app) {
   key('+');
   await settled();
   expect(diagramView(KEYS.LIVE).camera !== null && JSON.stringify(diagramView(RIGHT).camera) === rightCamera, 'the left diagram zooms, the right stays');
+  // Each diagram has its own arrowheads: the left one at 250% leaves the right one's at their
+  // size, a focused arrow takes the focus head of its own diagram, the export keeps the IDs.
+  const svgIn = (side) => slot(side).querySelector('.diagram-svg');
+  const scaleIn = (side) => slot(side).querySelector('.diagram-canvas').clientWidth / Number(svgIn(side).getAttribute('viewBox').split(' ')[2]);
+  // What the browser draws: the first marker in the document with the referenced ID.
+  const resolved = (reference) => document.getElementById(reference?.match(/url\("?#([^")]+)"?\)/)?.[1] ?? '');
+  const ownHeads = (side) => {
+    const markers = [...svgIn(side).querySelectorAll('.prism-line[marker-end]')].map((line) => resolved(line.getAttribute('marker-end')));
+    const onScreen = HEAD_SIZE * Math.min(1, scaleIn(side));
+    return markers.length > 0 && markers.every((marker) => svgIn(side).contains(marker) && Math.abs(Number(marker?.getAttribute('markerWidth')) * scaleIn(side) - onScreen) < 0.01);
+  };
+  const leftCanvas = slot('left').querySelector('.diagram-canvas').getBoundingClientRect();
+  diagramView(KEYS.LIVE).zoomAt(2.5, leftCanvas.left + leftCanvas.width / 2, leftCanvas.top + leftCanvas.height / 2);
+  await settled();
+  expect(Math.abs(scaleIn('left') - 2.5) < 1e-6 && ownHeads('left') && ownHeads('right'), `the left at 250%, each diagram's arrowheads at their size: ${ownHeads('left')}, ${ownHeads('right')}`);
+  const clickPill = (side, id) => {
+    const pill = svgIn(side).querySelector(`[data-kind="pill"][data-id="${id}"]`);
+    pill.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    pill.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }));
+    pill.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  };
+  const focusHead = (side) => {
+    const marker = resolved(getComputedStyle(svgIn(side).querySelector('[data-kind="arrow"].focused .prism-line')).markerEnd);
+    return Boolean(marker && svgIn(side).contains(marker) && marker.classList.contains('prism-head-focus'));
+  };
+  clickPill('right', RELEASE_IDS.link(1));
+  await settle();
+  key('s');
+  await settle();
+  const file = new DOMParser().parseFromString(backend.exports.at(-1)?.svg ?? '', 'image/svg+xml').documentElement;
+  const fileIds = [...file.querySelectorAll('marker')].map((marker) => marker.id);
+  const fileReferences = [...file.querySelectorAll('[marker-end], [marker-start]')].flatMap((line) => [line.getAttribute('marker-start'), line.getAttribute('marker-end')]).filter(Boolean);
+  expect(
+    fileIds.length > 0 && fileIds.every((id) => id.startsWith('prism-head-')) && fileReferences.length > 0 && fileReferences.every((reference) => fileIds.includes(reference.slice('url(#'.length, -1))),
+    `the export has the original arrowhead IDs: ${fileIds} | ${[...new Set(fileReferences)]}`,
+  );
+  clickPill('left', 'b0000000-0000-4000-8000-000000000001');
+  await settle();
+  expect(activeSide() === 'left' && focusHead('left') && focusHead('right'), `a focused arrow takes its own diagram's focus head: ${focusHead('left')}, ${focusHead('right')}`);
   key('v');
   await waitFor(() => slot('left').querySelector('.cards'));
 

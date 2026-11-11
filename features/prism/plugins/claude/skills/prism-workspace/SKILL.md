@@ -47,8 +47,8 @@ automatically extract conversation content or open another agent conversation.
 - Retrieve other shared questions only when the user explicitly asks, using
   `mcp__prism__questions`; answer in this exact conversation, then revise the
   referenced content if asked.
-- Relationships accept `manual: true` for manual or review steps; diagrams
-  draw them dashed. Groups become lanes in diagrams, so group by where things
+- Relationships accept `manual: true` for any arrow that should be dashed:
+  manual, review, asynchronous or optional flows. Groups become lanes in diagrams, so group by where things
   run (for example Container, Host app) when drawing architecture or data
   flow, with at most 3 lanes. Lanes are laid out as rows or columns, chosen
   automatically at the first publish with two lanes and kept; omitting `lanes`

@@ -73,6 +73,14 @@ const EXPORT_PROPERTIES = [
 const XML_PROLOG = '<?xml version="1.0" encoding="UTF-8"?>\n';
 /** Classes the view adds to shapes, left out of an export. */
 const VIEW_CLASSES = ['focused', 'selected'];
+/** Attributes that reference an arrowhead marker, as `url(#id)`. */
+const HEAD_REFERENCES = ['marker-start', 'marker-end'];
+const HEAD_REFERENCE = /^url\(#(.+)\)$/;
+/** The focused arrowhead (prism-core's `HEAD_FOCUS`), and the property styles.css draws it from. */
+const FOCUS_HEAD = 'marker.prism-head-focus';
+const FOCUS_HEAD_PROPERTY = '--head-focus';
+/** Diagram views made so far: each prefixes its marker IDs with its number. */
+let viewCount = 0;
 
 /** What a tab lists, as layouts, sizes and steps are kept for: another revision or other items shown is another key. */
 export function layoutKey(document, visible) {
@@ -106,6 +114,9 @@ export class DiagramView {
     this.boxes = new Map();
     this.labels = [];
     this.heads = [];
+    // Marker IDs are unique in the page, so two diagrams shown side by side keep their own.
+    viewCount += 1;
+    this.headPrefix = `prism-view${viewCount}-`;
     // What is laid out, and the layouts of it per level, arrived or asked for.
     this.layoutKey = null;
     this.source = null;
@@ -277,6 +288,7 @@ export class DiagramView {
     if (response?.layout) {
       const svg = parseSvg(response.layout.svg);
       if (svg) {
+        renameHeads(svg, (id) => this.headPrefix + id);
         // Arrowhead sizes are read before any zoom changed them.
         const heads = [...svg.querySelectorAll('marker')].map((marker) => ({ marker, size: Number(marker.getAttribute('markerWidth')) }));
         this.layouts.set(detail, { diagram: response.layout, svg, boxes: boxOutlines(svg), labels: labelLimits(svg), heads, bounds: response.sizes[detail] });
@@ -325,6 +337,7 @@ export class DiagramView {
     this.zoomShown = { scale: null, band: null, labels: null, heads: null };
     // Set before the SVG is shown, so its texts do not fade in.
     this.showZoom(anchor ? anchor.scale : this.current().scale);
+    this.canvas.style.setProperty(FOCUS_HEAD_PROPERTY, `url(#${this.svg.querySelector(FOCUS_HEAD).id})`);
     this.canvas.prepend(this.svg);
     this.showMessage(this.diagram.order.length === 0 ? 'Nothing to draw: the items shown here have no boxes.' : null);
     this.shownFocus = null;
@@ -937,6 +950,7 @@ export class DiagramView {
     const stage = h('div', { hidden: true }, staged);
     this.element.append(stage);
     const copy = staged.cloneNode(true);
+    renameHeads(copy, (id) => id.slice(this.headPrefix.length));
     copy.querySelectorAll(LABEL_SHAPES).forEach((node) => node.removeAttribute('transform'));
     copy.querySelectorAll('marker').forEach((marker, index) => {
       marker.setAttribute('markerWidth', String(this.heads[index].size));
@@ -1061,6 +1075,19 @@ function parseSvg(text) {
   svg.removeAttribute('height');
   svg.setAttribute('class', 'diagram-svg');
   return svg;
+}
+
+/** Renames the arrowhead markers of a diagram SVG, and every reference to them. */
+function renameHeads(svg, rename) {
+  for (const marker of svg.querySelectorAll('marker')) {
+    marker.id = rename(marker.id);
+  }
+  for (const attribute of HEAD_REFERENCES) {
+    for (const node of svg.querySelectorAll(`[${attribute}]`)) {
+      const id = node.getAttribute(attribute).match(HEAD_REFERENCE)[1];
+      node.setAttribute(attribute, `url(#${rename(id)})`);
+    }
+  }
 }
 
 /** Where prism-core put each box, by item ID: the outline of its shape. */

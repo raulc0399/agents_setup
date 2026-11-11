@@ -991,7 +991,7 @@ fn neighboring_arrows_differ_in_color() {
     assert!(arrow.inner.contains(r#"stroke-dasharray="6 5""#));
     assert!(arrow.inner.contains(r#"marker-end="url(#prism-head-c2)""#));
     assert!(svg.contains(&format!(
-        r#"<marker id="prism-head-c2" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
+        r#"<marker id="prism-head-c2" class="prism-head-c2" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
     )));
     assert!(pill.inner.contains(&format!(r#"fill="{color}""#)));
 }

@@ -135,7 +135,9 @@ const DROPPED_LABEL: &str = "dropped";
 /// Width the dropped label takes at the right end of a title line, with room before it: a
 /// box without head line keeps it free on all its title lines.
 const DROPPED_LABEL_ROOM: f32 = 64.0;
-/// Arrowhead markers: one per arrow color (see `COLOR_MARK`), and the focused one.
+/// Arrowhead markers: one per arrow color (see `COLOR_MARK`), and the focused one. Each name
+/// is the marker's id and its class: a viewer showing several diagrams in one page renames the
+/// ids and themes the markers by class.
 const HEAD: &str = "prism-head";
 const HEAD_FOCUS: &str = "prism-head-focus";
 /// Width and height of an arrowhead in world units, whatever the line's stroke width
@@ -1060,7 +1062,7 @@ impl GraphLayout {
         for (id, color) in heads {
             let _ = write!(
                 svg,
-                r#"<marker id="{id}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="{ARROW_HEAD_SIZE}" markerHeight="{ARROW_HEAD_SIZE}" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>"#
+                r#"<marker id="{id}" class="{id}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="{ARROW_HEAD_SIZE}" markerHeight="{ARROW_HEAD_SIZE}" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>"#
             );
         }
         svg.push_str("</defs>");

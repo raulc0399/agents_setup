@@ -27,7 +27,7 @@ pub fn tools() -> Value {
         &["id", "title", "body", "kind", "source"],
     );
     let relation = object(
-        json!({"id":id_schema(),"from":id_schema(),"to":id_schema(),"label":{"type":"string","maxLength":512},"direction":{"enum":["directed","undirected","bidirectional"]},"manual":{"type":"boolean","description":"A manual or review step; diagrams draw it dashed."}}),
+        json!({"id":id_schema(),"from":id_schema(),"to":id_schema(),"label":{"type":"string","maxLength":512},"direction":{"enum":["directed","undirected","bidirectional"]},"manual":{"type":"boolean","description":"Diagrams draw the arrow dashed: use it for manual, review, asynchronous or optional flows."}}),
         &["id", "from", "to", "label", "direction"],
     );
     let group = object(

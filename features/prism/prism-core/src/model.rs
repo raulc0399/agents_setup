@@ -87,7 +87,7 @@ pub struct Relationship {
     pub to: Id,
     pub label: String,
     pub direction: Direction,
-    /// A manual or review step; diagrams draw it dashed.
+    /// Diagrams draw the arrow dashed: use it for manual, review, asynchronous or optional flows.
     #[serde(default)]
     pub manual: bool,
     /// Position in the publication sequence, as `Element::order`; `None` when stored before

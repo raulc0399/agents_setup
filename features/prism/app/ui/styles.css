@@ -1444,31 +1444,31 @@ button {
   fill: var(--arrow-5);
 }
 
-.diagram-svg #prism-head-c0 path {
+.diagram-svg .prism-head-c0 path {
   fill: var(--arrow-0);
 }
 
-.diagram-svg #prism-head-c1 path {
+.diagram-svg .prism-head-c1 path {
   fill: var(--arrow-1);
 }
 
-.diagram-svg #prism-head-c2 path {
+.diagram-svg .prism-head-c2 path {
   fill: var(--arrow-2);
 }
 
-.diagram-svg #prism-head-c3 path {
+.diagram-svg .prism-head-c3 path {
   fill: var(--arrow-3);
 }
 
-.diagram-svg #prism-head-c4 path {
+.diagram-svg .prism-head-c4 path {
   fill: var(--arrow-4);
 }
 
-.diagram-svg #prism-head-c5 path {
+.diagram-svg .prism-head-c5 path {
   fill: var(--arrow-5);
 }
 
-.diagram-svg #prism-head-focus path {
+.diagram-svg .prism-head-focus path {
   fill: var(--focus);
 }
 
@@ -1550,12 +1550,13 @@ button {
   stroke-opacity: 0.22;
 }
 
+/* Marker IDs are per diagram view: diagram.js sets --head-focus to its focus arrowhead. */
 .diagram-svg .prism-arrow.focused .prism-line[marker-end] {
-  marker-end: url(#prism-head-focus);
+  marker-end: var(--head-focus);
 }
 
 .diagram-svg .prism-arrow.focused .prism-line[marker-start] {
-  marker-start: url(#prism-head-focus);
+  marker-start: var(--head-focus);
 }
 
 .diagram-svg .prism-pill.focused .prism-shape {

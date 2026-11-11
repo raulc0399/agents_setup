@@ -29,8 +29,8 @@ automatically extract conversation content or open another agent conversation.
 - Use kind `text` for actors and stores (their box shows only the title),
   `step` for things that happen, and `finding` and `question` for problems and
   open points; these show as badges on the box they point at.
-- Relationships accept `manual: true` for manual or review steps; diagrams
-  draw them dashed. Groups become lanes in diagrams, so group by where things
+- Relationships accept `manual: true` for any arrow that should be dashed:
+  manual, review, asynchronous or optional flows. Groups become lanes in diagrams, so group by where things
   run (for example Container, Host app), with at most 3 lanes. Lanes are laid
   out as rows or columns, chosen automatically at the first publish with two
   lanes and kept; omitting `lanes` keeps it, `auto` chooses again, and set

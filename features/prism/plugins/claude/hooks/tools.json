@@ -104,7 +104,7 @@
               },
               "manual": {
                 "type": "boolean",
-                "description": "A manual or review step; diagrams draw it dashed."
+                "description": "Diagrams draw the arrow dashed: use it for manual, review, asynchronous or optional flows."
               }
             },
             "required": [
