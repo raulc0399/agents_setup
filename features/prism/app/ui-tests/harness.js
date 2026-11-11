@@ -4,7 +4,8 @@
 // the diagram, the view per document with its side pane, and the item actions,
 // `?scenario=status-checks` those of the connection status, `?scenario=document-checks`
 // closing and reopening documents, `?scenario=restart-checks` tabs restored after a restart,
-// `?scenario=pane-checks` resizing the side pane; each writes PASS or the failures into #result.
+// `?scenario=pane-checks` resizing the side pane, `?scenario=split-checks` two documents side by
+// side; each writes PASS or the failures into #result.
 import { start } from '../ui/js/app.js';
 import { DROPPED_NOTE } from '../ui/js/list.js';
 import { questionBlock } from '../ui/js/panel.js';
@@ -17,7 +18,7 @@ const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 const FRAME_MS = 16;
 window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), FRAME_MS);
 window.cancelAnimationFrame = (frame) => clearTimeout(frame);
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks, 'pane-checks': paneChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks, 'pane-checks': paneChecks, 'split-checks': splitChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 /** Sizes prism-core's graph.rs draws at: a pill's height and an arrowhead's (`PILL_HEIGHT`, `ARROW_HEAD_SIZE`). */
 const PILL_HEIGHT = 18;
@@ -159,6 +160,8 @@ async function replay(backend) {
     document.querySelector('.closed-documents').click();
   } else if (scenario.startsWith('diagram')) {
     await waitFor(() => document.querySelector('.diagram-svg [data-id]'));
+  } else if (scenario.startsWith('split-')) {
+    await waitFor(() => backend.pending === 0 && document.querySelectorAll('.pane-slot .diagram-svg [data-id], .pane-slot .cards').length >= 2);
   }
   await settle();
 }
@@ -2143,6 +2146,285 @@ async function paneChecks(backend, app) {
   await settle();
   const list = document.querySelector('.view').getBoundingClientRect();
   expect(paneWidth() === 420 && close(list.right, document.querySelector('.side-pane').getBoundingClientRect().left), `the list reflows: ${list.right}`);
+
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/**
+ * Two documents side by side: split and unsplit, the active pane by click and key, keys and
+ * the side pane following it, the divider, content updates, closed documents, a window too
+ * small for two, and the split restored when the tab opens again.
+ */
+async function splitChecks(backend, app) {
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const root = document.getElementById('app');
+  const RIGHT = `${KEYS.LIVE}|right`;
+  const content = (scope = root) => scope.querySelector('.content');
+  const slots = (scope = root) => [...scope.querySelectorAll('.content > .pane-slot')];
+  const slot = (side, scope = root) => slots(scope)[side === 'left' ? 0 : 1];
+  const split = () => content().classList.contains('split') && slots().length === 2;
+  const heading = (side, scope = root) => slot(side, scope)?.querySelector('.pane-title')?.textContent;
+  const activeSide = () => (slot('left').classList.contains('active') ? 'left' : slot('right')?.classList.contains('active') ? 'right' : null);
+  const width = (side) => slot(side).getBoundingClientRect().width;
+  const shown = (node) => node && getComputedStyle(node).display !== 'none';
+  const view = () => app.view(KEYS.LIVE);
+  const info = () => document.querySelector('.side-pane .info').textContent;
+  const hints = () => document.querySelector('.statusbar .keys').textContent;
+  const strip = () =>
+    Object.fromEntries(
+      [...document.querySelectorAll('.documents .document')].map((node) => [node.querySelector('[role="tab"]').lastChild.textContent, node.querySelector('.side-mark')?.textContent ?? '']),
+    );
+  const selectedDocument = () => document.querySelector('.documents [aria-selected="true"]')?.lastChild.textContent;
+  const documentNode = (title) => [...document.querySelectorAll('.documents .document')].find((node) => node.querySelector('[role="tab"]').lastChild.textContent === title);
+  const menu = (title) => {
+    documentNode(title).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 300, clientY: 120 }));
+    return [...document.querySelectorAll('.menu button')].map((item) => item.textContent);
+  };
+  const pick = (label) => [...document.querySelectorAll('.menu button')].find((item) => item.textContent === label).click();
+  const diagramIn = (side) => slot(side)?.querySelector('.diagram-svg [data-id]');
+  const diagramView = (pane) => app.diagramViews.get(pane);
+  const settled = () => waitFor(() => backend.pending === 0 && [...app.diagramViews.values()].every((diagram) => !diagram.animating()));
+  const saved = () => new Promise((resolve) => setTimeout(() => resolve(backend.views[KEYS.LIVE]), 400));
+  const original = structuredClone(CONTENTS_FOR_TESTS[KEYS.LIVE]);
+  const publish = (change) => {
+    const next = structuredClone(original);
+    change(next);
+    backend.update(KEYS.LIVE, next);
+  };
+  const documentOf = (next, id) => next.documents.find((candidate) => candidate.id === id);
+  await settle();
+
+  // One pane at first, without headings or marks; \ is offered.
+  expect(!split() && slots().length === 1 && !shown(slot('left').querySelector('.pane-heading')), 'one pane at first');
+  expect(Object.values(strip()).every((mark) => mark === ''), `no side marks: ${JSON.stringify(strip())}`);
+  expect(hints().includes('split') && !hints().includes('other pane'), `the status bar offers the split: ${hints()}`);
+
+  // \ opens the next document on the right, as the active pane; \ again closes it.
+  key('\\');
+  await settle();
+  expect(split() && heading('left') === 'App plan' && heading('right') === 'Notes', `\\ splits with the next document: ${heading('left')} | ${heading('right')}`);
+  expect(activeSide() === 'right' && selectedDocument() === 'Notes', `the new pane is active: ${activeSide()}, ${selectedDocument()}`);
+  expect(strip()['App plan'] === 'L' && strip().Notes === 'R' && strip()['Release flow'] === '', `the strip marks left and right: ${JSON.stringify(strip())}`);
+  expect(slot('right').querySelector('.empty h2')?.textContent === 'This document has no items' && info() === '0 items · revision 1', `the empty document in its pane: ${info()}`);
+  expect(hints().includes('unsplit') && hints().includes('other pane'), `the status bar offers the pane keys: ${hints()}`);
+  key('\\');
+  await settle();
+  expect(!split() && !shown(slot('left').querySelector('.pane-heading')) && slot('left').querySelector('.card') && view().split === null && view().document === KEYS.PLAN, 'unsplit: the left document alone');
+
+  // The document menu opens one on the right.
+  expect(JSON.stringify(menu('Release flow')) === JSON.stringify(['Open on the right', 'Close for everyone']), `the menu of a document not shown: ${menu('Release flow')}`);
+  pick('Open on the right');
+  expect(await waitFor(() => diagramIn('right')), 'the release flow opens on the right, as its diagram');
+  expect(split() && activeSide() === 'right' && heading('right') === 'Release flow', 'beside the app plan, active');
+  const releaseItems = info();
+  expect(releaseItems.endsWith('revision 2'), `the side pane follows the active pane: ${releaseItems}`);
+  expect(document.querySelector('.side-pane .segmented [aria-pressed="true"]')?.textContent === 'Diagram' && document.querySelector('.side-pane .panel-tag')?.textContent === 'Diagram', 'its view switch and overview');
+  expect(JSON.stringify(menu('App plan')) === JSON.stringify(['Show only this document', 'Close for everyone']), `the menu of a shown document: ${menu('App plan')}`);
+  expect(JSON.stringify(menu('Notes')) === JSON.stringify(['Show on the left', 'Show on the right', 'Close for everyone']), `the menu of another one: ${menu('Notes')}`);
+  key('Escape');
+
+  // Keys act on the active pane only.
+  const leftFocus = view().focus;
+  key('j');
+  await settle();
+  expect(view().split.focus && view().focus === leftFocus, `J moves in the right pane: ${view().split.focus}, left ${view().focus}`);
+  key('+');
+  await settled();
+  expect(diagramView(RIGHT).camera !== null, 'zoom keys zoom the right diagram');
+  key('1');
+  await settled();
+  expect(view().cameras[KEYS.RELEASE]?.detail === 'names' && slot('right').querySelector('.diagram-controls [aria-pressed="true"]').textContent === 'Titles', 'detail keys change its level');
+  key('/');
+  const filter = document.querySelector('.side-pane .filter');
+  filter.value = 'review';
+  filter.dispatchEvent(new Event('input'));
+  await settle();
+  expect(view().split.filter === 'review' && view().filter === '' && info() !== releaseItems, `the filter is the active pane's: ${view().split.filter}, ${info()}`);
+  const leftCards = slot('left').querySelectorAll('.card').length;
+  expect(leftCards === 8, `the left list is not filtered: ${leftCards}`);
+  filter.value = '';
+  filter.dispatchEvent(new Event('input'));
+  filter.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle();
+  expect(slot('right').contains(document.activeElement), 'leaving the filter goes back to the right pane');
+  key('x');
+  await settle();
+  const dropped = backend.sent.at(-1)?.command;
+  expect(dropped?.document_id === KEYS.RELEASE && dropped.action.ids[0] === view().split.focus, `X drops in the right pane: ${JSON.stringify(dropped)}`);
+  key('v');
+  await settle();
+  expect(view().modes[KEYS.RELEASE] === 'list' && view().modes[KEYS.PLAN] === 'list' && slot('right').querySelector('.cards'), 'V switches the right document only');
+  key('v');
+  await waitFor(() => diagramIn('right'));
+
+  // A press in the other pane makes it active; the side pane follows.
+  const card = slot('left').querySelectorAll('.card')[2];
+  card.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+  card.click();
+  await settle();
+  expect(activeSide() === 'left' && view().focus === card.dataset.id && info().endsWith('revision 3'), `a click activates the left pane: ${activeSide()}, ${info()}`);
+  expect(selectedDocument() === 'App plan' && document.querySelector('.side-pane .panel-title')?.textContent === card.querySelector('.title').textContent, 'the strip and the detail panel follow');
+  const rightFocus = view().split.focus;
+  key('j');
+  await settle();
+  expect(view().focus !== card.dataset.id && view().split.focus === rightFocus, 'J now moves in the left pane');
+  // Both diagrams: a zoom key zooms the active one only.
+  key('v');
+  expect(await waitFor(() => diagramIn('left')), 'the app plan as its diagram on the left');
+  await settled();
+  const rightCamera = JSON.stringify(diagramView(RIGHT).camera);
+  key('+');
+  await settled();
+  expect(diagramView(KEYS.LIVE).camera !== null && JSON.stringify(diagramView(RIGHT).camera) === rightCamera, 'the left diagram zooms, the right stays');
+  key('v');
+  await waitFor(() => slot('left').querySelector('.cards'));
+
+  // Ctrl+` switches the active pane and moves the keyboard there.
+  key('`', { ctrlKey: true, code: 'Backquote' });
+  await settle();
+  expect(activeSide() === 'right' && slot('right').contains(document.activeElement), `Ctrl+\` activates the right pane: ${activeSide()}`);
+  key('`', { ctrlKey: true, code: 'Backquote' });
+  await settle();
+  expect(activeSide() === 'left' && slot('left').contains(document.activeElement), 'and back to the left');
+
+  // A document is never shown twice: picking the other pane's activates that pane.
+  documentNode('Release flow').querySelector('[role="tab"]').click();
+  await settle();
+  expect(activeSide() === 'right' && heading('left') === 'App plan' && heading('right') === 'Release flow', 'picking the right document activates its pane');
+  key(']');
+  await settle();
+  expect(heading('right') === 'Review findings' && heading('left') === 'App plan', `] skips the left document: ${heading('right')}`);
+  key('[');
+  await waitFor(() => diagramIn('right'));
+  expect(heading('right') === 'Release flow', `[ goes back: ${heading('right')}`);
+
+  // The divider: drag, keys, limits, reset; saved as the tab's ratio.
+  const divider = document.querySelector('.split-divider');
+  const pointer = (type, clientX) => divider.dispatchEvent(new PointerEvent(type, { pointerId: 7, button: 0, bubbles: true, clientX, clientY: 300 }));
+  const press = (name) => divider.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+  const near = (a, b) => Math.abs(a - b) <= 1;
+  const half = width('left');
+  expect(near(half, width('right')) && divider.getAttribute('role') === 'separator' && divider.tabIndex === 0, `equal halves and a focusable separator: ${half}, ${width('right')}`);
+  const origin = divider.getBoundingClientRect().left;
+  pointer('pointerdown', origin);
+  pointer('pointermove', origin - 30);
+  pointer('pointermove', origin - 60);
+  const dragging = divider.classList.contains('dragging');
+  pointer('pointerup', origin - 60);
+  await settle();
+  expect(dragging && near(width('left'), half - 60), `a drag moves the divider: ${width('left')}`);
+  expect((await saved())?.ratio === view().ratio && view().ratio < 0.5, `the ratio is saved: ${backend.views[KEYS.LIVE]?.ratio}`);
+  divider.focus();
+  const before = width('left');
+  press('ArrowRight');
+  await settle();
+  expect(near(width('left'), before + 16) && activeSide() === 'right' && document.activeElement === divider, `Right moves it by 16: ${width('left')}`);
+  press('Home');
+  await settle();
+  expect(near(width('left'), 400) && Number(divider.getAttribute('aria-valuenow')) === Number(divider.getAttribute('aria-valuemin')), `Home: the left pane at its least: ${width('left')}`);
+  press('End');
+  await settle();
+  expect(near(width('right'), 400), `End: the right pane at its least: ${width('right')}`);
+  pointer('pointerdown', divider.getBoundingClientRect().left);
+  pointer('pointermove', 0);
+  pointer('pointerup', 0);
+  await settle();
+  expect(near(width('left'), 400), `a drag stays within the limits: ${width('left')}`);
+  divider.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  await settle();
+  expect(near(width('left'), half) && view().ratio === null, `a double-click shares the width equally: ${width('left')}`);
+  // The side pane leaves both panes their least width.
+  const separatorMax = Number(document.querySelector('.pane-separator').getAttribute('aria-valuemax'));
+  expect(separatorMax === document.querySelector('.body').clientWidth - 801, `the side pane is limited for two panes: ${separatorMax}`);
+
+  // A new revision updates both panes in place.
+  const layout = [width('left'), width('right'), document.querySelector('.tab-header').offsetHeight];
+  publish((next) => {
+    documentOf(next, KEYS.PLAN).revision = 4;
+    documentOf(next, KEYS.PLAN).elements[KEYS.TABS_ITEM].title = 'Windows, tabs and panes';
+    documentOf(next, KEYS.RELEASE).revision = 3;
+    documentOf(next, KEYS.RELEASE).elements[RELEASE_IDS.item(1)].title = 'Ingest readings';
+  });
+  const updated = () =>
+    [...slot('left').querySelectorAll('.card .title')].some((title) => title.textContent === 'Windows, tabs and panes') &&
+    [...slot('right').querySelectorAll('.diagram-svg text')].some((text) => text.textContent.includes('Ingest readings'));
+  expect(await waitFor(updated), `both panes show the new revision: ${[...slot('left').querySelectorAll('.card .title')].map((title) => title.textContent)} | ${slot('right').querySelector('.diagram-svg')?.textContent.slice(0, 120)}`);
+  await settled();
+  expect(JSON.stringify([width('left'), width('right'), document.querySelector('.tab-header').offsetHeight]) === JSON.stringify(layout) && info().endsWith('revision 3'), `without a layout shift: ${layout} -> ${[width('left'), width('right')]}`);
+
+  // A window too small for two shows only the active pane; Ctrl+` shows the other.
+  root.style.width = '900px';
+  app.showPaneWidth();
+  app.showSplit();
+  await settle();
+  expect(content().classList.contains('compact') && shown(slot('right')) && !shown(slot('left')) && !shown(divider), 'only the active pane in a small window');
+  expect(near(width('right'), content().clientWidth), `it takes the whole width: ${width('right')}`);
+  key('`', { ctrlKey: true, code: 'Backquote' });
+  await settle();
+  expect(shown(slot('left')) && !shown(slot('right')) && activeSide() === 'left', 'Ctrl+` shows the other');
+  key('`', { ctrlKey: true, code: 'Backquote' });
+  root.style.width = '';
+  app.showPaneWidth();
+  app.showSplit();
+  await settle();
+  expect(!content().classList.contains('compact') && shown(slot('left')) && shown(slot('right')), 'a wide window shows both again');
+
+  // Closing the right document unsplits; closing the left one leaves the right one alone.
+  key('w');
+  await settle();
+  const closing = backend.sent.at(-1);
+  expect(closing.command.document_id === KEYS.RELEASE && closing.command.action.action === 'close', `W closes the active pane's document: ${JSON.stringify(closing.command)}`);
+  publish((next) => {
+    next.closed = [KEYS.RELEASE];
+  });
+  backend.reply(closing.key, closing.id);
+  await settle();
+  expect(!split() && view().split === null && view().document === KEYS.PLAN && slot('left').querySelector('.card'), 'the right document closed: the app plan alone');
+  publish(() => {});
+  await settle();
+  menu('Release flow');
+  pick('Open on the right');
+  await waitFor(() => diagramIn('right'));
+  publish((next) => {
+    next.closed = [KEYS.PLAN];
+  });
+  await settle();
+  expect(!split() && view().document === KEYS.RELEASE && view().split === null && (await waitFor(() => diagramIn('left'))), 'the left document closed: the release flow alone');
+  publish(() => {});
+  await settle();
+
+  // The × of a pane heading closes that pane only.
+  menu('App plan');
+  pick('Open on the right');
+  await waitFor(() => split());
+  slot('left').querySelector('.pane-heading .close').click();
+  await settle();
+  expect(!split() && view().document === KEYS.PLAN, `the left pane's × leaves the right document: ${view().document}`);
+
+  // The split is view state: the tab opens again with both documents, the ratio and the active pane.
+  menu('Release flow');
+  pick('Open on the right');
+  await waitFor(() => diagramIn('right'));
+  press('Home');
+  const kept = structuredClone(await saved());
+  expect(kept?.split?.document === KEYS.RELEASE && kept.activePane === 'right' && kept.ratio > 0, `the split is saved: ${JSON.stringify(kept?.split)}`);
+  const restored = fixture('split-checks');
+  restored.state.arrangement.views = { [KEYS.LIVE]: kept };
+  const again = document.createElement('div');
+  again.className = 'app';
+  root.hidden = true;
+  document.body.append(again);
+  start(fakeBackend(restored), again);
+  expect(await waitFor(() => slot('right', again)?.querySelector('.diagram-svg [data-id]')), 'the reopened tab shows the diagram on the right');
+  const reopened = slot('left', again).getBoundingClientRect().width;
+  expect(heading('left', again) === 'App plan' && heading('right', again) === 'Release flow' && slot('right', again).classList.contains('active') && near(reopened, 400), `with its documents, active pane and ratio: ${reopened}`);
+  again.remove();
+  root.hidden = false;
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }

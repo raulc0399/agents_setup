@@ -438,6 +438,16 @@ function droppedContents([documentId, elements, relationships]) {
   });
   return { ...CONTENTS, [LIVE]: live };
 }
+/** A right pane of the live tab showing `document`, with its own focus. */
+const rightPane = (document, focus = null) => ({ document, focus, selected: [], filter: '' });
+/** View state of the live tab per split scenario: one document at first, or two side by side. */
+const SPLIT_VIEWS = {
+  'split-checks': { document: PLAN, modes: LIST_MODES },
+  'split-list-diagram': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004', modes: LIST_MODES, split: rightPane(RELEASE, releaseItem(4)), activePane: 'right' },
+  'split-diagrams': { document: PLAN, modes: {}, split: rightPane(RELEASE), activePane: 'left' },
+  'split-lists': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000002', modes: LIST_MODES, split: rightPane(REVIEW, 'a1000000-0000-4000-8000-000000000001'), activePane: 'left', ratio: 0.42 },
+};
+
 /** Scenarios whose live tab has two documents closed: the strip with its Closed (N) control. */
 const CLOSED_SCENARIOS = ['documents', 'closed-menu'];
 /** Scenarios whose live tab has no saved view state: each document opens as its content says. */
@@ -498,6 +508,9 @@ export function fixture(scenario) {
   const views = FRESH_VIEWS.includes(scenario) ? {} : { [LIVE]: { modes: LIST_MODES, ...LIST_VIEWS[scenario] } };
   if (DIAGRAM_VIEWS[scenario]) {
     views[LIVE] = { document: RELEASE, hidden: [], ...DIAGRAM_VIEWS[scenario] };
+  }
+  if (SPLIT_VIEWS[scenario]) {
+    views[LIVE] = { hidden: [], ...SPLIT_VIEWS[scenario] };
   }
   let contents = DROPPED_SCENARIOS[scenario] ? droppedContents(DROPPED_SCENARIOS[scenario]) : CONTENTS;
   if (LONG_TEXT_SCENARIOS.includes(scenario)) {

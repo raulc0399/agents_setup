@@ -488,6 +488,30 @@ button {
   color: var(--pill-text);
 }
 
+/* While split, the documents shown left and right carry L and R; the one beside the active pane's is outlined. */
+.documents .side-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.documents .document.selected .side-mark {
+  background: var(--pill-text);
+  color: var(--accent);
+}
+
+.documents .document.shown:not(.selected) [role="tab"] {
+  border-color: var(--accent);
+}
+
 .toolbar .closed-documents {
   flex: none;
 }
@@ -571,6 +595,146 @@ button {
   grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+}
+
+/* Split view: two documents side by side, the left one's share set by app.js. Where two do
+   not fit (`compact`), only the active one shows. */
+.content.split {
+  grid-template-columns: calc((100% - 1px) * var(--split-ratio, 0.5)) 1px minmax(0, 1fr);
+}
+
+.content.split.compact {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.content.split.compact > :not(.active) {
+  display: none;
+}
+
+/* One pane: its heading while split, then its list or diagram. */
+.pane-slot {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane-body {
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.pane-heading {
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 6px 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.pane-heading .pane-side {
+  flex: none;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pane-heading .pane-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-heading .close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.pane-heading .close:hover {
+  background: var(--chrome-hover);
+  color: var(--text);
+}
+
+/* The active pane: an accent heading and a ring around the whole pane. */
+.content.split .pane-slot.active .pane-heading {
+  background: var(--selected-bg);
+  box-shadow: inset 0 2px 0 var(--accent);
+  color: var(--text);
+}
+
+.content.split .pane-slot.active .pane-side {
+  color: var(--accent);
+}
+
+.content.split:not(.compact) .pane-slot.active::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  border: 1px solid var(--accent);
+  pointer-events: none;
+}
+
+/* Between the panes: a band wider than the line answers the pointer, the line lights up. */
+.split-divider {
+  position: relative;
+  z-index: 2;
+  background: var(--border);
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.split-divider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+}
+
+.split-divider::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 3px;
+  background: transparent;
+}
+
+.split-divider:hover::after,
+.split-divider.dragging::after {
+  background: var(--border-strong);
+}
+
+.split-divider:focus-visible::after {
+  background: var(--focus);
 }
 
 /* Card list: the scroll container keeps its gutter so updates never shift the layout. */
@@ -971,7 +1135,7 @@ button {
 }
 
 .pane-separator:hover::after,
-.body.resizing .pane-separator::after {
+.pane-separator.dragging::after {
   background: var(--border-strong);
 }
 

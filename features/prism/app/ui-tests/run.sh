@@ -9,12 +9,12 @@ APP_DIR=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-"$APP_DIR/target/ui-screenshots"}
 CHROMIUM=${CHROMIUM:-chromium}
 SIZE=1280,800
-CHECKS="checks diagram-checks view-checks action-checks status-checks document-checks restart-checks pane-checks"
-SCENARIOS="empty port-error mismatch no-tabs list plain focused ask select questions filter accepted dropped ended disconnected sessions menu error diagram diagram-titles diagram-summary diagram-full diagram-long diagram-long-full diagram-panel diagram-zoomed diagram-zoom-30 diagram-zoom-60 diagram-zoom-250 diagram-routes diagram-columns diagram-handover diagram-inside diagram-arrow diagram-ask diagram-dropped documents closed-menu restored-ended restored-waiting pane-wide pane-narrow diagram-pane-wide diagram-pane-narrow"
+CHECKS="checks diagram-checks view-checks action-checks status-checks document-checks restart-checks pane-checks split-checks"
+SCENARIOS="empty port-error mismatch no-tabs list plain focused ask select questions filter accepted dropped ended disconnected sessions menu error diagram diagram-titles diagram-summary diagram-full diagram-long diagram-long-full diagram-panel diagram-zoomed diagram-zoom-30 diagram-zoom-60 diagram-zoom-250 diagram-routes diagram-columns diagram-handover diagram-inside diagram-arrow diagram-ask diagram-dropped documents closed-menu restored-ended restored-waiting pane-wide pane-narrow diagram-pane-wide diagram-pane-narrow split-list-diagram split-diagrams split-lists"
 # A narrow window: the side pane goes below the canvas or the list.
 NARROW_SIZE=600,760
 NARROW_CHECKS="narrow-checks"
-NARROW_SCENARIOS="diagram-panel list"
+NARROW_SCENARIOS="diagram-panel list split-list-diagram"
 
 READY_ATTEMPTS=50
 # Virtual milliseconds a page may run: a screenshot settles quickly, the checks replay a lot.

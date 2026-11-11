@@ -16,8 +16,30 @@ const EARLY_REPLY_KEEP_MS = 10000;
  * Per tab, saved by the host. `modes`: list or diagram per document ID, chosen with V; none
  * shows the default for its content. `cameras`: the diagram's detail level, zoom and pan per
  * document ID; one without zoom and pan, or none, fits it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
+ * Split view: `split` is the right pane's own `{document, focus, selected, filter}` while the
+ * tab shows two documents side by side (null: one); the top-level fields are the left pane's.
+ * `ratio`: the left pane's share of the width, null for half; `activePane`: 'left' or 'right'.
  */
-const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], modes: {}, cameras: {}, kept: {} };
+const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], modes: {}, cameras: {}, kept: {}, split: null, ratio: null, activePane: 'left' };
+/**
+ * A pane is named by its ID: the tab key for the left (or only) pane, the key with
+ * RIGHT_PANE_SUFFIX for the right one. PANE_FIELDS are a pane's own; the tab shares the rest.
+ */
+const SIDES = ['left', 'right'];
+const SIDE_LABELS = { left: 'Left', right: 'Right' };
+const RIGHT_PANE_SUFFIX = '|right';
+const PANE_FIELDS = ['document', 'focus', 'selected', 'filter'];
+/**
+ * Two panes are shown when each gets at least SPLIT_MIN_WIDTH, which keeps the diagram's zoom
+ * controls on its canvas; otherwise (and in the narrow layout) only the active one. The
+ * divider between them is DIVIDER_WIDTH wide; its arrow keys move it by PANE_KEY_STEP.
+ */
+const SPLIT_MIN_WIDTH = 400;
+const DIVIDER_WIDTH = 1;
+const DEFAULT_SPLIT_RATIO = 0.5;
+/** Ctrl+` makes the other pane active; matched by key position, as ` is a dead key on some layouts. */
+const PANE_SWITCH_CODE = 'Backquote';
+const PANE_SWITCH_LABEL = 'Ctrl+`';
 /** What a document shows: its entry in `modes`, else the diagram when it has something to draw; V switches. */
 const VIEWS = ['list', 'diagram'];
 const VIEW_LABELS = { list: 'List', diagram: 'Diagram' };
@@ -74,6 +96,14 @@ const KEY_HINTS = {
     [['S'], 'export', 4],
     [['W'], 'close', 4],
     [['V'], 'list', 3],
+  ],
+};
+/** Keys of the split view, after those of the view: one pane, or two. */
+const SPLIT_HINTS = {
+  single: [[['\\'], 'split', 4]],
+  split: [
+    [[PANE_SWITCH_LABEL], 'other pane', 3],
+    [['\\'], 'unsplit', 4],
   ],
 };
 /** Diagram keys that zoom, animated (`diagramKeys`), and keys that only modify others: neither stops a zoom on its way. */
@@ -142,13 +172,14 @@ class App {
     this.sessionsOpen = false;
     this.menu = null;
     this.signatures = new Map();
-    this.shownView = null;
     this.scrolls = new Map();
     /** The pane width the user chose for this window, null for the default; read once from the arrangement. */
     this.paneWidth = null;
     this.paneWidthRestored = false;
-    /** While the pane's edge is dragged: `{id, x, width}` of the press. */
-    this.paneDrag = null;
+    /** While the pane's edge or the split divider is dragged: `{id, x, from, handle, apply}` of the press. */
+    this.drag = null;
+    /** Whether the body showed two panes at the last render, so a change limits the side pane again. */
+    this.shownSplit = false;
     this.paneSaveTimer = null;
     this.narrowLayout = window.matchMedia(NARROW_LAYOUT);
 
@@ -177,8 +208,8 @@ class App {
       placeholder: 'Filter',
       spellcheck: 'false',
       'aria-label': 'Filter the items of this tab',
-      title: 'Show only items whose kind, title, text or ID contains this; only this tab (/)',
-      oninput: () => this.updateView(this.activeKey(), { filter: this.filterInput.value }),
+      title: 'Show only items whose kind, title, text or ID contains this; only this tab, in split view only its active pane (/)',
+      oninput: () => this.updatePane(this.activePane(this.activeKey()), { filter: this.filterInput.value }),
       onkeydown: (event) => {
         if (event.key === 'Escape' || event.key === 'Enter') {
           event.preventDefault();
@@ -188,8 +219,24 @@ class App {
     });
     // Updated in place, so a new revision does not rebuild the controls around the keyboard.
     this.info = h('span', { class: 'info' });
-    // The body: the tab's list or diagram (or why there is none), and its side pane.
+    // The body: the tab's list or diagram (or why there is none), or two side by side, and its side pane.
     this.content = h('div', { class: 'content' });
+    this.slots = Object.fromEntries(SIDES.map((side) => [side, this.paneSlot(side)]));
+    // Between the two panes: drag it, or use the arrow keys, Home and End; a double-click shares the width equally.
+    this.divider = h('div', {
+      class: 'split-divider',
+      role: 'separator',
+      tabindex: '0',
+      'aria-orientation': 'vertical',
+      'aria-label': 'Width of the left document',
+      title: 'Drag to share the width between the two documents; double-click shares it equally',
+      onpointerdown: (event) => this.onDividerDown(event),
+      onpointermove: (event) => this.onDragMove(event),
+      onpointerup: (event) => this.endDrag(event),
+      onpointercancel: (event) => this.endDrag(event),
+      ondblclick: () => this.setSplitRatio(this.activeKey(), null),
+      onkeydown: (event) => this.onDividerKey(event),
+    });
     this.controls = h('div', { class: 'pane-controls' });
     // The pane's left edge: drag it, or use the arrow keys, Home and End; a double-click resets the width.
     this.separator = h('div', {
@@ -200,9 +247,9 @@ class App {
       'aria-label': 'Side pane width',
       title: 'Drag to resize the side pane; double-click resets it',
       onpointerdown: (event) => this.onSeparatorDown(event),
-      onpointermove: (event) => this.onSeparatorMove(event),
-      onpointerup: (event) => this.endPaneDrag(event),
-      onpointercancel: (event) => this.endPaneDrag(event),
+      onpointermove: (event) => this.onDragMove(event),
+      onpointerup: (event) => this.endDrag(event),
+      onpointercancel: (event) => this.endDrag(event),
       ondblclick: () => this.setPaneWidth(null),
       onkeydown: (event) => this.onSeparatorKey(event),
     });
@@ -217,8 +264,32 @@ class App {
     this.root.replaceChildren(this.tabstrip, this.main, this.statusbar, this.menuElement);
     this.keysSignature = null;
     new ResizeObserver(() => this.renderStatus()).observe(this.statusbar);
-    // A window resized: the pane's width is limited again.
-    new ResizeObserver(() => this.showPaneWidth()).observe(this.body);
+    // A window resized: the pane's width and the split are limited again.
+    new ResizeObserver(() => {
+      this.showPaneWidth();
+      this.showSplit();
+    }).observe(this.body);
+  }
+
+  /**
+   * The place of one pane in the body, with its heading while split. A press or the keyboard
+   * coming into it makes its pane the active one.
+   */
+  paneSlot(side) {
+    const heading = h('div', { class: 'pane-heading', hidden: true });
+    const body = h('div', { class: 'pane-body' });
+    const element = h(
+      'section',
+      {
+        class: 'pane-slot',
+        'aria-label': `${SIDE_LABELS[side]} document`,
+        onpointerdown: () => this.activateSide(side),
+        onfocusin: () => this.activateSide(side),
+      },
+      heading,
+      body,
+    );
+    return { side, name: `body-${side}`, element, heading, body, shown: null };
   }
 
   async start() {
@@ -248,17 +319,17 @@ class App {
     this.showPaneWidth();
   }
 
-  /** The list, diagram and detail panel of a tab that left this window are rebuilt if it comes back. */
+  /** The lists, diagrams and detail panels of a tab that left this window are rebuilt if it comes back. */
   forgetViews() {
     const tabs = new Set(this.myWindow()?.tabs ?? []);
     for (const views of [this.listViews, this.panels, this.sized]) {
-      for (const key of [...views.keys()].filter((key) => !tabs.has(key))) {
-        views.delete(key);
+      for (const pane of [...views.keys()].filter((pane) => !tabs.has(paneTab(pane)))) {
+        views.delete(pane);
       }
     }
-    for (const [key, view] of [...this.diagramViews].filter(([key]) => !tabs.has(key))) {
+    for (const [pane, view] of [...this.diagramViews].filter(([pane]) => !tabs.has(paneTab(pane)))) {
       view.dispose();
-      this.diagramViews.delete(key);
+      this.diagramViews.delete(pane);
     }
   }
 
@@ -284,9 +355,10 @@ class App {
       if (content) {
         // Without a pick of its own the tab shows the first document, which may close too.
         const shown = this.view(key).document ?? this.current(key)?.document.id ?? null;
+        const beside = this.view(key).split?.document ?? null;
         this.contents.set(key, content);
-        this.leaveClosedDocument(key, shown);
-        this.pruneSelection(key);
+        this.leaveClosedDocument(key, shown, beside);
+        this.shownPanes(key).forEach((pane) => this.pruneSelection(pane));
       }
     } finally {
       this.loading.delete(key);
@@ -295,13 +367,21 @@ class App {
   }
 
   /**
-   * The document shown is no longer open (closed here, by the agent or in another window): the
-   * first open one takes over as if picked, keeping the focus and selection of the one left.
+   * A document shown is no longer open (closed here, by the agent or in another window). Split,
+   * the pane whose document is still open stays alone. Otherwise the first open one takes over
+   * as if picked, keeping the focus and selection of the one left.
    */
-  leaveClosedDocument(key, shown) {
-    const view = this.view(key);
+  leaveClosedDocument(key, shown, beside) {
     const open = documentsOf(this.contents.get(key), false);
-    if (!shown || open.some((document) => document.id === shown)) {
+    const isOpen = (id) => open.some((document) => document.id === id);
+    if (beside && (!isOpen(beside) || beside === shown)) {
+      this.storeUnsplit(key, 'left');
+    } else if (beside && shown && !isOpen(shown)) {
+      this.storeUnsplit(key, 'right');
+      return;
+    }
+    const view = this.view(key);
+    if (!shown || isOpen(shown)) {
       return;
     }
     const next = open[0]?.id ?? null;
@@ -311,12 +391,12 @@ class App {
   }
 
   /** Selected items that left with their document leave the selection; dropped ones stay in the list and stay selected. */
-  pruneSelection(key) {
-    const current = this.current(key);
+  pruneSelection(pane) {
+    const current = this.current(pane);
     const items = current ? itemIds(current.document) : new Set();
-    const selected = this.view(key).selected;
+    const selected = this.paneView(pane).selected;
     if (selected.some((id) => !items.has(id))) {
-      this.storeView(key, { selected: selected.filter((id) => items.has(id)) });
+      this.storePane(pane, { selected: selected.filter((id) => items.has(id)) });
     }
   }
 
@@ -356,69 +436,197 @@ class App {
     );
   }
 
-  listView(key) {
-    if (!this.listViews.has(key)) {
+  // Panes
+
+  /** Whether the tab shows two documents: its right pane's document is open and not the left one's. */
+  isSplit(key) {
+    const beside = this.view(key).split?.document;
+    if (!beside) {
+      return false;
+    }
+    const open = documentsOf(this.contents.get(key), false);
+    return open.some((document) => document.id === beside) && this.current(paneId(key, 'left'))?.document.id !== beside;
+  }
+
+  /** The panes a tab shows: its left one, and the right one while split. */
+  shownPanes(key) {
+    return this.isSplit(key) ? SIDES.map((side) => paneId(key, side)) : [paneId(key, 'left')];
+  }
+
+  /** The pane the keys, the side pane and the document strip act on. */
+  activePane(key) {
+    return paneId(key, this.isSplit(key) ? this.view(key).activePane : 'left');
+  }
+
+  /** The other pane of a split tab. */
+  otherPane(pane) {
+    return paneId(paneTab(pane), paneSide(pane) === 'left' ? 'right' : 'left');
+  }
+
+  /** A pane's view: the tab's, with the right pane's own fields over it. */
+  paneView(pane) {
+    const view = this.view(paneTab(pane));
+    return paneSide(pane) === 'right' ? { ...view, ...view.split } : view;
+  }
+
+  updatePane(pane, change) {
+    this.storePane(pane, change);
+    this.render();
+  }
+
+  /** Records a pane's view change: the right pane's own fields go to its `split`, the rest to the tab. */
+  storePane(pane, change) {
+    const key = paneTab(pane);
+    if (paneSide(pane) === 'left') {
+      this.storeView(key, change);
+      return;
+    }
+    const split = this.view(key).split;
+    const shared = Object.fromEntries(Object.entries(change).filter(([name]) => !PANE_FIELDS.includes(name)));
+    const own = Object.fromEntries(Object.entries(change).filter(([name]) => PANE_FIELDS.includes(name)));
+    // A right pane closed meanwhile (a reply arriving late) has nothing of its own left to change.
+    this.storeView(key, split ? { ...shared, split: { ...split, ...own } } : shared);
+  }
+
+  /** The pane of a tab that shows a document, or null. */
+  paneShowing(key, documentId) {
+    return this.shownPanes(key).find((pane) => this.current(pane)?.document.id === documentId) ?? null;
+  }
+
+  /**
+   * \ or the document menu: document `id` (null: the one after the left pane's) opens in a
+   * right pane beside the tab's document, as the active pane, with the focus and selection
+   * kept for it.
+   */
+  split(key, id) {
+    const left = this.current(paneId(key, 'left'));
+    if (!left) {
+      return;
+    }
+    const index = left.documents.findIndex((document) => document.id === left.document.id);
+    const beside = id ?? left.documents[(index + 1) % left.documents.length].id;
+    if (beside === left.document.id) {
+      this.setMessage('Only one document is open: there is nothing to show beside it.', 'error');
+      return;
+    }
+    // U acts on the documents shown from now on.
+    this.lastClosed = null;
+    const back = this.view(key).kept[beside] ?? { focus: null, selected: [] };
+    this.updateView(key, {
+      document: left.document.id,
+      split: { document: beside, focus: back.focus, selected: back.selected, filter: '' },
+      activePane: 'right',
+    });
+  }
+
+  /** Back to one pane showing the document of `keep`; the focus and selection of the other are kept for its document. */
+  unsplit(key, keep) {
+    this.storeUnsplit(key, keep);
+    this.render();
+  }
+
+  storeUnsplit(key, keep) {
+    const view = this.view(key);
+    const right = view.split;
+    const leaving = keep === 'right' ? view : right;
+    const kept = leaving?.document ? { ...view.kept, [leaving.document]: { focus: leaving.focus, selected: leaving.selected } } : view.kept;
+    const stays = keep === 'right' && right ? Object.fromEntries(PANE_FIELDS.map((name) => [name, right[name]])) : {};
+    this.storeView(key, { ...stays, split: null, activePane: 'left', kept });
+  }
+
+  /** \: two documents, or back to the left one. */
+  toggleSplit(key) {
+    if (this.isSplit(key)) {
+      this.unsplit(key, 'left');
+    } else {
+      this.split(key, null);
+    }
+  }
+
+  /** A press or the keyboard in a pane of the active tab makes it the active pane. */
+  activateSide(side) {
+    const key = this.activeKey();
+    if (key && this.isSplit(key) && this.view(key).activePane !== side) {
+      this.updateView(key, { activePane: side });
+    }
+  }
+
+  /** Ctrl+`: the other pane becomes active and takes the keyboard. */
+  switchPane(key) {
+    if (!this.isSplit(key)) {
+      this.setMessage('One document is shown: \\ shows a second one beside it.');
+      return;
+    }
+    const pane = this.otherPane(this.activePane(key));
+    this.updateView(key, { activePane: paneSide(pane) });
+    this.focusPane(pane);
+  }
+
+  // Views of a pane
+
+  listView(pane) {
+    if (!this.listViews.has(pane)) {
       this.listViews.set(
-        key,
+        pane,
         new ListView({
-          onFocus: (id) => this.focus(key, id),
-          onToggle: (id) => this.toggleSelection(key, id),
+          onFocus: (id) => this.focus(pane, id),
+          onToggle: (id) => this.toggleSelection(pane, id),
         }),
       );
     }
-    return this.listViews.get(key);
+    return this.listViews.get(pane);
   }
 
-  /** The detail area of the tab's side pane, in both views. */
-  detailPanel(key) {
-    if (!this.panels.has(key)) {
-      this.panels.set(key, new DetailPanel(this.itemActions(key)));
+  /** The detail area of the side pane for a pane, in both views. */
+  detailPanel(pane) {
+    if (!this.panels.has(pane)) {
+      this.panels.set(pane, new DetailPanel(this.itemActions(pane)));
     }
-    return this.panels.get(key);
+    return this.panels.get(pane);
   }
 
   /** What the detail panel does with the focused or selected items. */
-  itemActions(key) {
+  itemActions(pane) {
     return {
-      onAsk: () => this.ask(key),
-      onAccept: () => this.accept(key),
-      onDrop: () => this.drop(key),
+      onAsk: () => this.ask(pane),
+      onAccept: () => this.accept(pane),
+      onDrop: () => this.drop(pane),
     };
   }
 
-  diagramView(key) {
-    if (!this.diagramViews.has(key)) {
+  diagramView(pane) {
+    if (!this.diagramViews.has(pane)) {
       this.diagramViews.set(
-        key,
+        pane,
         new DiagramView(
           {
-            layout: (document, visible, detail) => this.diagramLayout(key, document, visible, detail),
-            onFocus: (id) => this.focus(key, id),
-            onToggle: (id) => this.toggleSelection(key, id),
-            onClear: () => this.focus(key, null),
+            layout: (document, visible, detail) => this.diagramLayout(pane, document, visible, detail),
+            onFocus: (id) => this.focus(pane, id),
+            onToggle: (id) => this.toggleSelection(pane, id),
+            onClear: () => this.focus(pane, null),
             // The overview in the detail panel counts the shapes of the new layout.
             onLayout: () => this.render(),
             onCamera: (documentId, camera) => {
-              const cameras = { ...this.view(key).cameras };
+              const cameras = { ...this.paneView(pane).cameras };
               if (camera) {
                 cameras[documentId] = camera;
               } else {
                 delete cameras[documentId];
               }
-              this.storeView(key, { cameras });
+              this.storePane(pane, { cameras });
             },
           },
-          this.detailPanel(key).element,
+          this.detailPanel(pane).element,
         ),
       );
     }
-    return this.diagramViews.get(key);
+    return this.diagramViews.get(pane);
   }
 
-  /** Lays out a tab's diagram in prism-core; every response also brings the arrows' step numbers and the sizes. */
-  async diagramLayout(key, document, visible, detail) {
+  /** Lays out a pane's diagram in prism-core; every response also brings the arrows' step numbers and the sizes. */
+  async diagramLayout(pane, document, visible, detail) {
     const diagram = await this.backend.diagram(document, visible, detail);
-    this.storeSized(key, layoutKey(document, visible), diagram);
+    this.storeSized(pane, layoutKey(document, visible), diagram);
     return diagram;
   }
 
@@ -426,73 +634,73 @@ class App {
    * The list shows the arrows' step numbers without drawing the diagram: it asks for the
    * sizes alone, once per thing listed.
    */
-  requestSized(key, current) {
+  requestSized(pane, current) {
     const visible = current.rows.map((row) => row.id);
     const wanted = layoutKey(current.document, visible);
-    if (Object.keys(current.document.relationships).length === 0 || this.sized.get(key)?.key === wanted) {
+    if (Object.keys(current.document.relationships).length === 0 || this.sized.get(pane)?.key === wanted) {
       return;
     }
-    this.sized.set(key, { key: wanted, steps: null });
+    this.sized.set(pane, { key: wanted, steps: null });
     // Without them the list shows no steps; the next change of what it lists asks again.
-    this.diagramLayout(key, current.document, visible, null).catch(() => {});
+    this.diagramLayout(pane, current.document, visible, null).catch(() => {});
   }
 
-  /** Keeps and shows steps that arrived for what the tab lists now; those of what it listed before are dropped. */
-  storeSized(key, wanted, { steps }) {
-    const current = this.current(key);
+  /** Keeps and shows steps that arrived for what the pane lists now; those of what it listed before are dropped. */
+  storeSized(pane, wanted, { steps }) {
+    const current = this.current(pane);
     if (!current || layoutKey(current.document, current.rows.map((row) => row.id)) !== wanted) {
       return;
     }
-    const entry = this.sized.get(key);
+    const entry = this.sized.get(pane);
     if (entry?.key === wanted && entry.steps !== null) {
       return;
     }
-    this.sized.set(key, { key: wanted, steps });
+    this.sized.set(pane, { key: wanted, steps });
     this.render();
   }
 
-  /** What prism-core gave for what a tab lists now, or null. */
-  sizedFor(key, document, rows) {
-    const entry = this.sized.get(key);
+  /** What prism-core gave for what a pane lists now, or null. */
+  sizedFor(pane, document, rows) {
+    const entry = this.sized.get(pane);
     return entry?.key === layoutKey(document, rows.map((row) => row.id)) && entry.steps !== null ? entry : null;
   }
 
-  /** The document, its visible rows, the focused and the selected rows of a tab; null before content. */
-  current(key) {
-    const content = this.contents.get(key);
+  /** The document, its visible rows, the focused and the selected rows of a pane; null before content. */
+  current(pane) {
+    const content = this.contents.get(paneTab(pane));
     const documents = documentsOf(content, false);
     if (documents.length === 0) {
       return null;
     }
-    const view = this.view(key);
+    const view = this.paneView(pane);
     const document = documents.find((candidate) => candidate.id === view.document) ?? documents[0];
     const listed = buildRows(document, new Set(view.hidden), view.filter);
     // A link drawn as an arrow also has the step number its pill shows, once prism-core gave it.
-    const steps = this.sizedFor(key, document, listed)?.steps ?? {};
+    const steps = this.sizedFor(pane, document, listed)?.steps ?? {};
     const rows = listed.map((row) => ({ ...row, step: steps[row.id] ?? null }));
     let focusIndex = rows.findIndex((row) => row.id === view.focus);
     if (focusIndex === -1 && rows.length > 0) {
       // The focused item left (hidden, filtered out): its neighbour takes over.
-      focusIndex = Math.min(this.focusIndex.get(key) ?? 0, rows.length - 1);
+      focusIndex = Math.min(this.focusIndex.get(pane) ?? 0, rows.length - 1);
     }
-    this.focusIndex.set(key, focusIndex);
+    this.focusIndex.set(pane, focusIndex);
     // Only what is shown counts: a selected item hidden or filtered out takes no part.
     const selected = new Set(view.selected);
     return { content, documents, document, rows, focus: rows[focusIndex] ?? null, selected: rows.filter((row) => selected.has(row.id)) };
   }
 
-  /** What the tab's document shows: list, or diagram when it has something to draw. */
-  mode(key) {
-    const document = this.current(key)?.document;
+  /** What the pane's document shows: list, or diagram when it has something to draw. */
+  mode(pane) {
+    const document = this.current(pane)?.document;
     if (!document || !hasDiagram(document)) {
       return 'list';
     }
-    return this.view(key).modes[document.id] ?? 'diagram';
+    return this.paneView(pane).modes[document.id] ?? 'diagram';
   }
 
-  /** V: the other view of the tab's document; a document with nothing to draw stays a list. */
-  switchMode(key) {
-    const current = this.current(key);
+  /** V: the other view of the pane's document; a document with nothing to draw stays a list. */
+  switchMode(pane) {
+    const current = this.current(pane);
     if (!current) {
       return;
     }
@@ -500,12 +708,12 @@ class App {
       this.setMessage('Nothing to draw: this document has no arrows or groups.');
       return;
     }
-    this.setMode(key, VIEWS[(VIEWS.indexOf(this.mode(key)) + 1) % VIEWS.length]);
+    this.setMode(pane, VIEWS[(VIEWS.indexOf(this.mode(pane)) + 1) % VIEWS.length]);
   }
 
-  setMode(key, mode) {
-    const document = this.current(key).document;
-    this.updateView(key, { modes: { ...this.view(key).modes, [document.id]: mode } });
+  setMode(pane, mode) {
+    const document = this.current(pane).document;
+    this.updatePane(pane, { modes: { ...this.paneView(pane).modes, [document.id]: mode } });
   }
 
   // Rendering
@@ -608,7 +816,7 @@ class App {
       this.patch('header', this.header, null, () => []);
       this.header.hidden = true;
       this.pane.hidden = true;
-      this.showBody(null);
+      this.hideSlots();
       this.patch('body', this.content, ['empty', this.state.status, this.state.sessions, this.myWindow()?.id], () => [
         this.emptyWindow(),
       ]);
@@ -621,52 +829,80 @@ class App {
     if (session?.loaded && !this.contents.has(key) && !this.loading.has(key)) {
       this.loadContent(key);
     }
-    const current = this.current(key);
-    const view = this.view(key);
-    const mode = this.mode(key);
-    const hidden = view.hidden.length;
+    const pane = this.activePane(key);
+    const current = this.current(pane);
+    const view = this.paneView(pane);
+    const mode = this.mode(pane);
     const closed = documentsOf(this.contents.get(key), true);
+    const panes = this.shownPanes(key);
+    // While split, the document strip marks the document of each side.
+    const sides = panes.length > 1 ? Object.fromEntries(panes.map((shown) => [this.current(shown).document.id, paneSide(shown)])) : {};
     this.patch(
       'header',
       this.header,
-      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, closed.length],
-      () => this.tabHeader(key, session, state, current, closed),
+      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, sides, closed.length],
+      () => this.tabHeader(key, session, state, current, closed, sides),
     );
 
     this.pane.hidden = !current;
     if (!current) {
-      this.showBody(null);
+      this.hideSlots();
       this.patch('body', this.content, ['no-content', key, state, session?.loaded, session?.restored, this.contents.has(key), closed.length], () => [
         this.emptyTab(key, session, state, closed),
       ]);
       return;
     }
-    this.renderControls(key, current, view, mode);
+    this.renderControls(pane, current, view, mode);
+    this.showSlots(panes.length > 1);
+    for (const shown of panes) {
+      this.renderPane(shown, state, shown === pane, panes.length > 1);
+    }
+  }
+
+  /**
+   * One pane in its slot: its list or diagram, or why there is none. The active pane's detail
+   * panel goes to the side pane.
+   */
+  renderPane(pane, state, active, split) {
+    const slot = this.slots[paneSide(pane)];
+    const current = this.current(pane);
+    const view = this.paneView(pane);
+    const mode = this.mode(pane);
+    slot.element.classList.toggle('active', active);
+    slot.heading.hidden = !split;
+    if (split) {
+      this.patch(`heading-${slot.side}`, slot.heading, [pane, current.document.title], () => this.paneHeading(pane, current.document));
+    }
     if (current.rows.length === 0) {
-      this.showPanel(null);
-      this.showBody(null);
+      if (active) {
+        this.showPanel(null);
+      }
+      this.showBody(slot, null);
+      const hidden = view.hidden.length;
       const total = itemCount(current.document);
       const filter = view.filter.trim();
-      this.patch('body', this.content, ['no-rows', key, current.document.id, total, hidden, filter], () => [
+      this.patch(slot.name, slot.body, ['no-rows', pane, current.document.id, total, hidden, filter], () => [
         total === 0
           ? empty('This document has no items', null)
           : filter
             ? empty(
                 `No items match “${filter}”`,
                 hidden > 0 ? `Items hidden in this tab are not searched; Shift+H shows them.` : null,
-                h('button', { class: 'button', text: 'Clear filter', onclick: () => this.updateView(key, { filter: '' }) }),
+                h('button', { class: 'button', text: 'Clear filter', onclick: () => this.updatePane(pane, { filter: '' }) }),
               )
             : empty(
                 `All ${total} items are hidden in this tab`,
                 null,
-                h('button', { class: 'button', text: 'Show hidden', onclick: () => this.updateView(key, { hidden: [] }) }),
+                h('button', { class: 'button', text: 'Show hidden', onclick: () => this.updateView(paneTab(pane), { hidden: [] }) }),
               ),
       ]);
       return;
     }
     const selected = new Set(current.selected.map((row) => row.id));
-    const panel = this.detailPanel(key);
-    this.showPanel(panel);
+    const panel = this.detailPanel(pane);
+    if (active) {
+      this.showPanel(panel);
+    }
     const details = {
       document: current.document,
       rows: current.rows,
@@ -676,26 +912,47 @@ class App {
     };
 
     if (mode === 'diagram') {
-      const diagramView = this.diagramView(key);
-      this.showBody(diagramView, key);
+      const diagramView = this.diagramView(pane);
+      this.showBody(slot, diagramView, pane);
       // Only an item the user picked: without one the panel shows the overview.
       diagramView.render({ ...details, focus: view.focus, camera: view.cameras?.[current.document.id] ?? null });
-      panel.render({ ...details, focus: view.focus, counts: diagramView.counts() });
+      if (active) {
+        panel.render({ ...details, focus: view.focus, counts: diagramView.counts() });
+      }
       return;
     }
-    this.requestSized(key, current);
-    const listView = this.listView(key);
-    this.showBody(listView, key);
+    this.requestSized(pane, current);
+    const listView = this.listView(pane);
+    this.showBody(slot, listView, pane);
     const focus = current.focus?.id ?? null;
     listView.render({ ...details, focus });
-    panel.render({ ...details, focus, counts: null });
+    if (active) {
+      panel.render({ ...details, focus, counts: null });
+    }
+  }
+
+  /** Above each pane while split: its side and document, and its close control. */
+  paneHeading(pane, document) {
+    const side = paneSide(pane);
+    const other = paneSide(this.otherPane(pane));
+    return [
+      h('span', { class: 'pane-side', text: SIDE_LABELS[side] }),
+      h('span', { class: 'pane-title', title: document.title, text: document.title }),
+      h('button', {
+        class: 'close',
+        title: `Close this pane; the ${other} document stays`,
+        'aria-label': `Close the ${side} pane`,
+        text: '×',
+        onclick: () => this.unsplit(paneTab(pane), other),
+      }),
+    ];
   }
 
   /**
-   * The controls block at the top of the side pane: the view switch when the document has
-   * something to draw, the filter, the counts with their actions, and the export.
+   * The controls block at the top of the side pane, for the active pane: the view switch when
+   * the document has something to draw, the filter, the counts with their actions, and the export.
    */
-  renderControls(key, current, view, mode) {
+  renderControls(pane, current, view, mode) {
     const filtering = document.activeElement === this.filterInput;
     const caret = filtering ? [this.filterInput.selectionStart, this.filterInput.selectionEnd] : null;
     // A rebuild must not take the keyboard away from a focused button: its new copy takes it.
@@ -703,8 +960,8 @@ class App {
     this.patch(
       'controls',
       this.controls,
-      [key, current.document.id, view.hidden.length, current.selected.length, view.selected.length, mode, hasDiagram(current.document)],
-      () => this.paneControls(key, current, view, mode),
+      [pane, current.document.id, view.hidden.length, current.selected.length, view.selected.length, mode, hasDiagram(current.document)],
+      () => this.paneControls(pane, current, view, mode),
     );
     if (filtering && document.activeElement !== this.filterInput) {
       this.filterInput.focus();
@@ -714,14 +971,14 @@ class App {
       this.controls.querySelector(`[data-control="${control}"]`)?.focus();
     }
     this.info.textContent = `${current.rows.length} ${current.rows.length === 1 ? 'item' : 'items'} · revision ${current.document.revision}`;
-    // While typing the two agree; they differ after a tab switch or Clear filter.
+    // While typing the two agree; they differ after a tab or pane switch or Clear filter.
     if (this.filterInput.value !== view.filter) {
       this.filterInput.value = view.filter;
     }
     this.filterInput.classList.toggle('active', view.filter.trim() !== '');
   }
 
-  /** Below the controls, the side pane shows the tab's detail panel while there are items. */
+  /** Below the controls, the side pane shows the active pane's detail panel while there are items. */
   showPanel(panel) {
     if (this.shownPanel === panel) {
       return;
@@ -734,25 +991,58 @@ class App {
     }
   }
 
-  /** Shows a tab's list or diagram in the body, keeping each tab's list scroll position across switches. */
-  showBody(view, key) {
-    if (this.shownView?.view === view) {
+  /**
+   * Shows a pane's list or diagram in its slot (null: none for now), keeping each pane's list
+   * scroll position across switches.
+   */
+  showBody(slot, view, pane) {
+    if (slot.shown?.view === view) {
       return;
     }
-    if (this.shownView?.view instanceof ListView) {
-      this.scrolls.set(this.shownView.key, this.shownView.view.element.scrollTop);
+    if (slot.shown?.view instanceof ListView) {
+      this.scrolls.set(slot.shown.pane, slot.shown.view.element.scrollTop);
     }
-    this.signatures.delete('body');
-    this.shownView = view ? { view, key } : null;
+    this.signatures.delete(slot.name);
+    slot.shown = view ? { view, pane } : null;
     if (view) {
-      this.content.replaceChildren(view.element);
+      slot.body.replaceChildren(view.element);
     }
     if (view instanceof ListView) {
-      view.element.scrollTop = this.scrolls.get(key) ?? 0;
+      view.element.scrollTop = this.scrolls.get(pane) ?? 0;
     }
   }
 
-  tabHeader(key, session, state, current, closed) {
+  /** The body shows the slots: the left one, and the divider and the right one while split. */
+  showSlots(split) {
+    const slots = split ? [this.slots.left.element, this.divider, this.slots.right.element] : [this.slots.left.element];
+    if (!split) {
+      this.showBody(this.slots.right, null);
+    }
+    if (this.content.children.length !== slots.length || slots.some((slot, index) => this.content.children[index] !== slot)) {
+      this.signatures.delete('body');
+      this.content.replaceChildren(...slots);
+    }
+    this.content.classList.toggle('split', split);
+    if (split !== this.shownSplit) {
+      // Two panes need more room beside the side pane than one.
+      this.shownSplit = split;
+      this.showPaneWidth();
+    }
+    this.showSplit();
+  }
+
+  /** The whole tab or window shows one message instead of the panes: they let go of their lists and diagrams. */
+  hideSlots() {
+    for (const slot of Object.values(this.slots)) {
+      this.showBody(slot, null);
+    }
+    // The message is rebuilt on every render: it also shows state its signature leaves out (when a tab was seen or ended).
+    this.signatures.delete('body');
+    this.content.classList.remove('split', 'compact');
+    this.shownSplit = false;
+  }
+
+  tabHeader(key, session, state, current, closed, sides) {
     const agent = session ? agentLabel(session.agent) : '';
     const parts = [
       h(
@@ -784,7 +1074,7 @@ class App {
             ? h(
                 'div',
                 { class: 'documents', role: 'tablist', 'aria-label': 'Documents' },
-                current.documents.map((document) => this.documentTab(key, document, document.id === current.document.id)),
+                current.documents.map((document) => this.documentTab(key, document, document.id === current.document.id, sides[document.id] ?? null)),
               )
             : null,
           closed.length > 0
@@ -802,18 +1092,43 @@ class App {
     return parts;
   }
 
-  /** A document in the strip, with its close control (W closes the one shown). */
-  documentTab(key, document, selected) {
+  /**
+   * A document in the strip, with its close control (W closes the one shown). `selected`: shown
+   * in the active pane; `side`: the pane showing it while split, marked L or R, or null. Its menu
+   * shows it beside the other, or on a side.
+   */
+  documentTab(key, document, selected, side) {
+    const openMenu = (x, y) => this.openMenu(key, x, y, document.id);
+    const where = side ? `, shown ${side === 'left' ? 'on the left' : 'on the right'}` : '';
     return h(
       'div',
-      { class: selected ? 'document selected' : 'document', role: 'presentation' },
-      h('button', {
-        role: 'tab',
-        'aria-selected': String(selected),
-        title: document.title,
-        text: document.title,
-        onclick: () => this.showDocument(key, document.id),
-      }),
+      {
+        class: ['document', selected ? 'selected' : '', side ? 'shown' : ''].filter(Boolean).join(' '),
+        role: 'presentation',
+        oncontextmenu: (event) => {
+          event.preventDefault();
+          openMenu(event.clientX, event.clientY);
+        },
+      },
+      h(
+        'button',
+        {
+          role: 'tab',
+          'aria-selected': String(selected),
+          'aria-label': `${document.title}${where}`,
+          title: `${document.title}${where}`,
+          onclick: () => this.showDocument(this.activePane(key), document.id),
+          onkeydown: (event) => {
+            if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+              event.preventDefault();
+              const rect = event.currentTarget.getBoundingClientRect();
+              openMenu(rect.left, rect.bottom);
+            }
+          },
+        },
+        side ? h('span', { class: 'side-mark', 'aria-hidden': 'true', text: SIDE_LABELS[side][0] }) : null,
+        document.title,
+      ),
       h('button', {
         class: 'close',
         title: 'Close this document for everyone (W)',
@@ -825,7 +1140,7 @@ class App {
   }
 
   /** The view switch and export, the filter, then the counts with their actions. */
-  paneControls(key, current, view, mode) {
+  paneControls(pane, current, view, mode) {
     const hidden = view.hidden.length;
     // Selected items hidden or filtered out stay selected but take no part in actions.
     const filteredOut = view.selected.length - current.selected.length;
@@ -843,7 +1158,7 @@ class App {
                 'data-control': `view-${name}`,
                 title: `Show as ${VIEW_LABELS[name].toLowerCase()} (V)`,
                 text: VIEW_LABELS[name],
-                onclick: () => this.setMode(key, name),
+                onclick: () => this.setMode(pane, name),
               }),
             ),
           ),
@@ -854,7 +1169,7 @@ class App {
                 'data-control': 'export',
                 title: 'Save the diagram as an SVG file (S)',
                 text: 'Export SVG',
-                onclick: () => this.exportDiagram(key),
+                onclick: () => this.exportDiagram(pane),
               })
             : null,
         )
@@ -872,7 +1187,7 @@ class App {
               'data-control': 'show-hidden',
               title: 'Show the items hidden in this tab (Shift+H)',
               text: `${hidden} hidden · show`,
-              onclick: () => this.updateView(key, { hidden: [] }),
+              onclick: () => this.updateView(paneTab(pane), { hidden: [] }),
             })
           : null,
         view.selected.length > 0
@@ -881,7 +1196,7 @@ class App {
               'data-control': 'clear-selection',
               title: filteredOut > 0 ? 'Actions leave out selected items that are hidden or filtered out. Clear the selection (Esc)' : 'Clear the selection (Esc)',
               text: `${current.selected.length} selected${filteredOut > 0 ? ` (${filteredOut} not shown)` : ''} · clear`,
-              onclick: () => this.clearSelection(key),
+              onclick: () => this.clearSelection(pane),
             })
           : null,
       ),
@@ -1052,27 +1367,28 @@ class App {
 
   renderStatus() {
     const key = this.activeKey();
-    const mode = key ? this.mode(key) : 'list';
-    const document = key ? this.current(key)?.document : null;
+    const pane = key ? this.activePane(key) : null;
+    const mode = pane ? this.mode(pane) : 'list';
+    const document = pane ? this.current(pane)?.document : null;
     // Without content the keys have nothing to act on.
     this.keys.hidden = !document;
     this.statusMessage.textContent = this.message?.text ?? '';
     this.statusMessage.title = this.message?.text ?? '';
     this.statusMessage.className = `message ${this.message?.tone ?? ''}`;
-    this.fitKeys(mode, Boolean(document && hasDiagram(document)));
+    this.fitKeys(mode, Boolean(document && hasDiagram(document)), Boolean(document && this.isSplit(key)));
   }
 
   /**
-   * Shows the key hints that fit beside the message, leaving out the highest ranks first; V
-   * only when the document has a diagram to switch to.
+   * Shows the key hints of the active pane that fit beside the message, leaving out the
+   * highest ranks first; V only when the document has a diagram to switch to.
    */
-  fitKeys(mode, switchable) {
-    const signature = JSON.stringify([mode, switchable, this.keys.hidden, this.message?.text ?? '', this.statusbar.clientWidth]);
+  fitKeys(mode, switchable, split) {
+    const signature = JSON.stringify([mode, switchable, split, this.keys.hidden, this.message?.text ?? '', this.statusbar.clientWidth]);
     if (this.keys.hidden || signature === this.keysSignature) {
       return;
     }
     this.keysSignature = signature;
-    let hints = (KEY_HINTS[mode] ?? KEY_HINTS.list).filter(([keys]) => switchable || keys[0] !== 'V');
+    let hints = [...(KEY_HINTS[mode] ?? KEY_HINTS.list), ...SPLIT_HINTS[split ? 'split' : 'single']].filter(([keys]) => switchable || keys[0] !== 'V');
     this.keys.replaceChildren(...keyHints(hints));
     const ranks = [...new Set(hints.map(([, , rank]) => rank))].sort((left, right) => right - left);
     for (const rank of ranks) {
@@ -1089,10 +1405,10 @@ class App {
     if (!this.menu) {
       return;
     }
-    const { key, x, y, closed } = this.menu;
-    const items = closed ? this.closedMenuItems(key) : this.tabMenuItems(key);
+    const { key, x, y, closed, document: documentId } = this.menu;
+    const items = closed ? this.closedMenuItems(key) : documentId ? this.documentMenuItems(key, documentId) : this.tabMenuItems(key);
     if (items.length === 0) {
-      // The last closed document was reopened meanwhile.
+      // The last closed document was reopened meanwhile, or the document of the menu closed.
       this.closeMenu();
       return;
     }
@@ -1120,6 +1436,38 @@ class App {
     ];
   }
 
+  /**
+   * A document of the strip: beside the one shown, or, while split, on a side or alone; and
+   * its close for everyone. The same document is never shown in both panes.
+   */
+  documentMenuItems(key, id) {
+    const document = documentsOf(this.contents.get(key), false).find((candidate) => candidate.id === id);
+    if (!document) {
+      return [];
+    }
+    const showing = this.paneShowing(key, id);
+    const items = [];
+    if (!this.isSplit(key)) {
+      items.push(
+        showing
+          ? menuItem('Split: show the next document beside it (\\)', () => this.split(key, null))
+          : menuItem('Open on the right', () => this.split(key, id)),
+      );
+    } else if (showing) {
+      items.push(menuItem('Show only this document', () => this.unsplit(key, paneSide(showing))));
+    } else {
+      items.push(
+        ...SIDES.map((side) =>
+          menuItem(`Show on the ${side}`, () => {
+            this.updateView(key, { activePane: side });
+            this.showDocument(paneId(key, side), id);
+          }),
+        ),
+      );
+    }
+    return [...items, h('hr'), menuItem('Close for everyone', () => this.closeDocument(key, document))];
+  }
+
   /** The closed documents of the tab, as the store has them; picking one reopens it for everyone. */
   closedMenuItems(key) {
     return documentsOf(this.contents.get(key), true).map((document) => {
@@ -1141,9 +1489,11 @@ class App {
 
   // Side pane width
 
-  /** The narrowest and widest pane the window has room for now. */
+  /** The narrowest and widest pane the window has room for now; two documents side by side need more room. */
   paneLimits() {
-    return [PANE_MIN_WIDTH, Math.max(PANE_MIN_WIDTH, this.body.clientWidth - CONTENT_MIN_WIDTH)];
+    const key = this.activeKey();
+    const content = key && this.isSplit(key) ? 2 * SPLIT_MIN_WIDTH + DIVIDER_WIDTH : CONTENT_MIN_WIDTH;
+    return [PANE_MIN_WIDTH, Math.max(PANE_MIN_WIDTH, this.body.clientWidth - content)];
   }
 
   clampPaneWidth(width) {
@@ -1177,50 +1527,131 @@ class App {
     this.paneSaveTimer = setTimeout(() => this.backend.setPaneWidth(this.paneWidth), VIEW_SAVE_DELAY_MS);
   }
 
+  /** The pane grows as its left edge moves left. */
   onSeparatorDown(event) {
+    this.startDrag(event, this.separator, this.shownPaneWidth(), (width, dx) => this.setPaneWidth(this.clampPaneWidth(width - dx)));
+  }
+
+  /** Left and Right move the edge a step, Home and End to the narrowest and widest pane. */
+  onSeparatorKey(event) {
+    const [min, max] = this.paneLimits();
+    const width = this.shownPaneWidth();
+    const widths = { ArrowLeft: width + PANE_KEY_STEP, ArrowRight: width - PANE_KEY_STEP, Home: min, End: max };
+    this.onResizeKey(event, widths, (value) => this.setPaneWidth(this.clampPaneWidth(value)));
+  }
+
+  // Resize handles: the side pane's edge and the split divider
+
+  /**
+   * A press on a resize handle: as the pointer moves, `apply(from, dx)` sets the value `from`
+   * it had at the press, moved by `dx` pixels.
+   */
+  startDrag(event, handle, from, apply) {
     if (event.button !== 0) {
       return;
     }
-    this.paneDrag = { id: event.pointerId, x: event.clientX, width: this.shownPaneWidth() };
+    this.drag = { id: event.pointerId, x: event.clientX, from, handle, apply };
     // No text selection and the resize cursor everywhere while dragging.
     this.body.classList.add('resizing');
+    handle.classList.add('dragging');
     try {
-      this.separator.setPointerCapture(event.pointerId);
+      handle.setPointerCapture(event.pointerId);
     } catch {
       // The pointer is already gone; the drag ends with its pointerup anyway.
     }
   }
 
-  /** The pane grows as its left edge moves left. */
-  onSeparatorMove(event) {
-    if (this.paneDrag?.id !== event.pointerId) {
+  onDragMove(event) {
+    if (this.drag?.id !== event.pointerId) {
       return;
     }
-    this.setPaneWidth(this.clampPaneWidth(this.paneDrag.width + this.paneDrag.x - event.clientX));
+    this.drag.apply(this.drag.from, event.clientX - this.drag.x);
   }
 
-  endPaneDrag(event) {
-    if (this.paneDrag?.id !== event.pointerId) {
+  endDrag(event) {
+    if (this.drag?.id !== event.pointerId) {
       return;
     }
-    this.paneDrag = null;
+    this.drag.handle.classList.remove('dragging');
+    this.drag = null;
     this.body.classList.remove('resizing');
   }
 
-  /** Left and Right move the edge a step, Home and End to the narrowest and widest pane. */
-  onSeparatorKey(event) {
-    if (event.metaKey || event.ctrlKey || event.altKey) {
+  /** A key on a resize handle sets the value `values` has for it; handled here, it neither moves the focus nor pans the diagram. */
+  onResizeKey(event, values, set) {
+    if (event.metaKey || event.ctrlKey || event.altKey || !(event.key in values)) {
       return;
     }
-    const [min, max] = this.paneLimits();
-    const width = this.shownPaneWidth();
-    const widths = { ArrowLeft: width + PANE_KEY_STEP, ArrowRight: width - PANE_KEY_STEP, Home: min, End: max };
-    if (!(event.key in widths)) {
-      return;
-    }
-    // Handled here: the document's keys do not move the focus or pan the diagram.
     event.preventDefault();
-    this.setPaneWidth(this.clampPaneWidth(widths[event.key]));
+    set(values[event.key]);
+  }
+
+  // Split divider
+
+  /** The width the two panes share. */
+  splitWidth() {
+    return this.content.clientWidth - DIVIDER_WIDTH;
+  }
+
+  /** The smallest and largest share of the left pane that leave both SPLIT_MIN_WIDTH. */
+  splitLimits() {
+    const width = this.splitWidth();
+    if (width < 2 * SPLIT_MIN_WIDTH) {
+      return [DEFAULT_SPLIT_RATIO, DEFAULT_SPLIT_RATIO];
+    }
+    return [SPLIT_MIN_WIDTH / width, 1 - SPLIT_MIN_WIDTH / width];
+  }
+
+  clampSplitRatio(ratio) {
+    const [min, max] = this.splitLimits();
+    return Math.min(Math.max(ratio, min), max);
+  }
+
+  /** The left pane's share the tab shows: the one chosen (or half) within the limits of the window now. */
+  shownSplitRatio(key) {
+    return this.clampSplitRatio(this.view(key).ratio ?? DEFAULT_SPLIT_RATIO);
+  }
+
+  /** A share the user chose for the tab, or null for half; saved with its view state. */
+  setSplitRatio(key, ratio) {
+    this.storeView(key, { ratio });
+    this.showSplit();
+  }
+
+  /**
+   * Shows the active tab's split: where the divider is, or only the active pane where two do
+   * not fit (the narrow layout, a small window).
+   */
+  showSplit() {
+    const key = this.activeKey();
+    if (!key || !this.isSplit(key) || this.content.clientWidth === 0) {
+      return;
+    }
+    this.content.classList.toggle('compact', this.narrowLayout.matches || this.splitWidth() < 2 * SPLIT_MIN_WIDTH);
+    const [min, max] = this.splitLimits();
+    const ratio = this.shownSplitRatio(key);
+    const percent = (share) => String(Math.round(share * 100));
+    this.content.style.setProperty('--split-ratio', String(ratio));
+    this.divider.setAttribute('aria-valuemin', percent(min));
+    this.divider.setAttribute('aria-valuemax', percent(max));
+    this.divider.setAttribute('aria-valuenow', percent(ratio));
+    this.divider.setAttribute('aria-valuetext', `Left document ${percent(ratio)}% of the width`);
+  }
+
+  /** The left pane grows as the divider moves right. */
+  onDividerDown(event) {
+    const key = this.activeKey();
+    this.startDrag(event, this.divider, this.shownSplitRatio(key), (ratio, dx) => this.setSplitRatio(key, this.clampSplitRatio(ratio + dx / this.splitWidth())));
+  }
+
+  /** Left and Right move the divider a step, Home and End to the smallest and largest left pane. */
+  onDividerKey(event) {
+    const key = this.activeKey();
+    const [min, max] = this.splitLimits();
+    const ratio = this.shownSplitRatio(key);
+    const step = PANE_KEY_STEP / this.splitWidth();
+    const ratios = { ArrowLeft: ratio - step, ArrowRight: ratio + step, Home: min, End: max };
+    this.onResizeKey(event, ratios, (value) => this.setSplitRatio(key, this.clampSplitRatio(value)));
   }
 
   // Tabs and windows
@@ -1254,8 +1685,9 @@ class App {
     }
   }
 
-  openMenu(key, x, y) {
-    this.menu = { key, x, y };
+  /** The tab's menu, or with `document` that document's menu in the strip. */
+  openMenu(key, x, y, document = null) {
+    this.menu = { key, x, y, document };
     this.renderMenu();
     this.menuElement.querySelector('button')?.focus();
   }
@@ -1332,45 +1764,55 @@ class App {
 
   // Items
 
-  focus(key, id) {
-    if (this.view(key).focus !== id) {
-      this.updateView(key, { focus: id });
+  focus(pane, id) {
+    if (this.paneView(pane).focus !== id) {
+      this.updatePane(pane, { focus: id });
     }
   }
 
-  moveFocus(key, step) {
-    const current = this.current(key);
+  moveFocus(pane, step) {
+    const current = this.current(pane);
     if (!current || current.rows.length === 0) {
       return;
     }
     const index = current.rows.findIndex((row) => row.id === current.focus?.id);
     const next = step === Infinity ? current.rows.length - 1 : step === -Infinity ? 0 : Math.min(Math.max(index + step, 0), current.rows.length - 1);
-    this.focus(key, current.rows[next].id);
-    this.listView(key).reveal(current.rows[next].id);
+    this.focus(pane, current.rows[next].id);
+    this.listView(pane).reveal(current.rows[next].id);
   }
 
-  cycleDocuments(key, step) {
-    const current = this.current(key);
-    if (!current || current.documents.length < 2) {
+  /** [ and ]: the pane's previous or next document; while split, the other pane's is left out. */
+  cycleDocuments(pane, step) {
+    const current = this.current(pane);
+    const key = paneTab(pane);
+    const beside = this.isSplit(key) ? this.current(this.otherPane(pane)).document.id : null;
+    const documents = (current?.documents ?? []).filter((document) => document.id !== beside);
+    if (documents.length < 2) {
       return;
     }
-    const index = current.documents.findIndex((document) => document.id === current.document.id);
-    const next = current.documents[(index + step + current.documents.length) % current.documents.length];
-    this.showDocument(key, next.id);
+    const index = documents.findIndex((document) => document.id === current.document.id);
+    const next = documents[(index + step + documents.length) % documents.length];
+    this.showDocument(pane, next.id);
   }
 
   /**
-   * Another document of the tab: the focus and selection of the document left are kept for
-   * it, and those kept for the one shown come back.
+   * Another document in a pane: the focus and selection of the document left are kept for
+   * it, and those kept for the one shown come back. A document the other pane shows is not
+   * shown twice: that pane becomes active instead.
    */
-  showDocument(key, id) {
+  showDocument(pane, id) {
+    const key = paneTab(pane);
+    if (this.isSplit(key) && this.current(this.otherPane(pane)).document.id === id) {
+      this.updateView(key, { activePane: paneSide(this.otherPane(pane)) });
+      return;
+    }
     // U acts on the document shown from now on.
     this.lastClosed = null;
-    const view = this.view(key);
-    const left = this.current(key)?.document.id;
-    const kept = left ? { ...view.kept, [left]: { focus: view.focus, selected: view.selected } } : view.kept;
+    const view = this.paneView(pane);
+    const leaving = this.current(pane)?.document.id;
+    const kept = leaving ? { ...view.kept, [leaving]: { focus: view.focus, selected: view.selected } } : view.kept;
     const back = kept[id] ?? { focus: null, selected: [] };
-    this.updateView(key, { document: id, focus: back.focus, selected: back.selected, kept });
+    this.updatePane(pane, { document: id, focus: back.focus, selected: back.selected, kept });
   }
 
   focusFilter() {
@@ -1380,65 +1822,70 @@ class App {
 
   /** Enter or Esc in the filter: the keyboard goes back to the items, the filter stays. */
   leaveFilter() {
-    const key = this.activeKey();
-    if (this.mode(key) === 'diagram') {
-      this.diagramView(key).restoreKeyboard();
+    this.focusPane(this.activePane(this.activeKey()));
+  }
+
+  /** The keyboard goes to a pane's items: the focused item of its diagram, or its list. */
+  focusPane(pane) {
+    if (this.mode(pane) === 'diagram') {
+      this.diagramView(pane).restoreKeyboard();
     } else {
-      this.listView(key).element.focus();
+      this.listView(pane).element.focus();
     }
   }
 
   /** What an action acts on: the selected items shown, else the focused one (in the diagram, only one the user picked). */
-  targets(key) {
-    const current = this.current(key);
+  targets(pane) {
+    const current = this.current(pane);
     if (!current) {
       return [];
     }
     if (current.selected.length > 0) {
       return current.selected;
     }
-    const focus = this.mode(key) === 'diagram' ? this.diagramFocus(key) : current.focus;
+    const focus = this.mode(pane) === 'diagram' ? this.diagramFocus(pane) : current.focus;
     return focus ? [focus] : [];
   }
 
   /** Space, or a click with ⌘/Ctrl: the item joins or leaves the selection and takes the focus. */
-  toggleSelection(key, id) {
-    const selected = this.view(key).selected;
-    this.updateView(key, { focus: id, selected: selected.includes(id) ? selected.filter((other) => other !== id) : [...selected, id] });
+  toggleSelection(pane, id) {
+    const selected = this.paneView(pane).selected;
+    this.updatePane(pane, { focus: id, selected: selected.includes(id) ? selected.filter((other) => other !== id) : [...selected, id] });
   }
 
   /** Shift+A: every item shown is selected, as in the terminal list. */
-  selectAll(key) {
-    const rows = this.current(key)?.rows ?? [];
-    this.updateView(key, { selected: rows.map((row) => row.id) });
+  selectAll(pane) {
+    const rows = this.current(pane)?.rows ?? [];
+    this.updatePane(pane, { selected: rows.map((row) => row.id) });
   }
 
-  clearSelection(key) {
-    if (this.view(key).selected.length > 0) {
-      this.updateView(key, { selected: [] });
+  clearSelection(pane) {
+    if (this.paneView(pane).selected.length > 0) {
+      this.updatePane(pane, { selected: [] });
     }
   }
 
-  /** Removes items from the selection, for example once an action on them committed. */
-  deselect(key, ids) {
-    const selected = this.view(key).selected;
+  /** Removes items of a document from the selection of the pane showing it, for example once an action on them committed. */
+  deselect(key, documentId, ids) {
+    const pane = this.paneShowing(key, documentId);
+    const selected = pane ? this.paneView(pane).selected : [];
     if (selected.some((id) => ids.includes(id))) {
-      this.updateView(key, { selected: selected.filter((id) => !ids.includes(id)) });
+      this.updatePane(pane, { selected: selected.filter((id) => !ids.includes(id)) });
     }
   }
 
   /** The item picked in the diagram, if it is still shown. */
-  diagramFocus(key) {
-    return this.current(key)?.rows.find((row) => row.id === this.view(key).focus) ?? null;
+  diagramFocus(pane) {
+    return this.current(pane)?.rows.find((row) => row.id === this.paneView(pane).focus) ?? null;
   }
 
   /** J and K in the diagram follow the layout's order: boxes with their badges, then arrows in step order (lanes are left out). */
-  moveDiagramFocus(key, step) {
-    const order = this.diagramView(key).diagram?.order ?? [];
+  moveDiagramFocus(pane, step) {
+    const order = this.diagramView(pane).diagram?.order ?? [];
     if (order.length === 0) {
       return;
     }
-    const index = order.indexOf(this.view(key).focus);
+    const index = order.indexOf(this.paneView(pane).focus);
     let next;
     if (step === Infinity || step === -Infinity) {
       next = step > 0 ? order.length - 1 : 0;
@@ -1447,17 +1894,17 @@ class App {
     } else {
       next = Math.min(Math.max(index + step, 0), order.length - 1);
     }
-    this.focus(key, order[next]);
+    this.focus(pane, order[next]);
   }
 
-  clearDiagramFocus(key) {
-    this.focus(key, null);
-    this.diagramView(key).focusCanvas();
+  clearDiagramFocus(pane) {
+    this.focus(pane, null);
+    this.diagramView(pane).focusCanvas();
   }
 
-  async exportDiagram(key) {
-    const current = this.current(key);
-    const svg = current ? this.diagramView(key).exportSvg() : null;
+  async exportDiagram(pane) {
+    const current = this.current(pane);
+    const svg = current ? this.diagramView(pane).exportSvg() : null;
     if (!svg) {
       this.setMessage('The diagram is not ready to export yet.', 'error');
       return;
@@ -1486,8 +1933,8 @@ class App {
   }
 
   /** The targets of an action, or none with a hint when nothing is focused or selected. */
-  pickedTargets(key) {
-    const targets = this.targets(key);
+  pickedTargets(pane) {
+    const targets = this.targets(pane);
     if (targets.length === 0) {
       this.setMessage('Pick an item first: click it, or move to it with J and K.', 'error');
     }
@@ -1495,8 +1942,8 @@ class App {
   }
 
   /** The targets of Ask, Accept and Drop: dropped items take no part; with only dropped ones picked, none and why. */
-  sharedTargets(key) {
-    const targets = this.pickedTargets(key);
+  sharedTargets(pane) {
+    const targets = this.pickedTargets(pane);
     const active = targets.filter((row) => !row.dropped);
     if (targets.length > 0 && active.length === 0) {
       this.setMessage(DROPPED_NOTE, 'error');
@@ -1505,24 +1952,25 @@ class App {
   }
 
   /**
-   * Shares the focused or selected items with the CLI prompt box right away, where the user
-   * types the question. Text selected inside the focused item's text in the panel becomes its
-   * quote; every other item is quoted in full.
+   * Shares the focused or selected items of a pane with the CLI prompt box right away, where
+   * the user types the question. Text selected inside the focused item's text in the panel
+   * becomes its quote; every other item is quoted in full.
    */
-  async ask(key) {
+  async ask(pane) {
+    const key = paneTab(pane);
     if (!this.requireLive(key)) {
       return;
     }
     if (this.asking.has(key)) {
       return;
     }
-    const targets = this.sharedTargets(key);
+    const targets = this.sharedTargets(pane);
     if (targets.length === 0) {
       return;
     }
-    const current = this.current(key);
-    const focus = this.mode(key) === 'diagram' ? this.diagramFocus(key) : current.focus;
-    const quoted = focus ? this.detailPanel(key).selectedText(focus.id) : '';
+    const current = this.current(pane);
+    const focus = this.mode(pane) === 'diagram' ? this.diagramFocus(pane) : current.focus;
+    const quoted = focus ? this.detailPanel(pane).selectedText(focus.id) : '';
     const items = targets.map((row) => ({ number: row.number, title: row.title, quote: row.id === focus?.id && quoted.trim() ? quoted : row.details }));
     const release = () => this.asking.delete(key);
     this.asking.add(key);
@@ -1545,36 +1993,37 @@ class App {
     }
   }
 
-  hide(key) {
-    const targets = this.pickedTargets(key);
+  hide(pane) {
+    const targets = this.pickedTargets(pane);
     if (targets.length === 0) {
       return;
     }
     const ids = targets.map((row) => row.id);
-    const view = this.view(key);
-    this.updateView(key, { hidden: [...view.hidden, ...ids], selected: view.selected.filter((id) => !ids.includes(id)) });
+    const view = this.paneView(pane);
+    this.updatePane(pane, { hidden: [...view.hidden, ...ids], selected: view.selected.filter((id) => !ids.includes(id)) });
     this.setMessage(`Hid ${described(targets)} in this tab. Shift+H shows hidden items.`);
   }
 
-  drop(key) {
-    const targets = this.isLive(key) ? this.sharedTargets(key) : [];
-    return this.applyAction(key, 'archive', targets, {
+  drop(pane) {
+    const targets = this.isLive(paneTab(pane)) ? this.sharedTargets(pane) : [];
+    return this.applyAction(pane, 'archive', targets, {
       sending: 'Dropping…',
       done: `Dropped ${described(targets)}. U undoes.`,
     });
   }
 
-  accept(key) {
-    const targets = this.isLive(key) ? this.sharedTargets(key) : [];
-    return this.applyAction(key, 'accept', targets, {
+  accept(pane) {
+    const targets = this.isLive(paneTab(pane)) ? this.sharedTargets(pane) : [];
+    return this.applyAction(pane, 'accept', targets, {
       sending: 'Accepting…',
       done: `Accepted ${described(targets)}. ${ACCEPT_NOTE}`,
     });
   }
 
   /** One `action` for all targets at the document's revision; once it committed, they leave the selection. */
-  async applyAction(key, action, targets, { sending, done }) {
-    const current = this.current(key);
+  async applyAction(pane, action, targets, { sending, done }) {
+    const key = paneTab(pane);
+    const current = this.current(pane);
     if (!this.requireLive(key) || !current || targets.length === 0) {
       return;
     }
@@ -1587,7 +2036,7 @@ class App {
         expected_revision: current.document.revision,
         action: { action, ids },
       },
-      { sending, done, onSuccess: () => this.deselect(key, ids) },
+      { sending, done, onSuccess: () => this.deselect(key, current.document.id, ids) },
     );
   }
 
@@ -1613,7 +2062,7 @@ class App {
     );
   }
 
-  /** From Closed (N): reopens the document for everyone and shows it. */
+  /** From Closed (N): reopens the document for everyone and shows it in the active pane. */
   async reopenDocument(key, document) {
     if (!this.requireLive(key)) {
       return;
@@ -1621,7 +2070,7 @@ class App {
     await this.send(
       key,
       { type: 'action', document_id: document.id, expected_revision: document.revision, action: { action: 'reopen' } },
-      { sending: 'Reopening…', done: `Reopened “${document.title}”.`, onSuccess: () => this.showDocument(key, document.id) },
+      { sending: 'Reopening…', done: `Reopened “${document.title}”.`, onSuccess: () => this.showDocument(this.activePane(key), document.id) },
     );
   }
 
@@ -1635,10 +2084,12 @@ class App {
   }
 
   /**
-   * Reverts the latest undo record of the document, whatever made it (drop, accept, close, a
-   * tool); right after a close, that of the closed document, which reopens it.
+   * Reverts the latest undo record of the pane's document, whatever made it (drop, accept,
+   * close, a tool); right after a close, that of the closed document, which reopens it in the
+   * active pane.
    */
-  async undo(key) {
+  async undo(pane) {
+    const key = paneTab(pane);
     const errors = {
       not_found: 'Nothing to undo in this document.',
       // The store discards a record that can never apply, so the next undo reaches the one before.
@@ -1652,11 +2103,11 @@ class App {
       await this.send(
         key,
         { type: 'undo', document_id: closed.id, expected_revision: closed.revision },
-        { sending: 'Reopening…', done: `Reopened “${closed.title}”.`, errors, onSuccess: () => this.showDocument(key, closed.id) },
+        { sending: 'Reopening…', done: `Reopened “${closed.title}”.`, errors, onSuccess: () => this.showDocument(this.activePane(key), closed.id) },
       );
       return;
     }
-    const current = this.current(key);
+    const current = this.current(pane);
     if (!this.requireLive(key) || !current) {
       return;
     }
@@ -1731,13 +2182,22 @@ class App {
       this.cycleTabs(event.shiftKey ? -1 : 1);
       return;
     }
+    if (event.ctrlKey && event.code === PANE_SWITCH_CODE) {
+      const key = this.activeKey();
+      if (key) {
+        event.preventDefault();
+        this.switchPane(key);
+      }
+      return;
+    }
     const modifier = event.metaKey || event.ctrlKey;
     // ⌘/Ctrl+0: the diagram at 100%, as actual size elsewhere.
     if (modifier && event.key === '0') {
       const key = this.activeKey();
-      if (key && this.mode(key) === 'diagram') {
+      const pane = key ? this.activePane(key) : null;
+      if (pane && this.mode(pane) === 'diagram') {
         event.preventDefault();
-        this.diagramView(key).zoomActual();
+        this.diagramView(pane).zoomActual();
       }
       return;
     }
@@ -1770,34 +2230,37 @@ class App {
       event.preventDefault();
       return;
     }
-    const focus = () => this.current(key)?.focus;
+    // The keys act on the active pane; Shift+H and \ on the whole tab.
+    const pane = this.activePane(key);
+    const focus = () => this.current(pane)?.focus;
     const actions = {
-      j: () => this.moveFocus(key, 1),
-      ArrowDown: () => this.moveFocus(key, 1),
-      k: () => this.moveFocus(key, -1),
-      ArrowUp: () => this.moveFocus(key, -1),
-      Home: () => this.moveFocus(key, -Infinity),
-      End: () => this.moveFocus(key, Infinity),
-      ' ': () => focus() && this.toggleSelection(key, focus().id),
-      A: () => this.selectAll(key),
-      Escape: () => this.clearSelection(key),
-      Enter: () => this.ask(key),
-      a: () => this.accept(key),
-      h: () => this.hide(key),
+      j: () => this.moveFocus(pane, 1),
+      ArrowDown: () => this.moveFocus(pane, 1),
+      k: () => this.moveFocus(pane, -1),
+      ArrowUp: () => this.moveFocus(pane, -1),
+      Home: () => this.moveFocus(pane, -Infinity),
+      End: () => this.moveFocus(pane, Infinity),
+      ' ': () => focus() && this.toggleSelection(pane, focus().id),
+      A: () => this.selectAll(pane),
+      Escape: () => this.clearSelection(pane),
+      Enter: () => this.ask(pane),
+      a: () => this.accept(pane),
+      h: () => this.hide(pane),
       H: () => this.updateView(key, { hidden: [] }),
-      x: () => this.drop(key),
-      u: () => this.undo(key),
+      x: () => this.drop(pane),
+      u: () => this.undo(pane),
       '/': () => this.focusFilter(),
-      '[': () => this.cycleDocuments(key, -1),
-      ']': () => this.cycleDocuments(key, 1),
-      w: () => this.closeDocument(key, this.current(key)?.document),
-      v: () => this.switchMode(key),
+      '[': () => this.cycleDocuments(pane, -1),
+      ']': () => this.cycleDocuments(pane, 1),
+      w: () => this.closeDocument(key, this.current(pane)?.document),
+      v: () => this.switchMode(pane),
+      '\\': () => this.toggleSplit(key),
     };
     // Any other key stops a zoom on its way; zoom keys go on from where it was heading.
-    if (this.mode(key) === 'diagram' && !ZOOM_KEYS.has(event.key) && !MODIFIER_KEYS.has(event.key)) {
-      this.diagramView(key).stopAnimation();
+    if (this.mode(pane) === 'diagram' && !ZOOM_KEYS.has(event.key) && !MODIFIER_KEYS.has(event.key)) {
+      this.diagramView(pane).stopAnimation();
     }
-    const diagram = this.mode(key) === 'diagram' ? this.diagramKeys(key) : {};
+    const diagram = this.mode(pane) === 'diagram' ? this.diagramKeys(pane) : {};
     const action = event.key in diagram ? diagram[event.key] : actions[event.key];
     if (action) {
       event.preventDefault();
@@ -1805,16 +2268,16 @@ class App {
     }
   }
 
-  /** Keys of the diagram, over those of the list. */
-  diagramKeys(key) {
-    const diagram = this.diagramView(key);
-    const focused = () => this.diagramFocus(key);
+  /** Keys of a pane's diagram, over those of the list. */
+  diagramKeys(pane) {
+    const diagram = this.diagramView(pane);
+    const focused = () => this.diagramFocus(pane);
     const pan = (dx, dy) => () => diagram.panStep(dx, dy);
     return {
-      j: () => this.moveDiagramFocus(key, 1),
-      k: () => this.moveDiagramFocus(key, -1),
-      Home: () => this.moveDiagramFocus(key, -Infinity),
-      End: () => this.moveDiagramFocus(key, Infinity),
+      j: () => this.moveDiagramFocus(pane, 1),
+      k: () => this.moveDiagramFocus(pane, -1),
+      Home: () => this.moveDiagramFocus(pane, -Infinity),
+      End: () => this.moveDiagramFocus(pane, Infinity),
       ArrowLeft: pan(-1, 0),
       ArrowRight: pan(1, 0),
       ArrowUp: pan(0, -1),
@@ -1825,10 +2288,10 @@ class App {
       0: () => diagram.fit(),
       // 1 to 3: titles, summary, full text.
       ...Object.fromEntries(LEVELS.map((level, index) => [index + 1, () => diagram.setLevel(level)])),
-      ' ': () => focused() && this.toggleSelection(key, focused().id),
+      ' ': () => focused() && this.toggleSelection(pane, focused().id),
       // A selection clears first, then the focus.
-      Escape: () => (this.view(key).selected.length > 0 ? this.clearSelection(key) : this.clearDiagramFocus(key)),
-      s: () => this.exportDiagram(key),
+      Escape: () => (this.paneView(pane).selected.length > 0 ? this.clearSelection(pane) : this.clearDiagramFocus(pane)),
+      s: () => this.exportDiagram(pane),
     };
   }
 
@@ -1844,6 +2307,20 @@ class App {
       items[(index + step + items.length) % items.length]?.focus();
     }
   }
+}
+
+/** The ID of a tab's pane on `side`. */
+function paneId(key, side) {
+  return side === 'right' ? `${key}${RIGHT_PANE_SUFFIX}` : key;
+}
+
+/** The tab key of a pane ID. */
+function paneTab(pane) {
+  return paneSide(pane) === 'right' ? pane.slice(0, -RIGHT_PANE_SUFFIX.length) : pane;
+}
+
+function paneSide(pane) {
+  return pane.endsWith(RIGHT_PANE_SUFFIX) ? 'right' : 'left';
 }
 
 function keyHints(hints) {
