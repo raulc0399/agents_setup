@@ -30,6 +30,8 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
     windowId,
     sent: [],
     views: {},
+    /** Every pane width this window saved, in order. */
+    paneWidths: [],
     shown: [],
     exports: [],
     /** The detail level of every layout asked for (null: the sizes alone), how many are on
@@ -83,6 +85,11 @@ export function fakeBackend({ state, contents }, windowId = 'w1') {
     },
     async setView(key, view) {
       this.views[key] = view;
+    },
+    /** Kept in the arrangement as the host does, without telling the windows. */
+    async setPaneWidth(width) {
+      this.paneWidths.push(width);
+      current.arrangement.windows.find((window) => window.id === windowId).pane_width = width;
     },
     async diagram(document, visible, detail) {
       this.layouts.push(detail);

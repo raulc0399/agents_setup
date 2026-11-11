@@ -103,6 +103,12 @@ fn set_view(host: State<'_, Host>, key: String, view: serde_json::Value) {
     host.set_view(&key, view);
 }
 
+/// The calling window's side pane width; `null` for the default.
+#[tauri::command]
+fn set_pane_width(host: State<'_, Host>, window: WebviewWindow, width: Option<u32>) {
+    host.set_pane_width(window.label(), width);
+}
+
 /// Sizes the document as the tab lists it at every detail and lays it out at the detail of
 /// its zoom, if one is given, on a blocking thread: a large diagram neither holds up the main
 /// thread nor the async runtime.
@@ -268,6 +274,7 @@ fn main() {
             move_tab,
             show_window,
             set_view,
+            set_pane_width,
             diagram_layout,
             export_svg
         ])

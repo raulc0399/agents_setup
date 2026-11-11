@@ -1,5 +1,6 @@
 //! Windows, their tabs (one per conversation), which window each project opens in, the
-//! closed tabs that can be reopened, each tab's view state and which conversations ended.
+//! closed tabs that can be reopened, each tab's view state, each window's side pane width and
+//! which conversations ended.
 //! Persisted as JSON in the app's data directory and restored at start; content never is.
 use crate::files::write_atomic;
 use crate::registry::SessionKey;
@@ -56,6 +57,10 @@ pub struct Window {
     pub id: WindowId,
     pub tabs: Vec<SessionKey>,
     pub active: Option<SessionKey>,
+    /// The width of the side pane in CSS pixels, owned by the UI (it applies the limits);
+    /// none shows its default. Missing in files saved before it was kept.
+    #[serde(default)]
+    pub pane_width: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -240,6 +245,12 @@ impl Arrangement {
         }
     }
 
+    pub fn set_pane_width(&mut self, id: &str, width: Option<u32>) {
+        if let Some(window) = self.window_mut(id) {
+            window.pane_width = width;
+        }
+    }
+
     pub fn set_view(&mut self, key: &str, view: serde_json::Value) {
         if self.labels.contains_key(key) {
             self.views.insert(key.to_owned(), view);
@@ -297,6 +308,7 @@ impl Arrangement {
             id: id.clone(),
             tabs: Vec::new(),
             active: None,
+            pane_width: None,
         });
         id
     }

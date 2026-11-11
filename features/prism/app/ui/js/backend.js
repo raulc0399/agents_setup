@@ -9,6 +9,8 @@
  *   send(key, command)            -> command ID; rejects with a message
  *   activateTab(key), closeTab(key), reopenTab(key), moveTab(key, target | null),
  *   showWindow(windowId), setView(key, view)
+ *   setPaneWidth(width | null)    this window's side pane width in CSS pixels, null for the
+ *                                 default; the arrangement keeps it as its `pane_width`
  *   diagram(document, visibleIds, detail | null)
  *                                 -> {sizes: {<detail>: {width, height}}, steps: {<link
  *                                 ID>: step}, layout: {detail, svg, order} | null}: from
@@ -35,6 +37,7 @@ export function tauriBackend() {
     moveTab: (key, target) => invoke('move_tab', { key, target }),
     showWindow: (window) => invoke('show_window', { window }),
     setView: (key, view) => invoke('set_view', { key, view }),
+    setPaneWidth: (width) => invoke('set_pane_width', { width }),
     diagram: (document, visible, detail) => invoke('diagram_layout', { document, visible, detail }),
     exportSvg: (title, svg) => invoke('export_svg', { title, svg }),
     onEvent: (callback) => event.listen(HOST_EVENT, (message) => callback(message.payload)),

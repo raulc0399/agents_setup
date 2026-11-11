@@ -3,8 +3,8 @@
 // `?scenario=view-checks` and `?scenario=action-checks` run the behaviour checks of the list,
 // the diagram, the view per document with its side pane, and the item actions,
 // `?scenario=status-checks` those of the connection status, `?scenario=document-checks`
-// closing and reopening documents, `?scenario=restart-checks` tabs restored after a restart;
-// each writes PASS or the failures into #result.
+// closing and reopening documents, `?scenario=restart-checks` tabs restored after a restart,
+// `?scenario=pane-checks` resizing the side pane; each writes PASS or the failures into #result.
 import { start } from '../ui/js/app.js';
 import { DROPPED_NOTE } from '../ui/js/list.js';
 import { questionBlock } from '../ui/js/panel.js';
@@ -17,7 +17,7 @@ const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 const FRAME_MS = 16;
 window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), FRAME_MS);
 window.cancelAnimationFrame = (frame) => clearTimeout(frame);
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks, 'pane-checks': paneChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 const key = (name, options = {}) =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...options }));
@@ -1898,7 +1898,7 @@ async function documentChecks(backend) {
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
 
-async function narrowChecks() {
+async function narrowChecks(backend, app) {
   const failures = [];
   const expect = (condition, message) => {
     if (!condition) {
@@ -1936,6 +1936,143 @@ async function narrowChecks() {
   const pane = document.querySelector('.side-pane').getBoundingClientRect();
   expect(pane.top >= list.bottom - 1 && list.height > 150 && pane.width === list.width, 'in the list too');
   expect(page.scrollHeight <= window.innerHeight && page.scrollWidth <= window.innerWidth, 'and the page does not scroll');
+  // The width saved for the wide layout is ignored here, not lost.
+  const separator = document.querySelector('.pane-separator');
+  expect(getComputedStyle(separator).display === 'none', 'the pane edge cannot be dragged');
+  expect(app.paneWidth === 480 && backend.paneWidths.length === 0, `the saved width is kept: ${app.paneWidth}, saved ${backend.paneWidths}`);
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/** Resizing the side pane by its left edge: pointer, keys, reset, limits, saving, and the diagram's camera meanwhile. */
+async function paneChecks(backend, app) {
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const separator = () => document.querySelector('.pane-separator');
+  const paneWidth = () => document.querySelector('.side-pane').getBoundingClientRect().width;
+  const value = (name) => Number(separator().getAttribute(`aria-value${name}`));
+  const view = () => app.diagramViews.get(KEYS.LIVE);
+  const viewBox = () => document.querySelector('.diagram-svg').getAttribute('viewBox').split(' ').map(Number);
+  const canvas = () => document.querySelector('.diagram-canvas');
+  const close = (a, b) => Math.abs(a - b) < 0.5;
+  const settled = () => waitFor(() => backend.pending === 0 && !view().animating());
+  // Resize observers do not run under the virtual time budget: this calls what they call.
+  const resized = async () => {
+    app.showPaneWidth();
+    view().onResize();
+    await settle();
+  };
+  const saved = () => new Promise((resolve) => setTimeout(() => resolve(backend.paneWidths.at(-1)), 400));
+  const pointer = (type, clientX) =>
+    separator().dispatchEvent(new PointerEvent(type, { pointerId: 5, button: 0, bubbles: true, clientX, clientY: 300 }));
+  // Drags the edge by `dx` in steps, as a pointer does; checks the drag state on the way.
+  const drag = (dx) => {
+    const start = separator().getBoundingClientRect().left;
+    pointer('pointerdown', start);
+    for (let step = 1; step <= 4; step += 1) {
+      pointer('pointermove', start + (dx * step) / 4);
+    }
+    const resizing = document.querySelector('.body').classList.contains('resizing');
+    pointer('pointerup', start + dx);
+    return resizing;
+  };
+  const press = (name) => separator().dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+  const bodyWidth = document.querySelector('.body').clientWidth;
+  const max = bodyWidth - 400;
+  expect(await waitFor(() => document.querySelector('.diagram-svg [data-id]')), 'the diagram is shown');
+  await settled();
+
+  // The width saved for this window is restored; the edge says its limits.
+  expect(paneWidth() === 400, `the saved width is restored, got ${paneWidth()}`);
+  expect(separator().getAttribute('role') === 'separator' && separator().getAttribute('aria-orientation') === 'vertical' && separator().tabIndex === 0, 'a focusable vertical separator');
+  expect(value('now') === 400 && value('min') === 280 && value('max') === max, `its values: ${value('now')} in ${value('min')}..${value('max')}`);
+
+  // Dragging left widens the pane; a fitted diagram stays fitted, the list reflows.
+  expect(view().camera === null, 'the diagram starts fitted');
+  expect(drag(-100), 'while dragging, the body is resizing');
+  await resized();
+  expect(!document.querySelector('.body.resizing'), 'the drag ended');
+  expect(paneWidth() === 500 && value('now') === 500, `the pane widened to 500, got ${paneWidth()}`);
+  const fit = view().fitCamera();
+  expect(view().camera === null && close(viewBox()[0], fit.x) && close(viewBox()[1], fit.y), `still fitted: ${viewBox()} vs ${JSON.stringify(fit)}`);
+  const frame = canvas().getBoundingClientRect();
+  expect(close(frame.right, document.querySelector('.side-pane').getBoundingClientRect().left), 'the canvas ends at the pane');
+  expect((await saved()) === 500 && backend.paneWidths.length === 1, `saved once after the drag: ${backend.paneWidths}`);
+
+  // Within the limits however far it goes.
+  drag(-2000);
+  await settle();
+  expect(paneWidth() === max, `at most ${max}, got ${paneWidth()}`);
+  drag(2000);
+  await settle();
+  expect(paneWidth() === 280, `at least 280, got ${paneWidth()}`);
+
+  // Keys on the edge: steps, Home and End; they neither pan nor zoom the diagram.
+  separator().focus();
+  press('ArrowLeft');
+  press('ArrowLeft');
+  await settle();
+  expect(paneWidth() === 312, `Left widens by 16 twice, got ${paneWidth()}`);
+  press('ArrowRight');
+  await settle();
+  expect(paneWidth() === 296 && view().camera === null, `Right narrows, without panning: ${paneWidth()}`);
+  press('End');
+  await settle();
+  expect(paneWidth() === max && value('now') === max, `End: the widest, got ${paneWidth()}`);
+  press('Home');
+  await settle();
+  expect(paneWidth() === 280, `Home: the narrowest, got ${paneWidth()}`);
+  expect((await saved()) === 280, `the keys' width is saved: ${backend.paneWidths.at(-1)}`);
+
+  // A double-click resets to the default, saved as none.
+  separator().dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  await settle();
+  expect(paneWidth() === 320, `reset to 320, got ${paneWidth()}`);
+  expect((await saved()) === null, `the reset is saved as the default: ${backend.paneWidths.at(-1)}`);
+
+  // Zoomed in, the diagram keeps the world point at its center while the pane changes.
+  key('+');
+  await settled();
+  const camera = viewBox();
+  const center = (box) => [box[0] + box[2] / 2, box[1] + box[3] / 2];
+  const scale = () => canvas().clientWidth / viewBox()[2];
+  const zoomed = scale();
+  expect(view().camera !== null && zoomed > view().fitScale(), `zoomed in: ${zoomed}`);
+  drag(-150);
+  await resized();
+  const moved = center(viewBox());
+  expect(close(moved[0], center(camera)[0]) && close(moved[1], center(camera)[1]), `the center stays: ${center(camera)} -> ${moved}`);
+  expect(Math.abs(scale() - zoomed) < 1e-6, `at the same zoom: ${zoomed} -> ${scale()}`);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const reported = backend.views[KEYS.LIVE]?.cameras?.[KEYS.RELEASE];
+  expect(reported && close(reported.x, viewBox()[0]), `the moved camera is saved: ${JSON.stringify(reported)}`);
+
+  // A state update from the host keeps this window's width.
+  drag(-30);
+  backend.change(() => {});
+  await settle();
+  expect(paneWidth() === 500, `a state update keeps the width, got ${paneWidth()}`);
+
+  // A smaller window limits the width again; a larger one gives back the width chosen.
+  const root = document.getElementById('app');
+  root.style.width = '800px';
+  await resized();
+  expect(paneWidth() === 400 && value('max') === 400, `limited to the room left: ${paneWidth()}, max ${value('max')}`);
+  root.style.width = '';
+  await resized();
+  expect(paneWidth() === 500 && value('max') === max, `the chosen width comes back: ${paneWidth()}`);
+
+  // In the list too: the content ends where the pane begins.
+  key('v');
+  await waitFor(() => document.querySelector('.cards'));
+  drag(80);
+  await settle();
+  const list = document.querySelector('.view').getBoundingClientRect();
+  expect(paneWidth() === 420 && close(list.right, document.querySelector('.side-pane').getBoundingClientRect().left), `the list reflows: ${list.right}`);
+
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
 

@@ -298,6 +298,9 @@ const DIAGRAM_VIEWS = {
   'diagram-checks': { focus: null, modes: { [RELEASE]: 'list' }, cameras: {} },
   'diagram-dropped': { focus: null, cameras: {} },
   'narrow-checks': { focus: releaseItem(4), cameras: {} },
+  'pane-checks': { focus: null, cameras: {} },
+  'diagram-pane-wide': { focus: releaseItem(4), cameras: {} },
+  'diagram-pane-narrow': { focus: releaseItem(4), cameras: {} },
 };
 export const CONTENTS_FOR_TESTS = CONTENTS;
 
@@ -314,7 +317,11 @@ const LIST_VIEWS = {
   // A document without arrows or groups: a list without a view switch.
   plain: { document: REVIEW },
   dropped: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
+  'pane-wide': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
+  'pane-narrow': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
 };
+/** The side pane width saved for window w1 per scenario; the others show the default. */
+const PANE_WIDTHS = { 'pane-checks': 400, 'narrow-checks': 480, 'pane-wide': 600, 'diagram-pane-wide': 600, 'pane-narrow': 280, 'diagram-pane-narrow': 280 };
 /** Scenarios whose live tab shows dropped content: document, element and relationship IDs. */
 const DROPPED_SCENARIOS = {
   dropped: [PLAN, ['a0000000-0000-4000-8000-000000000004'], []],
@@ -446,5 +453,7 @@ export function fixture(scenario) {
   if (ROUTE_SCENARIOS.includes(scenario)) {
     contents = routeContents();
   }
-  return { state: { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) }, contents };
+  const state = { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) };
+  state.arrangement.windows[0].pane_width = PANE_WIDTHS[scenario] ?? null;
+  return { state, contents };
 }

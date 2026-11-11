@@ -392,6 +392,12 @@ impl Host {
         self.change_quietly(|arrangement| arrangement.set_view(key, view));
     }
 
+    /// The side pane width of a window is presentation state like a view: quiet and saved
+    /// with a delay.
+    pub fn set_pane_width(&self, window: &str, width: Option<u32>) {
+        self.change_quietly(|arrangement| arrangement.set_pane_width(window, width));
+    }
+
     pub fn focus_window(&self, window: &str) {
         self.change_quietly(|arrangement| arrangement.focus(window));
     }

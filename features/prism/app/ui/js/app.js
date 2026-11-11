@@ -21,6 +21,18 @@ const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', sele
 /** What a document shows: its entry in `modes`, else the diagram when it has something to draw; V switches. */
 const VIEWS = ['list', 'diagram'];
 const VIEW_LABELS = { list: 'List', diagram: 'Diagram' };
+/**
+ * The side pane's width in CSS pixels, one per window, saved with its arrangement (none: the
+ * default): at least PANE_MIN_WIDTH, so its controls stay usable, at most what leaves the
+ * content CONTENT_MIN_WIDTH, which keeps the diagram's zoom controls on its canvas. The arrow
+ * keys on the pane's edge change it by PANE_KEY_STEP.
+ */
+const PANE_DEFAULT_WIDTH = 320;
+const PANE_MIN_WIDTH = 280;
+const CONTENT_MIN_WIDTH = 400;
+const PANE_KEY_STEP = 16;
+/** The narrow layout of styles.css: the pane goes below the content, without a width of its own. */
+const NARROW_LAYOUT = '(max-width: 760px)';
 
 const LINK_LABELS = { live: 'Live', disconnected: 'Disconnected', ended: 'Ended', waiting: 'Waiting for bridge' };
 const READ_ONLY_REASONS = {
@@ -132,6 +144,13 @@ class App {
     this.signatures = new Map();
     this.shownView = null;
     this.scrolls = new Map();
+    /** The pane width the user chose for this window, null for the default; read once from the arrangement. */
+    this.paneWidth = null;
+    this.paneWidthRestored = false;
+    /** While the pane's edge is dragged: `{id, x, width}` of the press. */
+    this.paneDrag = null;
+    this.paneSaveTimer = null;
+    this.narrowLayout = window.matchMedia(NARROW_LAYOUT);
 
     this.tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Conversations' });
     this.sessionsButton = h('button', {
@@ -172,7 +191,22 @@ class App {
     // The body: the tab's list or diagram (or why there is none), and its side pane.
     this.content = h('div', { class: 'content' });
     this.controls = h('div', { class: 'pane-controls' });
-    this.pane = h('aside', { class: 'side-pane', 'aria-label': 'View and item details', hidden: true }, this.controls);
+    // The pane's left edge: drag it, or use the arrow keys, Home and End; a double-click resets the width.
+    this.separator = h('div', {
+      class: 'pane-separator',
+      role: 'separator',
+      tabindex: '0',
+      'aria-orientation': 'vertical',
+      'aria-label': 'Side pane width',
+      title: 'Drag to resize the side pane; double-click resets it',
+      onpointerdown: (event) => this.onSeparatorDown(event),
+      onpointermove: (event) => this.onSeparatorMove(event),
+      onpointerup: (event) => this.endPaneDrag(event),
+      onpointercancel: (event) => this.endPaneDrag(event),
+      ondblclick: () => this.setPaneWidth(null),
+      onkeydown: (event) => this.onSeparatorKey(event),
+    });
+    this.pane = h('aside', { class: 'side-pane', 'aria-label': 'View and item details', hidden: true }, this.separator, this.controls);
     this.body = h('div', { class: 'body' }, this.content, this.pane);
     this.popover = h('div', { class: 'popover', role: 'dialog', 'aria-label': 'Sessions', hidden: true });
     this.main = h('main', { class: 'main' }, this.header, this.body, this.popover);
@@ -183,6 +217,8 @@ class App {
     this.root.replaceChildren(this.tabstrip, this.main, this.statusbar, this.menuElement);
     this.keysSignature = null;
     new ResizeObserver(() => this.renderStatus()).observe(this.statusbar);
+    // A window resized: the pane's width is limited again.
+    new ResizeObserver(() => this.showPaneWidth()).observe(this.body);
   }
 
   async start() {
@@ -196,8 +232,20 @@ class App {
 
   async refreshState() {
     this.state = await this.backend.state();
+    this.restorePaneWidth();
     this.forgetViews();
     this.render();
+  }
+
+  /** At start, the pane width saved for this window; later this window's own is the latest. */
+  restorePaneWidth() {
+    const window = this.myWindow();
+    if (this.paneWidthRestored || !window) {
+      return;
+    }
+    this.paneWidthRestored = true;
+    this.paneWidth = window.pane_width ?? null;
+    this.showPaneWidth();
   }
 
   /** The list, diagram and detail panel of a tab that left this window are rebuilt if it comes back. */
@@ -1089,6 +1137,90 @@ class App {
   setMessage(text, tone = '') {
     this.message = { text, tone };
     this.renderStatus();
+  }
+
+  // Side pane width
+
+  /** The narrowest and widest pane the window has room for now. */
+  paneLimits() {
+    return [PANE_MIN_WIDTH, Math.max(PANE_MIN_WIDTH, this.body.clientWidth - CONTENT_MIN_WIDTH)];
+  }
+
+  clampPaneWidth(width) {
+    const [min, max] = this.paneLimits();
+    return Math.min(Math.max(width, min), max);
+  }
+
+  /** The width the pane shows: the one chosen (or the default) within the limits of the window now. */
+  shownPaneWidth() {
+    return this.clampPaneWidth(this.paneWidth ?? PANE_DEFAULT_WIDTH);
+  }
+
+  /** Shows the pane width; the narrow layout ignores it and keeps the one chosen for later. */
+  showPaneWidth() {
+    if (this.narrowLayout.matches || this.body.clientWidth === 0) {
+      return;
+    }
+    const [min, max] = this.paneLimits();
+    const width = this.shownPaneWidth();
+    this.body.style.setProperty('--pane-width', `${width}px`);
+    this.separator.setAttribute('aria-valuemin', String(min));
+    this.separator.setAttribute('aria-valuemax', String(max));
+    this.separator.setAttribute('aria-valuenow', String(width));
+  }
+
+  /** A width the user chose, or null for the default; saved shortly after the last change. */
+  setPaneWidth(width) {
+    this.paneWidth = width;
+    this.showPaneWidth();
+    clearTimeout(this.paneSaveTimer);
+    this.paneSaveTimer = setTimeout(() => this.backend.setPaneWidth(this.paneWidth), VIEW_SAVE_DELAY_MS);
+  }
+
+  onSeparatorDown(event) {
+    if (event.button !== 0) {
+      return;
+    }
+    this.paneDrag = { id: event.pointerId, x: event.clientX, width: this.shownPaneWidth() };
+    // No text selection and the resize cursor everywhere while dragging.
+    this.body.classList.add('resizing');
+    try {
+      this.separator.setPointerCapture(event.pointerId);
+    } catch {
+      // The pointer is already gone; the drag ends with its pointerup anyway.
+    }
+  }
+
+  /** The pane grows as its left edge moves left. */
+  onSeparatorMove(event) {
+    if (this.paneDrag?.id !== event.pointerId) {
+      return;
+    }
+    this.setPaneWidth(this.clampPaneWidth(this.paneDrag.width + this.paneDrag.x - event.clientX));
+  }
+
+  endPaneDrag(event) {
+    if (this.paneDrag?.id !== event.pointerId) {
+      return;
+    }
+    this.paneDrag = null;
+    this.body.classList.remove('resizing');
+  }
+
+  /** Left and Right move the edge a step, Home and End to the narrowest and widest pane. */
+  onSeparatorKey(event) {
+    if (event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+    const [min, max] = this.paneLimits();
+    const width = this.shownPaneWidth();
+    const widths = { ArrowLeft: width + PANE_KEY_STEP, ArrowRight: width - PANE_KEY_STEP, Home: min, End: max };
+    if (!(event.key in widths)) {
+      return;
+    }
+    // Handled here: the document's keys do not move the focus or pan the diagram.
+    event.preventDefault();
+    this.setPaneWidth(this.clampPaneWidth(widths[event.key]));
   }
 
   // Tabs and windows

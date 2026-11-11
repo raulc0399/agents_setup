@@ -207,6 +207,50 @@ fn an_arrangement_saved_without_ended_marks_still_loads() {
 }
 
 #[test]
+fn a_pane_width_belongs_to_its_window_and_is_saved_with_it() {
+    let data = TempDir::new().unwrap();
+    let path = Arrangement::path(data.path());
+    let mut arrangement = arrangement();
+    arrangement.set_pane_width("w9", Some(400));
+    assert_eq!(arrangement.windows[0].pane_width, None, "no such window");
+
+    arrangement.set_pane_width("w1", Some(400));
+    arrangement.place("a1", label("/p/a"));
+    arrangement.move_tab("a1", None);
+    assert_eq!(arrangement.windows[0].pane_width, Some(400));
+    assert_eq!(
+        arrangement.windows[1].pane_width, None,
+        "a new window shows the default"
+    );
+    arrangement.save(&path).unwrap();
+    assert_eq!(Arrangement::load(&path), (arrangement.clone(), None));
+
+    arrangement.set_pane_width("w1", None);
+    assert_eq!(
+        arrangement.windows[0].pane_width, None,
+        "reset to the default"
+    );
+}
+
+#[test]
+fn an_arrangement_saved_without_pane_widths_still_loads() {
+    let data = TempDir::new().unwrap();
+    let path = Arrangement::path(data.path());
+    let mut arrangement = arrangement();
+    arrangement.place("a1", label("/p/a"));
+    let mut older = serde_json::to_value(&arrangement).unwrap();
+    for window in older["windows"].as_array_mut().unwrap() {
+        window
+            .as_object_mut()
+            .unwrap()
+            .remove("pane_width")
+            .unwrap();
+    }
+    std::fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+    assert_eq!(Arrangement::load(&path), (arrangement, None));
+}
+
+#[test]
 fn saves_and_restores_and_starts_empty_from_a_broken_file() {
     let data = TempDir::new().unwrap();
     let path = Arrangement::path(data.path());

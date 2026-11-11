@@ -116,6 +116,8 @@ export class DiagramView {
     this.anchoring = false;
     // The camera on the layout shown; null fits it.
     this.camera = null;
+    // The canvas size last seen while shown, so a resize keeps the view's center in place.
+    this.shownSize = null;
     // A zoom on its way: {target, frame}.
     this.animation = null;
     // What the zoom shows now: its scale, the text band, the pills' and badges' scale.
@@ -167,8 +169,7 @@ export class DiagramView {
       this.gesture = null;
     });
     this.element = h('div', { class: 'diagram-frame' }, this.canvas, this.message, this.controls);
-    // A fitted diagram fits the new size.
-    this.resizes = new ResizeObserver(() => this.applyCamera());
+    this.resizes = new ResizeObserver(() => this.onResize());
     this.resizes.observe(this.canvas);
   }
 
@@ -465,6 +466,26 @@ export class DiagramView {
   /** The zoom range: down to ZOOM_MIN, or to the fit when the diagram fits only below it. */
   zoomLimits() {
     return [Math.min(ZOOM_MIN, this.fitScale()), ZOOM_MAX];
+  }
+
+  /**
+   * The canvas changed size (the window, the side pane): a fitted diagram fits the new size; a
+   * camera keeps the world point at the canvas center in place, at the same zoom. A hidden
+   * canvas (another tab shown) has no size and changes nothing.
+   */
+  onResize() {
+    const size = this.size();
+    if (size.width === 0 || size.height === 0) {
+      return;
+    }
+    const before = this.shownSize;
+    this.shownSize = size;
+    if (this.camera && this.svg && before && (before.width !== size.width || before.height !== size.height)) {
+      const { x, y, scale } = this.camera;
+      this.camera = { x: x + (before.width - size.width) / 2 / scale, y: y + (before.height - size.height) / 2 / scale, scale };
+      this.report();
+    }
+    this.applyCamera();
   }
 
   applyCamera() {

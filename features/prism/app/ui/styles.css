@@ -934,15 +934,55 @@ button {
   text-align: center;
 }
 
-/* Side pane: the view's controls on top, the focused item below. */
+/* Side pane: the view's controls on top, the focused item below. Its width is set by
+   app.js (one per window), its left edge resizes it. */
 
 .side-pane {
+  position: relative;
   display: flex;
   flex-direction: column;
-  width: 320px;
+  width: var(--pane-width);
   min-height: 0;
   border-left: 1px solid var(--border);
   background: var(--surface);
+}
+
+/* Over the pane's border: a band wider than the line answers the pointer, the line lights up. */
+.pane-separator {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.pane-separator::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 3px;
+  background: transparent;
+}
+
+.pane-separator:hover::after,
+.body.resizing .pane-separator::after {
+  background: var(--border-strong);
+}
+
+.pane-separator:focus-visible::after {
+  background: var(--focus);
+}
+
+.body.resizing,
+.body.resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .pane-controls {
@@ -1394,6 +1434,11 @@ button {
     height: 40vh;
     border-top: 1px solid var(--border);
     border-left: none;
+  }
+
+  /* The width chosen for the wide layout stays saved, unused here. */
+  .pane-separator {
+    display: none;
   }
 }
 
