@@ -11,6 +11,10 @@ import { fakeBackend } from './fake-backend.js';
 import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, VERSION_PROBLEM, fixture } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
+// Under a virtual time budget headless Chromium hardly runs animation frames: timers stand in.
+const FRAME_MS = 16;
+window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), FRAME_MS);
+window.cancelAnimationFrame = (frame) => clearTimeout(frame);
 const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 const key = (name, options = {}) =>
@@ -252,23 +256,21 @@ async function diagramChecks(backend, app) {
   const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   const canvas = () => root.querySelector('.diagram-canvas');
   const close = (a, b) => Math.abs(a - b) < 0.5;
-  // The detail level and zoom the controls show, and pixels per world unit on screen.
+  // The zoom and the detail level the controls show, and pixels per world unit on screen.
   const label = () => root.querySelector('.diagram-controls .zoom').textContent;
-  const level = () => label().replace(/ \d+%$/, '');
+  const level = () => root.querySelector('.diagram-controls .segmented [aria-pressed="true"]')?.textContent;
+  const levelButton = (name) => [...root.querySelectorAll('.diagram-controls .segmented button')].find((button) => button.textContent === name);
   const scale = () => canvas().clientWidth / viewBox()[2];
   const near = (a, b) => Math.abs(a - b) < 1e-6;
-  // A level change waits for its layout: until no layout is on its way.
-  const settled = () => waitFor(() => backend.pending === 0);
-  const zoomKey = async (name) => {
-    key(name);
+  const view = () => app.diagramViews.get(KEYS.LIVE);
+  const outline = (number) => shape('box', item(number)).querySelector('.prism-shape').getBoundingClientRect();
+  // Until a zoom animation ended, and a level change got its layout.
+  const animated = () => waitFor(() => !view().animating());
+  const settled = () => waitFor(() => backend.pending === 0 && !view().animating());
+  const zoomKey = async (name, options = {}) => {
+    key(name, options);
     await settled();
   };
-  // Box texts on screen within 80% to 125% of their designed size.
-  const readable = () =>
-    [...svg().querySelectorAll('[data-kind="box"] text')].every((text) => {
-      const designed = Number(text.getAttribute('font-size'));
-      return designed * scale() >= designed * 0.8 - 1e-6 && designed * scale() <= designed * 1.25 + 1e-6;
-    });
   const textsInside = () =>
     [...svg().querySelectorAll('[data-kind="box"]')].filter((box) => {
       const outline = box.querySelector('.prism-shape').getBBox();
@@ -323,14 +325,10 @@ async function diagramChecks(backend, app) {
   const listed = backend.layouts.length;
   key('v');
   expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'V shows the diagram');
-  // Fit picks the most detailed level that fits the fit area (the canvas less 24 px around and
-  // the zoom controls) at 80% or more: on this canvas the full text does not, one line does.
-  const controlsHeight = root.querySelector('.diagram-controls').offsetHeight;
-  const fitsAt = (size) => Math.min((canvas().clientWidth - 48) / size.width, (canvas().clientHeight - 48 - controlsHeight) / size.height);
-  expect(level() === 'Summary' && scale() >= 0.8 && scale() <= 1, `it fits at the most detailed level that fits readably, got ${label()}`);
-  expect(fitsAt(backend.sizes.full) < 0.8 && fitsAt(backend.sizes.subtitles) >= 0.8, `the full text does not fit readably here: ${JSON.stringify(backend.sizes)}`);
-  expect(JSON.stringify(backend.layouts.slice(listed)) === '["subtitles"]', `the fit takes the list's sizes and lays out its level once: ${JSON.stringify(backend.layouts.slice(listed))}`);
-  expect(root.querySelector('.segmented [aria-pressed="true"]')?.textContent === 'Diagram', 'the switch shows the diagram');
+  // Without a saved level, one line of text, as the list's cards, fitted whole.
+  expect(level() === 'Summary' && scale() <= 1, `it starts with one line of text, fitted: ${level()} ${label()}`);
+  expect(JSON.stringify(backend.layouts.slice(listed)) === '["subtitles"]', `it lays out its level once: ${JSON.stringify(backend.layouts.slice(listed))}`);
+  expect(root.querySelector('.pane-controls .segmented [aria-pressed="true"]')?.textContent === 'Diagram', 'the switch shows the diagram');
 
   // 5.1 Lanes per group, boxes, numbered pills, one dashed manual arrow, badges; themed by CSS.
   expect(svg().querySelectorAll('[data-kind="lane"]').length === 3, 'a lane per group');
@@ -358,7 +356,7 @@ async function diagramChecks(backend, app) {
       const rect = node.getBoundingClientRect();
       return rect.left >= frame.left && rect.right <= frame.right && rect.top >= frame.top && rect.bottom <= frame.bottom;
     });
-  expect(inView() && scale() >= 0.8 && scale() <= 1, `the whole diagram fits at start, readably: ${label()}`);
+  expect(inView() && scale() <= 1, `the whole diagram fits at start: ${label()}`);
   const shared = sharedLines(svg());
   expect(shared.length === 0, `no two arrows run on one line: ${JSON.stringify(shared)}`);
 
@@ -424,134 +422,234 @@ async function diagramChecks(backend, app) {
   shape('pill', link(2)).focus();
   await settle();
 
-  // 5.2 Zoom changes the detail, so text keeps its size: within a level it zooms in a band
-  // around 100%; past its end, the next level starts at 100%. 0 fits.
+  // 5.2 Zoom is free and continuous between 10% and 400%; only the level control changes the
+  // detail. Buttons and keys zoom animated, around the canvas center or the focused box; 0 fits.
   await zoomKey('0');
   const fit = viewBox();
-  expect(level() === 'Summary', `0 fits one line of text again, got ${label()}`);
+  expect(level() === 'Summary', `0 fits and keeps the level, got ${level()}`);
   key('+');
+  expect(view().animating(), '+ zooms animated');
+  await animated();
   let box = viewBox();
-  expect(level() === 'Summary' && box[2] < fit[2] && close(box[0] + box[2] / 2, fit[0] + fit[2] / 2), '+ zooms in around the center');
-  for (let presses = 0; presses < 4 && level() === 'Summary'; presses += 1) {
-    await zoomKey('+');
-    expect(readable(), `text stays readable zooming in: ${label()}`);
-  }
-  expect(level() === 'Full text' && near(scale(), 1), `past the band, + shows the full text at 100%, got ${label()}`);
-  const fullText = [...shape('box', item(1)).querySelectorAll('.prism-body')].map((line) => line.textContent);
-  expect(fullText.length > 1 && fullText.join(' ') === releaseBody(1), `the whole text, wrapped: ${fullText}`);
-  expect(textsInside().length === 0, `full texts stay inside their box: ${textsInside().map((node) => node.dataset.id)}`);
-  for (let presses = 0; presses < 4; presses += 1) {
-    await zoomKey('+');
-  }
-  expect(level() === 'Full text' && near(scale(), 1.25) && readable(), `the most detailed level stops at 125%, got ${label()}`);
-  const boxWidth = () => shape('box', item(1)).querySelector('.prism-shape').getBBox().width;
-  const fullWidth = boxWidth();
-  for (let presses = 0; presses < 6 && level() === 'Full text'; presses += 1) {
-    await zoomKey('-');
-    expect(readable(), `text stays readable zooming out: ${label()}`);
-  }
-  expect(level() === 'Summary' && near(scale(), 1), `past the band, - shows one line of text at 100%, got ${label()}`);
-  expect(shape('box', item(1)).querySelector('.prism-subtitle')?.textContent === 'Sensor app records a reading e…', 'one clipped line of text');
-  expect(boxWidth() < fullWidth && textsInside().length === 0, 'in smaller boxes, inside them');
-  for (let presses = 0; presses < 6 && level() === 'Summary'; presses += 1) {
-    await zoomKey('-');
-    expect(readable(), `text stays readable zooming out: ${label()}`);
-  }
-  expect(level() === 'Titles' && near(scale(), 1) && !svg().querySelector('.prism-subtitle, .prism-body'), `then the overview, titles only, got ${label()}`);
-  expect(textsInside().length === 0, 'titles stay inside their box');
-  for (let presses = 0; presses < 4; presses += 1) {
-    await zoomKey('-');
-  }
-  expect(level() === 'Titles' && near(scale(), 0.8), `an overview that fits stops at 80%, got ${label()}`);
+  expect(Math.abs(fit[2] / box[2] - 1.15) < 1e-6 && close(box[0] + box[2] / 2, fit[0] + fit[2] / 2), `+ zooms in one step around the center: ${label()}`);
+  key('+');
+  key('+');
+  await animated();
+  expect(Math.abs(box[2] / viewBox()[2] - 1.15 ** 2) < 1e-6, `steps in a row add up: ${label()}`);
 
-  // Ctrl+wheel past the band shows the next level with the box under the pointer kept there.
-  const outline = (number) => shape('box', item(number)).querySelector('.prism-shape').getBoundingClientRect();
-  const before = outline(4);
-  const pointerAt = { clientX: before.left + before.width * 0.3, clientY: before.top + before.height * 0.6 };
-  const zoomWheel = async (deltaY) => {
-    canvas().dispatchEvent(new WheelEvent('wheel', { deltaY, ctrlKey: true, bubbles: true, cancelable: true, ...pointerAt }));
-    await settled();
-  };
-  for (let notches = 0; notches < 6 && level() === 'Titles'; notches += 1) {
-    await zoomWheel(-100);
-  }
-  const after = outline(4);
-  const shares = [(pointerAt.clientX - after.left) / after.width, (pointerAt.clientY - after.top) / after.height];
-  expect(level() === 'Summary' && near(scale(), 1) && readable(), `ctrl+wheel past the band shows the next level, got ${label()}`);
-  expect(Math.abs(shares[0] - 0.3) < 0.02 && Math.abs(shares[1] - 0.6) < 0.02, `the box under the pointer stays under it: ${shares}`);
-
-  // Hysteresis: a new level starts a step from both ends of its band, so a small zoom back
-  // does not switch again, and one crossing switches once.
-  const asked = backend.layouts.length;
-  const levels = [];
-  for (const deltaY of [40, -40, 60, -60, -100, -40]) {
-    await zoomWheel(deltaY);
-    levels.push(level());
-  }
-  expect(levels.every((shown) => shown === 'Summary') && scale() > 1.2, `small zooms stay at the level: ${levels} ${label()}`);
-  for (const deltaY of [-20, 20, -20, 20]) {
-    await zoomWheel(deltaY);
-    levels.push(level());
-  }
-  expect(JSON.stringify(levels.slice(-4)) === JSON.stringify(Array(4).fill('Full text')), `crossing the threshold switches once, no flicker: ${levels}`);
-  expect(backend.layouts.length === asked, `levels shown before come without a new layout: ${backend.layouts.slice(asked)}`);
-
-  // Pan with arrow keys and the wheel; a wheel notch zooms one step around the pointer.
-  key('0');
-  box = viewBox();
-  key('ArrowRight');
-  key('ArrowDown');
-  expect(viewBox()[0] > box[0] && viewBox()[1] > box[1], 'arrows pan');
-  key('0');
-  expect(JSON.stringify(viewBox()) === JSON.stringify(fit), '0 fits again');
-  box = viewBox();
-  canvas().dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true }));
-  expect(viewBox()[1] > box[1] && viewBox()[2] === box[2], 'the wheel pans');
-  const at = { clientX: frame.left + 200, clientY: frame.top + 150 };
-  const world = (vb) => [vb[0] + (200 / frame.width) * vb[2], vb[1] + (150 / frame.height) * vb[3]];
-  key('0');
-  box = viewBox();
-  canvas().dispatchEvent(new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true, ...at }));
-  let zoomed = viewBox();
-  expect(zoomed[2] < box[2] && close(world(zoomed)[0], world(box)[0]) && close(world(zoomed)[1], world(box)[1]), 'ctrl+wheel zooms around the pointer');
-  expect(Math.abs(box[2] / zoomed[2] - 1.15) < 1e-6, `one wheel notch is one zoom step, got ${box[2] / zoomed[2]}`);
-  canvas().dispatchEvent(new WheelEvent('wheel', { deltaY: -600, ctrlKey: true, bubbles: true, cancelable: true, ...at }));
-  expect(Math.abs(zoomed[2] / viewBox()[2] - 1.15) < 1e-6, `a large wheel delta is capped to one step: ${label()}`);
-
-  // A pinch zooms around its center; pinching on past the band changes the level and goes on from there.
-  const gesture = (type, gestureScale) => canvas().dispatchEvent(Object.assign(new Event(type, { bubbles: true, cancelable: true }), { scale: gestureScale, ...at }));
-  key('0');
-  box = viewBox();
-  gesture('gesturestart', 1);
-  gesture('gesturechange', 1.1);
-  zoomed = viewBox();
-  expect(close(zoomed[2], box[2] / 1.1) && close(world(zoomed)[0], world(box)[0]), 'a pinch gesture zooms');
-  gesture('gesturechange', 0.5);
-  await settled();
-  expect(level() === 'Titles' && near(scale(), 1), `pinching out past the band shows less detail, got ${label()}`);
-  gesture('gesturechange', 0.45);
-  gesture('gesturechange', 0.5);
-  expect(level() === 'Titles' && near(scale(), 0.5 / 0.45), `and the pinch goes on from 100%, got ${label()}`);
-  gesture('gestureend', 0.5);
-  key('0');
-  await settled();
-
-  // + and - zoom around the focused box, into the next level too.
+  // Pinch and wheel zoom at once, across the old 80% and 125% limits: no layout, no level change.
   const middle = (number) => {
     const rect = outline(number);
     return [rect.left + rect.width / 2, rect.top + rect.height / 2];
   };
   const moved = (from, to) => Math.hypot(from[0] - to[0], from[1] - to[1]);
-  click(shape('box', item(2)));
-  await settle();
-  const focusedAt = middle(2);
-  key('+');
-  expect(level() === 'Summary' && moved(middle(2), focusedAt) < 0.5, `+ zooms around the focused box: ${label()}`);
-  for (let presses = 0; presses < 4 && level() === 'Summary'; presses += 1) {
-    await zoomKey('+');
+  const wheelAt = (point, deltaY) => canvas().dispatchEvent(new WheelEvent('wheel', { deltaY, ctrlKey: true, bubbles: true, cancelable: true, ...point }));
+  const worldAt = (point, vb = viewBox()) => {
+    const rect = canvas().getBoundingClientRect();
+    return [vb[0] + ((point.clientX - rect.left) / rect.width) * vb[2], vb[1] + ((point.clientY - rect.top) / rect.height) * vb[3]];
+  };
+  // How far, in screen pixels, the world point under `point` moves through a wheel sequence.
+  const drift = (point, deltas) => {
+    const start = worldAt(point);
+    let most = 0;
+    for (const deltaY of deltas) {
+      wheelAt(point, deltaY);
+      const now = worldAt(point);
+      most = Math.max(most, Math.hypot(now[0] - start[0], now[1] - start[1]) * scale());
+    }
+    return most;
+  };
+  await zoomKey('0');
+  const asked = backend.layouts.length;
+  // Mouse events carry whole pixels.
+  const [px, py] = middle(4).map(Math.round);
+  const onBox = { clientX: px, clientY: py };
+  const scales = [];
+  const levels = new Set();
+  for (const deltaY of [...Array(40).fill(-30), ...Array(70).fill(30), ...Array(20).fill(-30)]) {
+    wheelAt(onBox, deltaY);
+    scales.push(scale());
+    levels.add(level());
   }
-  expect(level() === 'Full text' && moved(middle(2), focusedAt) < 1, `and keeps it in place in the next level: ${moved(middle(2), focusedAt)}`);
+  expect(Math.min(...scales) < 0.5 && Math.max(...scales) > 2, `the zoom ran across the old limits: ${Math.min(...scales)} to ${Math.max(...scales)}`);
+  expect(backend.layouts.length === asked && levels.size === 1 && level() === 'Summary', `continuous zoom lays nothing out and keeps the level: ${backend.layouts.slice(asked)} ${[...levels]}`);
+  await zoomKey('0');
+  const kept = drift(onBox, [...Array(30).fill(-40), ...Array(50).fill(40), ...Array(10).fill(-100)]);
+  expect(kept < 0.5, `the point under the pointer stays under it: ${kept} px`);
+  // Near the canvas edge, with the diagram filling the canvas: zooming out and back in.
+  view().zoomAt(2.5, frame.left + frame.width / 2, frame.top + frame.height / 2);
+  const edge = { clientX: Math.round(frame.right - 4), clientY: Math.round(frame.top + frame.height / 2) };
+  const atEdge = drift(edge, [...Array(40).fill(40), ...Array(40).fill(-40)]);
+  expect(atEdge < 0.5, `and near the edge: ${atEdge} px`);
+  const corner = { clientX: Math.round(frame.left + 3), clientY: Math.round(frame.top + 3) };
+  const atCorner = drift(corner, [...Array(20).fill(60), ...Array(20).fill(-60)]);
+  expect(atCorner < 0.5, `and in the corner: ${atCorner} px`);
+  // With most of the diagram panned out of view: zooming out on its last pixels keeps them there.
+  view().zoomAt(1, frame.left + frame.width / 2, frame.top + frame.height / 2);
+  for (let steps = 0; steps < 40; steps += 1) {
+    view().panStep(1, 0);
+  }
+  const rightEnd = { clientX: Math.round(frame.left + 30), clientY: Math.round(frame.top + frame.height / 2) };
+  const atEnd = drift(rightEnd, [...Array(40).fill(60), ...Array(40).fill(-60)]);
+  expect(atEnd < 0.5, `and at the end of a diagram panned away: ${atEnd} px`);
+  for (let notches = 0; notches < 30; notches += 1) {
+    wheelAt(onBox, -100);
+  }
+  expect(near(scale(), 4), `zoom stops at 400%, got ${label()}`);
+  for (let notches = 0; notches < 60; notches += 1) {
+    wheelAt(onBox, 100);
+  }
+  expect(near(scale(), 0.1) && label() === '10%', `and at 10%, got ${label()}`);
+  // One wheel notch is one zoom step, a larger delta is capped to it.
+  await zoomKey('0');
+  box = viewBox();
+  wheelAt(onBox, -100);
+  let zoomed = viewBox();
+  expect(Math.abs(box[2] / zoomed[2] - 1.15) < 1e-6, `one wheel notch is one zoom step, got ${box[2] / zoomed[2]}`);
+  wheelAt(onBox, -600);
+  expect(Math.abs(zoomed[2] / viewBox()[2] - 1.15) < 1e-6, `a large wheel delta is capped to one step: ${label()}`);
+  // A pinch zooms around its center from the zoom it started at.
+  const gesture = (type, gestureScale) => canvas().dispatchEvent(Object.assign(new Event(type, { bubbles: true, cancelable: true }), { scale: gestureScale, ...onBox }));
+  await zoomKey('0');
+  box = viewBox();
+  gesture('gesturestart', 1);
+  gesture('gesturechange', 1.1);
+  zoomed = viewBox();
+  expect(close(zoomed[2], box[2] / 1.1) && close(worldAt(onBox, zoomed)[0], worldAt(onBox, box)[0]), 'a pinch gesture zooms');
+  gesture('gesturechange', 0.4);
+  expect(close(viewBox()[2], box[2] / 0.4) && level() === 'Summary' && backend.layouts.length === asked, `pinching out keeps the level: ${label()}`);
+  gesture('gestureend', 0.4);
+
+  // The level control: one layout, the focused box stays in place at the same zoom; 1 to 3 too.
+  await zoomKey('0');
+  click(shape('box', item(4)));
+  await settle();
+  let anchored = middle(4);
+  const zoomShown = scale();
+  click(levelButton('Full text'));
+  await settled();
+  expect(level() === 'Full text' && JSON.stringify(backend.layouts.slice(asked)) === '["full"]', `the control lays out the full text once: ${JSON.stringify(backend.layouts.slice(asked))}`);
+  expect(moved(middle(4), anchored) < 1 && near(scale(), zoomShown), `the focused box stays in place at the same zoom: ${moved(middle(4), anchored)} ${label()}`);
+  const fullText = [...shape('box', item(1)).querySelectorAll('.prism-body')].map((line) => line.textContent);
+  expect(fullText.length > 1 && fullText.join(' ') === releaseBody(1), `the whole text, wrapped: ${fullText}`);
+  expect(textsInside().length === 0, `full texts stay inside their box: ${textsInside().map((node) => node.dataset.id)}`);
+  const saved = () => app.view(KEYS.LIVE).cameras[KEYS.RELEASE];
+  expect(saved()?.detail === 'full' && near(saved().scale, zoomShown), `the level is saved with the camera: ${JSON.stringify(saved())}`);
+  key('1');
+  await settled();
+  expect(level() === 'Titles' && backend.layouts.at(-1) === 'names' && !svg().querySelector('.prism-subtitle, .prism-body'), `1 shows titles only: ${level()}`);
+  expect(moved(middle(4), anchored) < 1 && textsInside().length === 0, 'with the box in place');
+  const laidOut = backend.layouts.length;
+  key('3');
+  await settled();
+  key('2');
+  await settled();
+  expect(level() === 'Summary' && backend.layouts.length === laidOut && moved(middle(4), anchored) < 1, `levels shown before come without a new layout: ${backend.layouts.slice(laidOut)}`);
+  expect(shape('box', item(1)).querySelector('.prism-subtitle')?.textContent === 'Sensor app records a reading e…', 'one clipped line of text');
   key('Escape');
+
+  // Fit shows the whole diagram at every level, at most at 100%.
+  for (const name of ['Titles', 'Full text', 'Summary']) {
+    click(levelButton(name));
+    await settled();
+    await zoomKey('0');
+    expect(inView() && scale() <= 1, `fit shows the whole diagram with ${name}: ${label()}`);
+  }
+
+  // Lines keep their width on screen; arrowheads scale with the diagram up to 100%, not beyond.
+  const strokes = () =>
+    ['[data-kind="arrow"] .prism-line', '[data-kind="arrow"] .prism-hit', '[data-kind="box"] .prism-shape', '.prism-lane .prism-shape']
+      .map((selector) => getComputedStyle(svg().querySelector(selector)))
+      .map((style) => `${style.vectorEffect} ${style.strokeWidth}`);
+  const head = () => Number(svg().querySelector('marker').getAttribute('markerWidth')) * scale();
+  const center = [frame.left + frame.width / 2, frame.top + frame.height / 2];
+  view().zoomAt(0.3, ...center);
+  const far = strokes();
+  const farHead = head();
+  view().zoomAt(2.5, ...center);
+  expect(far.every((stroke) => stroke.startsWith('non-scaling-stroke')) && JSON.stringify(far) === JSON.stringify(strokes()), `line widths stay on screen: ${far} ${strokes()}`);
+  expect(Math.abs(farHead - 11.5 * 0.3) < 0.01 && Math.abs(head() - 11.5) < 0.01, `arrowheads: ${farHead} px at 30%, ${head()} px at 250%`);
+
+  // Zoomed out, text lines fade, then the kind and number line; titles remain. A band changes
+  // past its limit by a margin, so zooming around it does not flicker.
+  const band = () => svg().dataset.zoom;
+  const bands = [];
+  for (const zoom of [1, 0.6, 0.56, 0.54, 0.53, 0.52, 0.54, 0.56, 0.57, 0.58, 0.6]) {
+    view().zoomAt(zoom, ...center);
+    bands.push(band());
+  }
+  expect(bands.join() === 'near,near,near,near,near,mid,mid,mid,mid,near,near', `bands with hysteresis: ${bands}`);
+  const faded = () => ['.prism-subtitle', '.prism-kind', '.prism-number', '.prism-name'].map((selector) => getComputedStyle(svg().querySelector(selector)).opacity).join();
+  // Headless Chromium under virtual time hardly runs transitions: the fades are finished here.
+  const fade = async () => {
+    await settle();
+    svg()
+      .getAnimations({ subtree: true })
+      .forEach((animation) => animation.finish());
+  };
+  view().zoomAt(0.45, ...center);
+  await fade();
+  expect(faded() === '0,1,1,1', `below 55% the text lines fade: ${faded()}`);
+  view().zoomAt(0.3, ...center);
+  await fade();
+  expect(faded() === '0,0,0,1', `below 45% the kind and number too, the titles remain: ${faded()}`);
+  view().zoomAt(1, ...center);
+  await fade();
+  expect(faded() === '1,1,1,1', `zoomed in, every text returns: ${faded()}`);
+
+  // Pills and badges keep 80% of their size on screen when zoomed out, growing at most twice
+  // in the world; further out they shrink too.
+  const height = (kind, id) => shape(kind, id).querySelector('.prism-shape').getBoundingClientRect().height;
+  view().zoomAt(0.45, ...center);
+  expect(Math.abs(height('pill', link(1)) - 20 * 0.8) < 0.1 && Math.abs(height('gate', item(7)) - 18 * 0.8) < 0.1, `pills and badges keep a readable size: ${height('pill', link(1))} ${height('gate', item(7))}`);
+  view().zoomAt(0.3, ...center);
+  expect(Math.abs(height('pill', link(1)) - 20 * 0.6) < 0.1, `far out, they grow at most twice: ${height('pill', link(1))}`);
+  view().zoomAt(1.5, ...center);
+  expect(Math.abs(height('pill', link(1)) - 30) < 0.1 && !shape('pill', link(1)).hasAttribute('transform'), `zoomed in, they scale with the diagram: ${height('pill', link(1))}`);
+
+  // Input stops a zoom on its way where it is: a press, the wheel, a key. With reduced motion there is none.
+  const stopsOn = async (start, input) => {
+    await zoomKey('0');
+    const from = viewBox();
+    key(start);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const running = view().animating();
+    input();
+    const stopped = viewBox();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return running && !view().animating() && JSON.stringify(viewBox().slice(2)) === JSON.stringify(stopped.slice(2)) && viewBox()[2] !== from[2];
+  };
+  const pointerAt = (type) => canvas().dispatchEvent(new PointerEvent(type, { pointerId: 9, button: 0, bubbles: true, clientX: center[0], clientY: center[1] }));
+  expect(
+    await stopsOn('+', () => {
+      pointerAt('pointerdown');
+      pointerAt('pointerup');
+    }),
+    'a press stops the zoom',
+  );
+  expect(await stopsOn('-', () => canvas().dispatchEvent(new WheelEvent('wheel', { deltaY: 10, bubbles: true, cancelable: true }))), 'the wheel stops the zoom');
+  expect(await stopsOn('+', () => key('ArrowRight')), 'a key stops the zoom');
+  expect(near(saved()?.scale, scale()), `where it stopped is saved: ${JSON.stringify(saved())} ${scale()}`);
+  const matchMedia = window.matchMedia;
+  window.matchMedia = (query) => ({ matches: query.includes('reduced-motion'), media: query });
+  box = viewBox();
+  key('+');
+  expect(!view().animating() && Math.abs(box[2] / viewBox()[2] - 1.15) < 1e-6, 'with reduced motion, + zooms at once');
+  key('0');
+  expect(!view().animating() && inView(), 'and 0 fits at once');
+  window.matchMedia = matchMedia;
+
+  // A double-click zooms to a box, centered at 100%; ⌘/Ctrl+0 zooms to 100%.
+  await zoomKey('0');
+  shape('box', item(2)).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  expect(view().animating(), 'a double-click zooms animated');
+  await animated();
+  const area = frame.top + 24 + (frame.height - 48 - root.querySelector('.diagram-controls').offsetHeight) / 2;
+  expect(near(scale(), 1) && moved(middle(2), [center[0], area]) < 1, `to the box, centered at 100%: ${label()} ${middle(2)} ${[center[0], area]}`);
+  await zoomKey('0');
+  key('0', { ctrlKey: true });
+  await animated();
+  expect(near(scale(), 1), `Ctrl+0 zooms to 100%: ${label()}`);
   await zoomKey('0');
 
   // A failed layout says so and keeps the level shown; zooming goes on, and asking again works.
@@ -566,61 +664,40 @@ async function diagramChecks(backend, app) {
   };
   const title = (number) => shape('box', item(number))?.querySelector('.prism-name')?.textContent;
   revise(10, 2, 'Upload again');
-  expect(await waitFor(() => title(2) === 'Upload again') && level() === 'Summary', `a new revision is laid out anew: ${label()}`);
+  expect(await waitFor(() => title(2) === 'Upload again') && level() === 'Summary', `a new revision is laid out anew: ${level()}`);
   const message = () => root.querySelector('.diagram-message');
   backend.failing.add('full');
-  for (let presses = 0; presses < 4 && backend.layouts.at(-1) !== 'full'; presses += 1) {
-    await zoomKey('+');
-  }
-  expect(level() === 'Summary' && !message().hidden && message().textContent.includes('could not be laid out'), `a failed layout is reported, the level stays: ${label()} ${message().textContent}`);
+  click(levelButton('Full text'));
+  await settled();
+  expect(level() === 'Summary' && svg().querySelector('.prism-subtitle') && !message().hidden && message().textContent.includes('could not be laid out'), `a failed layout is reported, the level stays: ${level()} ${message().textContent}`);
   const failedAt = label();
   await zoomKey('-');
-  expect(label() !== failedAt && level() === 'Summary', `zooming still works after a failed layout: ${label()}`);
+  expect(label() !== failedAt, `zooming still works after a failed layout: ${label()}`);
   backend.failing.clear();
-  for (let presses = 0; presses < 4 && level() === 'Summary'; presses += 1) {
-    await zoomKey('+');
-  }
-  expect(level() === 'Full text' && message().hidden, `asked again, the level comes: ${label()}`);
+  click(levelButton('Full text'));
+  await settled();
+  expect(level() === 'Full text' && svg().querySelector('.prism-body') && message().hidden, `asked again, the level comes: ${level()}`);
 
   // A new revision while a level change waits: the change lands on the new layout, anchored.
   backend.layoutDelay = 150;
   await zoomKey('0');
-  const pointAt = (number) => {
-    const rect = outline(number);
-    return { clientX: rect.left + rect.width * 0.5, clientY: rect.top + rect.height * 0.4 };
-  };
-  const wheelAt = (point, deltaY) => canvas().dispatchEvent(new WheelEvent('wheel', { deltaY, ctrlKey: true, bubbles: true, cancelable: true, ...point }));
-  let point = pointAt(4);
-  for (let notches = 0; notches < 4 && backend.pending === 0; notches += 1) {
-    wheelAt(point, 100);
-  }
-  expect(backend.pending > 0 && level() === 'Summary', 'a level change waits for its layout');
+  click(shape('box', item(4)));
+  await settle();
+  anchored = middle(4);
+  click(levelButton('Titles'));
+  expect(backend.pending > 0 && level() === 'Titles' && svg().querySelector('.prism-body'), 'a level change waits for its layout; the level shown stays until it comes');
   revise(11, 4, 'Review again');
   await settled();
-  const landed = outline(4);
-  expect(level() === 'Titles' && title(4) === 'Review again', `the waiting change shows the new revision: ${label()} ${title(4)}`);
-  expect(point.clientX > landed.left && point.clientX < landed.right && point.clientY > landed.top && point.clientY < landed.bottom, 'with the box under the pointer kept there');
-
-  // The anchored box hidden while the change waits: the world point under the pointer stays.
-  point = pointAt(5);
-  const worldAt = (vb) => [vb[0] + ((point.clientX - frame.left) / frame.width) * vb[2], vb[1] + ((point.clientY - frame.top) / frame.height) * vb[3]];
-  click(shape('box', item(5)));
-  await settled();
-  for (let notches = 0; notches < 4 && backend.pending === 0; notches += 1) {
-    wheelAt(point, -100);
-  }
-  const anchoredAt = worldAt(viewBox());
-  key('h');
-  await settled();
-  expect(level() === 'Summary' && !shape('box', item(5)), `the change lands without the hidden box: ${label()}`);
-  const keptAt = worldAt(viewBox());
-  expect(close(keptAt[0], anchoredAt[0]) && close(keptAt[1], anchoredAt[1]), `the world point under the pointer stays: ${anchoredAt} ${keptAt}`);
+  expect(title(4) === 'Review again' && !svg().querySelector('.prism-subtitle, .prism-body'), `the waiting change shows the new revision: ${level()} ${title(4)}`);
+  expect(moved(middle(4), anchored) < 1, `with the focused box kept in place: ${moved(middle(4), anchored)}`);
   backend.layoutDelay = 0;
-  key('H');
   backend.update(KEYS.LIVE, structuredClone(published));
-  expect(await waitFor(() => shape('box', item(5)) && title(4) === 'Review anomalies'), 'shown again, as published');
+  expect(await waitFor(() => title(4) === 'Review anomalies'), 'shown again, as published');
   key('Escape');
+  click(levelButton('Summary'));
+  await settled();
   await zoomKey('0');
+  const at = { clientX: frame.left + 200, clientY: frame.top + 150 };
   click(shape('box', item(3)));
   await settle();
   box = viewBox();
@@ -711,18 +788,40 @@ async function diagramChecks(backend, app) {
   expect(!exported?.svg.includes('focused'), 'without the focus highlight');
   expect(root.querySelector('.statusbar .message').textContent.includes('Saved the diagram'), 'the saved path is shown');
   expect(level() === 'Summary' && fileWidth === backend.sizes.subtitles.width && exported.svg.includes('class="prism-subtitle"') && !exported.svg.includes('class="prism-body"'), 'the export is of the level shown');
-  for (let presses = 0; presses < 6 && level() === 'Summary'; presses += 1) {
-    await zoomKey('+');
+  // Above 100% arrowheads keep their size on screen through a round trip of levels, and in the export.
+  view().zoomAt(2.5, ...center);
+  for (const name of ['Full text', 'Summary', 'Full text', 'Summary']) {
+    click(levelButton(name));
+    await settled();
   }
+  expect(near(scale(), 2.5) && Math.abs(head() - 11.5) < 0.01, `arrowheads after a round trip at 250%: ${head()} px`);
+  key('s');
+  await settle();
+  const roundTrip = new DOMParser().parseFromString(backend.exports.at(-1).svg, 'image/svg+xml').documentElement;
+  expect([...roundTrip.querySelectorAll('marker')].every((marker) => marker.getAttribute('markerWidth') === '11.5'), 'and the export has them at their size');
+  // Zoomed out, the export still has every text at full opacity, pills, badges and arrowheads at their size.
+  view().zoomAt(0.3, ...center);
+  await fade();
+  const shownTexts = () => [...svg().querySelectorAll('text')].map((text) => getComputedStyle(text).opacity).join();
+  const before = shownTexts();
+  key('s');
+  await settle();
+  expect(shownTexts() === before && band() === 'far' && svg().getAnimations({ subtree: true }).length === 0, 'the export leaves the SVG shown as it is, no fade runs');
+  const small = new DOMParser().parseFromString(backend.exports.at(-1).svg, 'image/svg+xml').documentElement;
+  const opacities = new Set([...small.querySelectorAll('text')].map((text) => text.getAttribute('opacity')));
+  expect(band() === 'far' && JSON.stringify([...opacities]) === '["1"]', `zoomed out, the export shows every text: ${[...opacities]}`);
+  expect(!small.querySelector('[transform]') && [...small.querySelectorAll('marker')].every((marker) => marker.getAttribute('markerWidth') === '11.5') && !small.hasAttribute('data-zoom'), 'without the zoom on pills, badges and arrowheads');
+  click(levelButton('Full text'));
+  await settled();
   key('s');
   await settle();
   const full = backend.exports.at(-1).svg;
-  expect(level() === 'Full text' && full.includes('class="prism-body"') && !full.includes('class="prism-subtitle"'), 'zoomed in, the export has the full text');
-  key('0');
-  await settled();
+  expect(level() === 'Full text' && full.includes('class="prism-body"') && !full.includes('class="prism-subtitle"'), 'with the full text shown, the export has it');
+  await zoomKey('0');
 
   // Each document keeps its own zoom and pan.
   key('+');
+  await animated();
   const release = viewBox();
   const showDocument = (title) => [...root.querySelectorAll('.documents button')].find((button) => button.textContent === title).click();
   showDocument('App plan');
@@ -733,6 +832,52 @@ async function diagramChecks(backend, app) {
   expect(JSON.stringify(viewBox()) === JSON.stringify(release), 'its camera is kept');
   expect(other[2] !== release[2], 'the other document was fitted');
 
+  // A zoom on its way: a new revision lets it end where it was heading, a fit too; another
+  // document or tab keeps where it got to, or where it was heading.
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  await zoomKey('0');
+  const fitScale = scale();
+  key('+');
+  await wait(50);
+  revise(12, 2, 'Upload once more');
+  expect(await waitFor(() => title(2) === 'Upload once more') && (await animated()), 'a revision arrives while zooming');
+  expect(Math.abs(scale() / fitScale - 1.15) < 1e-6 && Math.abs(saved().scale / fitScale - 1.15) < 1e-6, `the zoom ends where it was heading: ${scale() / fitScale}`);
+  key('+');
+  await animated();
+  key('0');
+  await wait(50);
+  revise(13, 2, 'Upload batch');
+  expect(await waitFor(() => title(2) === 'Upload batch') && (await animated()), 'a revision arrives while fitting');
+  expect(inView() && saved()?.x === undefined && saved()?.detail === 'full', `the fit ends fitted: ${JSON.stringify(saved())}`);
+  key('+');
+  await wait(50);
+  showDocument('App plan');
+  const reached = saved()?.scale;
+  expect(await waitFor(() => !svg().querySelector(`[data-id="${item(1)}"]`)) && !view().animating(), 'another document stops the zoom');
+  expect(reached > fitScale && reached < fitScale * 1.15, `the release flow keeps where it got to: ${reached / fitScale}`);
+  showDocument('Release flow');
+  expect(await waitFor(() => svg()?.querySelector(`[data-id="${item(1)}"]`)) && near(scale(), reached), `and shows it again: ${label()}`);
+  await zoomKey('0');
+  key('+');
+  await wait(30);
+  key('Tab', { ctrlKey: true });
+  await wait(400);
+  expect(Math.abs(saved().scale / fitScale - 1.15) < 1e-6, `in a hidden tab the zoom ends where it was heading: ${saved().scale / fitScale}`);
+  key('Tab', { ctrlKey: true, shiftKey: true });
+  expect(await waitFor(() => svg()?.querySelector(`[data-id="${item(1)}"]`)) && Math.abs(scale() / fitScale - 1.15) < 1e-6, `and shows it: ${label()}`);
+  // A key that only modifies others does not stop a zoom.
+  key('+');
+  await wait(30);
+  key('Shift', { shiftKey: true });
+  expect(view().animating(), 'Shift alone does not stop the zoom');
+  await animated();
+  // Fades run only without reduced motion: every rule with a transition for the zoom bands is inside that query.
+  const fadeRules = [...document.styleSheets]
+    .flatMap((sheet) => [...sheet.cssRules])
+    .flatMap((rule) => (rule.cssRules ? [...rule.cssRules].map((inner) => [rule, inner]) : [[null, rule]]))
+    .filter(([, rule]) => rule.selectorText?.includes('data-zoom') && rule.style.transition);
+  expect(fadeRules.length > 0 && fadeRules.every(([media]) => media?.conditionText === '(prefers-reduced-motion: no-preference)'), `fades only without reduced motion: ${fadeRules.map(([media]) => media?.conditionText)}`);
+
   // The view choice and the cameras are view state, restored when the tab opens again.
   key('v');
   await settle();
@@ -741,30 +886,56 @@ async function diagramChecks(backend, app) {
   await waitFor(() => svg());
   await zoomKey('0');
   key('+');
+  await animated();
   await new Promise((resolve) => setTimeout(resolve, 400));
-  const saved = backend.views[KEYS.LIVE];
-  const camera = saved?.cameras?.[KEYS.RELEASE];
-  expect(saved?.modes?.[KEYS.RELEASE] === 'diagram' && camera?.detail === 'subtitles' && camera.scale > 1, `mode, level and camera are saved: ${JSON.stringify(camera)}`);
-  const restored = fixture('diagram-checks');
-  restored.state.arrangement.views = structuredClone(backend.views);
+  const views = backend.views[KEYS.LIVE];
+  const camera = views?.cameras?.[KEYS.RELEASE];
+  expect(views?.modes?.[KEYS.RELEASE] === 'diagram' && camera?.detail === 'full' && Number.isFinite(camera.scale), `mode, level and camera are saved: ${JSON.stringify(camera)}`);
+  // Opens the tab again in a new app with the saved view state, its release flow's camera replaced.
+  const reopen = async (replaced = null) => {
+    const restored = fixture('diagram-checks');
+    restored.state.arrangement.views = structuredClone(backend.views);
+    if (replaced) {
+      restored.state.arrangement.views[KEYS.LIVE].cameras[KEYS.RELEASE] = replaced;
+    }
+    const again = document.createElement('div');
+    again.className = 'app';
+    document.body.append(again);
+    start(fakeBackend(restored), again);
+    await waitFor(() => svg(again)?.querySelector('[data-id]'));
+    const reopened = viewBox(again);
+    const shown = {
+      x: reopened[0],
+      y: reopened[1],
+      scale: again.querySelector('.diagram-canvas').clientWidth / reopened[2],
+      zoom: again.querySelector('.diagram-controls .zoom').textContent,
+      level: again.querySelector('.diagram-controls .segmented [aria-pressed="true"]')?.textContent,
+      body: Boolean(again.querySelector('.diagram-svg .prism-body')),
+      subtitle: Boolean(again.querySelector('.diagram-svg .prism-subtitle')),
+    };
+    again.remove();
+    return shown;
+  };
   root.hidden = true;
-  const again = document.createElement('div');
-  again.className = 'app';
-  document.body.append(again);
-  start(fakeBackend(restored), again);
-  expect(await waitFor(() => svg(again)?.getAttribute('viewBox')), 'the reopened tab shows its diagram');
-  const reopened = viewBox(again);
-  const width = again.querySelector('.diagram-canvas').clientWidth;
-  expect(close(reopened[0], camera.x) && close(reopened[1], camera.y) && close(width / reopened[2], camera.scale), 'with the saved zoom and pan');
-  const shownLabel = again.querySelector('.diagram-controls .zoom').textContent;
-  expect(shownLabel === `Summary ${Math.round(camera.scale * 100)}%` && again.querySelector('.diagram-svg .prism-subtitle'), `at the saved level: ${shownLabel}`);
+  let shown = await reopen();
+  expect(close(shown.x, camera.x) && close(shown.y, camera.y) && close(shown.scale, camera.scale) && shown.zoom === `${Math.round(camera.scale * 100)}%`, `the reopened tab has the saved zoom and pan: ${JSON.stringify(shown)}`);
+  expect(shown.level === 'Full text' && shown.body, `at the saved level: ${JSON.stringify(shown)}`);
+  shown = await reopen({ detail: 'names' });
+  expect(shown.level === 'Titles' && !shown.subtitle && shown.scale <= 1, `a fitted camera keeps its level: ${JSON.stringify(shown)}`);
+  // As saved by the zoom that changed the level (commit ba53878): its level, zoom and pan.
+  shown = await reopen({ detail: 'subtitles', x: 20, y: -20, scale: 1.2 });
+  expect(shown.level === 'Summary' && shown.subtitle && close(shown.x, 20) && shown.zoom === '120%', `an older camera opens as saved: ${JSON.stringify(shown)}`);
+  shown = await reopen({ x: 20, y: -20, scale: 1.2 });
+  expect(shown.level === 'Summary' && shown.scale <= 1, `one without a level opens fitted: ${JSON.stringify(shown)}`);
 
   // A tab that leaves the window takes its views along.
   root.hidden = false;
-  again.remove();
   expect(app.diagramViews.has(KEYS.LIVE), 'the tab has a diagram view');
+  const leaving = view();
+  key('+');
   await backend.moveTab(KEYS.LIVE, null);
   expect(await waitFor(() => !app.diagramViews.has(KEYS.LIVE) && !app.listViews.has(KEYS.LIVE)), 'its list and diagram views are dropped');
+  expect(!leaving.animating(), 'with no zoom left running');
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
@@ -1328,6 +1499,7 @@ async function viewChecks(backend, app) {
   control('view-diagram').click();
   expect(await waitFor(() => svg()?.querySelector('[data-id]')), 'and switches back');
   key('+');
+  expect(await waitFor(() => !app.diagramViews.get(KEYS.LIVE).animating()), 'the zoom animation ends');
   const releaseCamera = () => backend.views[KEYS.LIVE]?.cameras?.[KEYS.RELEASE];
 
   // V on the app plan: the list, saved for that document only.
@@ -1622,16 +1794,17 @@ async function narrowChecks() {
   };
   expect(await waitFor(() => document.querySelector('.diagram-svg [data-id]')), 'the diagram is shown');
   const zoom = document.querySelector('.diagram-controls').getBoundingClientRect();
-  // No level fits this canvas readably: the overview is shown at 80% around the focused box, to pan from there.
+  // Fit shows the whole diagram, however small, above the zoom controls.
   const zoomLabel = () => document.querySelector('.diagram-controls .zoom').textContent;
   const fitted = zoomLabel();
-  expect(fitted === 'Titles 80%', `the overview at a readable size, got ${fitted}`);
   const frame = document.querySelector('.diagram-canvas').getBoundingClientRect();
-  const focused = document.querySelector('.diagram-svg [data-kind="box"].focused')?.getBoundingClientRect();
-  const shown = focused && focused.left >= frame.left && focused.right <= frame.right && focused.top >= frame.top && focused.bottom <= frame.bottom;
-  expect(shown && (focused.bottom <= zoom.top || focused.right <= zoom.left), 'around the focused box, clear of the zoom controls');
+  const shapes = [...document.querySelectorAll('.diagram-svg [data-kind="box"], .diagram-svg [data-kind="gate"]')].map((node) => node.getBoundingClientRect());
+  const inside = shapes.every((rect) => rect.left >= frame.left && rect.right <= frame.right && rect.top >= frame.top && rect.bottom <= zoom.top);
+  expect(shapes.length === 8 && inside && Number(fitted.replace('%', '')) < 100, `the whole diagram, clear of the zoom controls: ${fitted}`);
+  expect(zoom.left >= frame.left && zoom.right <= frame.right, 'the zoom controls fit the canvas');
   key('-');
-  expect(zoomLabel() === fitted, `zooming out stops there, got ${zoomLabel()}`);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(Number(zoomLabel().replace('%', '')) < Number(fitted.replace('%', '')), `zooming out goes below the fit, got ${zoomLabel()}`);
   const canvas = document.querySelector('.diagram-canvas').getBoundingClientRect();
   const panel = document.querySelector('.side-pane').getBoundingClientRect();
   const svg = document.querySelector('.diagram-svg').getBoundingClientRect();

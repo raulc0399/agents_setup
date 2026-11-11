@@ -2,23 +2,43 @@ import { h } from './dom.js';
 
 /**
  * Detail levels of the layout, least first (`Detail` in prism-core's graph.rs): titles only,
- * one line of text, the whole text. Zooming changes the level, so text keeps its size.
+ * one line of text, the whole text. Only the user changes the level (the level control, keys
+ * 1 to 3); zooming never does.
  */
-const LEVELS = ['names', 'subtitles', 'full'];
+export const LEVELS = ['names', 'subtitles', 'full'];
 const LEVEL_LABELS = { names: 'Titles', subtitles: 'Summary', full: 'Full text' };
-/** The request for the sizes of every level without a layout, among the levels asked for. */
-const SIZES_REQUEST = 'sizes';
+const LEVEL_TITLES = { names: 'Titles only (1)', subtitles: 'One line of text (2)', full: 'The whole text (3)' };
+/** The level of a document the user did not pick one for: one line of text, as the list's cards. */
+const DEFAULT_LEVEL = 'subtitles';
 /**
- * Pixels per world unit. At DESIGN_SCALE text has the size of the list's cards; at every
- * level the zoom stays between READABLE_MIN and READABLE_MAX. Zooming past either end
- * switches to the neighboring level at DESIGN_SCALE, more than a zoom step from both ends,
- * so a small zoom back does not switch again. A fit is never larger than DESIGN_SCALE; an
- * overview too large to fit at READABLE_MIN is shown at READABLE_MIN from its top left, or
- * around the focused item, to pan from there.
+ * Pixels per world unit. At DESIGN_SCALE text has the size of the list's cards. Zoom is free
+ * between ZOOM_MIN and ZOOM_MAX; a fit is never larger than DESIGN_SCALE and may be smaller
+ * than ZOOM_MIN, so that it shows the whole diagram.
  */
 const DESIGN_SCALE = 1;
-const READABLE_MIN = 0.8;
-const READABLE_MAX = 1.25;
+const ZOOM_MIN = 0.1;
+const ZOOM_MAX = 4;
+/** Buttons, keys, fit and double-click zoom over this long, easing out; pinch and wheel at once. */
+const ZOOM_ANIMATION_MS = 200;
+/**
+ * Zoomed out, small text fades instead of shrinking (`data-zoom` on the SVG, styles.css):
+ * below the first limit the text lines, below the second also the kind and number line, so
+ * the titles remain. A band changes only past its limit by ZOOM_BAND_HYSTERESIS (a share of
+ * it), so a zoom around a limit does not flicker.
+ */
+const ZOOM_BANDS = ['far', 'mid', 'near'];
+const ZOOM_BAND_LIMITS = [0.45, 0.55];
+const ZOOM_BAND_HYSTERESIS = 0.05;
+/**
+ * Zoomed out, pills and badges keep at least this share of their size on screen, growing in
+ * the world at most LABEL_MAX_GROWTH times, and only as far as they stay LABEL_GAP apart and
+ * badges inside their lane (`labelLimits`): further out they shrink too, so they do not cover
+ * each other. Their scale changes in steps of LABEL_SCALE_STEP, which spares most writes.
+ */
+const LABEL_MIN_SCALE = 0.8;
+const LABEL_MAX_GROWTH = 2;
+const LABEL_GAP = 2;
+const LABEL_SCALE_STEP = 0.02;
 const FIT_PADDING_PX = 24;
 /** Distance of the zoom controls from the canvas edge (`.diagram-controls` in styles.css). */
 const CONTROLS_INSET_PX = 12;
@@ -33,6 +53,8 @@ const DRAG_THRESHOLD_PX = 4;
 const KEEP_VISIBLE_PX = 60;
 /** Space kept around a shape that keyboard focus brings into view. */
 const REVEAL_MARGIN_PX = 32;
+/** Pills and badges, which keep a readable size when zoomed out. */
+const LABEL_SHAPES = '[data-kind="pill"], [data-kind="gate"]';
 /** Shapes whose computed paint and font the export writes as attributes. */
 const EXPORT_SHAPES = 'svg, rect, path, text';
 const EXPORT_PROPERTIES = [
@@ -60,12 +82,12 @@ export function layoutKey(document, visible) {
 /**
  * The diagram view of one tab: the SVG that `prism-core` laid out at one detail level,
  * panned and zoomed through its viewBox, themed by `styles.css`; the tab's side pane shows
- * the focused item. A camera `{detail, x, y, scale}` is the level, the world point at the
- * top left and pixels per world unit; each document has its own, `null` fits the whole
- * diagram at the most detailed level that fits. Layouts of the levels shown are kept until
- * the document or what the tab lists changes.
+ * the focused item. A camera `{x, y, scale}` is the world point at the top left and pixels
+ * per world unit; `null` fits the whole diagram. Each document saves its level with its
+ * camera, `{detail, x, y, scale}`, or `{detail}` when fitted. Layouts of the levels shown are
+ * kept until the document or what the tab lists changes.
  *
- * `actions`: layout(document, visibleIds, detail | null) -> Diagram, onFocus(id), onToggle(id),
+ * `actions`: layout(document, visibleIds, detail) -> Diagram, onFocus(id), onToggle(id),
  * onClear(), onCamera(documentId, camera), onLayout(): a new layout is shown (its `counts()`
  * changed). `panel`: the tab's detail panel, which keeps the keyboard in the diagram as the
  * canvas does.
@@ -75,24 +97,29 @@ export class DiagramView {
     this.actions = actions;
     this.panel = panel;
     this.model = null;
-    // The layout shown: its `Layout` from the shell, SVG, level, size and box outlines.
+    // The layout shown: its `Layout` from the shell, SVG, level, size, box outlines, pills and
+    // badges with their centers, and arrowheads with their size.
     this.diagram = null;
     this.svg = null;
     this.detail = null;
     this.bounds = null;
     this.boxes = new Map();
+    this.labels = [];
+    this.heads = [];
     // What is laid out, and the layouts of it per level, arrived or asked for.
     this.layoutKey = null;
     this.source = null;
     this.layouts = new Map();
     this.requests = new Set();
-    // The size of the whole diagram per level, from the latest layout of the document.
-    this.sizes = null;
+    // The level the user picked for the document; `anchoring` while its layout replaces another.
+    this.level = DEFAULT_LEVEL;
+    this.anchoring = false;
+    // The camera on the layout shown; null fits it.
     this.camera = null;
-    // The camera last shown, while the camera's level is still being laid out.
-    this.shown = null;
-    // A level change waiting for its layout: {detail, anchor, scale}.
-    this.switching = null;
+    // A zoom on its way: {target, frame}.
+    this.animation = null;
+    // What the zoom shows now: its scale, the text band, the pills' and badges' scale.
+    this.zoomShown = { scale: null, band: null, labels: null, heads: null };
     this.press = null;
     this.suppressClick = false;
     this.pointerFocus = false;
@@ -101,10 +128,14 @@ export class DiagramView {
     this.shownSelection = null;
 
     this.message = h('div', { class: 'diagram-message', hidden: true });
-    this.zoomLabel = h('span', { class: 'zoom', title: 'Detail and zoom' });
+    this.zoomLabel = h('span', { class: 'zoom', title: 'Zoom' });
+    this.levelButtons = LEVELS.map((level) =>
+      h('button', { 'data-level': level, title: LEVEL_TITLES[level], text: LEVEL_LABELS[level], onclick: () => this.setLevel(level) }),
+    );
     this.controls = h(
       'div',
       { class: 'diagram-controls' },
+      h('div', { class: 'segmented', role: 'group', 'aria-label': 'Detail' }, this.levelButtons),
       h('button', { class: 'button', title: 'Zoom out (-)', 'aria-label': 'Zoom out', text: '−', onclick: () => this.zoomStep(-1) }),
       this.zoomLabel,
       h('button', { class: 'button', title: 'Zoom in (+)', 'aria-label': 'Zoom in', text: '+', onclick: () => this.zoomStep(1) }),
@@ -120,6 +151,7 @@ export class DiagramView {
       onpointerup: (event) => this.onPointerUp(event),
       onpointercancel: () => this.onPointerCancel(),
       onclick: (event) => this.onClick(event),
+      ondblclick: (event) => this.onDoubleClick(event),
       onfocusin: (event) => this.onFocusIn(event),
       // Focus moving to a shape outside the view must not scroll the frame; the camera follows.
       onscroll: () => {
@@ -135,68 +167,56 @@ export class DiagramView {
       this.gesture = null;
     });
     this.element = h('div', { class: 'diagram-frame' }, this.canvas, this.message, this.controls);
-    // A fitted diagram may fit at another level in the new size.
-    this.resizes = new ResizeObserver(() => this.showLevel());
+    // A fitted diagram fits the new size.
+    this.resizes = new ResizeObserver(() => this.applyCamera());
     this.resizes.observe(this.canvas);
   }
 
-  /** The tab left this window: stop watching the canvas size. */
+  /** The tab left this window: stop watching the canvas size and any zoom on its way. */
   dispose() {
     this.resizes.disconnect();
+    if (this.animation) {
+      cancelAnimationFrame(this.animation.frame);
+      this.animation = null;
+    }
   }
 
   /**
    * `model`: {document, rows, focus: the focused item's ID or null, selected: Set of selected
-   * item IDs, camera: the camera saved for this document or null, sizes: the sizes of what is
-   * shown, when the list already asked for them, or null}.
+   * item IDs, camera: the camera saved for this document or null}. The saved camera is read
+   * when the document is shown; from then on this view keeps it and reports its changes.
    */
   render(model) {
     const previousFocus = this.model?.focus ?? null;
+    if (model.document.id !== this.model?.document.id) {
+      // A zoom on its way belongs to the document shown before.
+      this.stopAnimation();
+      this.level = savedLevel(model.camera);
+      this.camera = savedPosition(model.camera);
+      this.anchoring = false;
+    }
     this.model = model;
     const visible = model.rows.map((row) => row.id);
     const key = layoutKey(model.document, visible);
     if (key !== this.layoutKey) {
-      // Sizes and a level change of another document do not apply to this one.
-      if (this.source?.document.id !== model.document.id) {
-        this.sizes = null;
-        this.switching = null;
-      }
       this.layoutKey = key;
       this.source = { document: model.document, visible };
       this.layouts = new Map();
       this.requests = new Set();
     }
-    // Sizes the list asked for spare asking again.
-    if (model.sizes) {
-      this.sizes = model.sizes;
-    }
-    // A saved camera this view could not have made does not apply: the diagram starts fitted.
-    this.camera = usableCamera(model.camera) ? model.camera : null;
+    this.showLevels();
     this.showLevel();
     this.showFocus(model.focus !== previousFocus);
   }
 
-  /** The level a level change, the camera or the fit asks for; null while a fit lacks the sizes or the canvas size. */
-  wantedLevel() {
-    return this.switching?.detail ?? this.camera?.detail ?? this.fitLevel();
-  }
-
-  /** Shows the layout of the wanted level, once it arrived; until then the one shown stays. */
+  /** Shows the layout of the level picked, once it arrived; until then the one shown stays. */
   showLevel() {
     if (!this.model) {
       return;
     }
-    const level = this.wantedLevel();
-    if (level === null) {
-      // A fit picks its level from the sizes, which come without laying out any level.
-      if (!this.sizes) {
-        this.requestLayout(null);
-      }
-      return;
-    }
-    const layout = this.layouts.get(level);
+    const layout = this.layouts.get(this.level);
     if (!layout) {
-      this.requestLayout(level);
+      this.requestLayout(this.level);
       this.applyCamera();
       return;
     }
@@ -204,20 +224,43 @@ export class DiagramView {
       this.install(layout);
       return;
     }
+    // Picked again before its layout replaced it: the level shown stays as it is.
+    this.anchoring = false;
     this.applyCamera();
   }
 
+  /** The level control shows the level picked. */
+  showLevels() {
+    for (const button of this.levelButtons) {
+      button.setAttribute('aria-pressed', String(button.dataset.level === this.level));
+    }
+  }
+
   /**
-   * Asks the shell for the sizes of what is shown now and the layout of a level, or with a
-   * null `detail` for the sizes alone; one request per level at a time. A failed one can be
-   * asked again; the level shown stays.
+   * Shows another level: it is laid out once, and the box at the focused box or the canvas
+   * center stays in place at the same zoom (see `install`).
    */
-  async requestLayout(detail) {
-    const request = detail ?? SIZES_REQUEST;
-    if (this.requests.has(request)) {
+  setLevel(level) {
+    if (!this.model || level === this.level) {
       return;
     }
-    this.requests.add(request);
+    this.stopAnimation();
+    this.level = level;
+    this.anchoring = this.svg !== null;
+    this.showLevels();
+    this.showLevel();
+  }
+
+  /**
+   * Asks the shell for the layout of a level of what is shown now, which comes with the sizes
+   * of every level; one request per level at a time. A failed one can be asked again; the
+   * level shown stays.
+   */
+  async requestLayout(detail) {
+    if (this.requests.has(detail)) {
+      return;
+    }
+    this.requests.add(detail);
     const key = this.layoutKey;
     let response = null;
     let failure = null;
@@ -229,41 +272,66 @@ export class DiagramView {
     if (key !== this.layoutKey) {
       return;
     }
-    this.requests.delete(request);
+    this.requests.delete(detail);
     if (response?.layout) {
       const svg = parseSvg(response.layout.svg);
       if (svg) {
-        this.layouts.set(detail, { diagram: response.layout, svg, boxes: boxOutlines(svg), bounds: response.sizes[detail] });
+        // Arrowhead sizes are read before any zoom changed them.
+        const heads = [...svg.querySelectorAll('marker')].map((marker) => ({ marker, size: Number(marker.getAttribute('markerWidth')) }));
+        this.layouts.set(detail, { diagram: response.layout, svg, boxes: boxOutlines(svg), labels: labelLimits(svg), heads, bounds: response.sizes[detail] });
       } else {
         failure = 'The diagram could not be shown.';
       }
     }
     if (failure) {
-      this.switching = null;
+      // A level no longer picked fails quietly.
+      if (detail !== this.level) {
+        return;
+      }
+      // A level picked while another is shown goes back to that one.
+      if (this.detail !== null && detail !== this.detail) {
+        this.level = this.detail;
+        this.anchoring = false;
+        this.showLevels();
+      }
       this.showMessage(failure);
       return;
     }
-    this.sizes = response.sizes;
     this.showLevel();
   }
 
   install(layout) {
     // Keyboard focus inside the old SVG moves to the same item in the new one.
     const refocus = this.svg?.contains(document.activeElement);
+    // A level the user picked keeps the box at the focused box or the canvas center in place.
+    const anchor = this.anchoring ? { anchor: this.anchorAt(...this.zoomAnchor()), scale: this.current().scale } : null;
+    this.anchoring = false;
+    // Otherwise a zoom on its way ends where it was heading, on the new layout.
+    const finish = anchor ? null : (this.animation?.done ?? null);
+    if (finish) {
+      cancelAnimationFrame(this.animation.frame);
+      this.animation = null;
+    }
+    this.stopAnimation();
     this.svg?.remove();
     this.svg = layout.svg;
     this.diagram = layout.diagram;
     this.detail = layout.diagram.detail;
     this.bounds = layout.bounds;
     this.boxes = layout.boxes;
+    this.labels = layout.labels;
+    this.heads = layout.heads;
+    this.zoomShown = { scale: null, band: null, labels: null, heads: null };
+    // Set before the SVG is shown, so its texts do not fade in.
+    this.showZoom(anchor ? anchor.scale : this.current().scale);
     this.canvas.prepend(this.svg);
     this.showMessage(this.diagram.order.length === 0 ? 'Nothing to draw: the items shown here have no boxes.' : null);
     this.shownFocus = null;
     this.shownSelection = null;
-    const switching = this.switching;
-    this.switching = null;
-    if (switching) {
-      this.setCamera(this.anchoredCamera(switching));
+    if (anchor) {
+      this.setCamera(this.anchoredCamera(anchor));
+    } else if (finish) {
+      finish();
     } else {
       this.applyCamera();
     }
@@ -362,56 +430,41 @@ export class DiagramView {
     return { top: FIT_PADDING_PX, width: width - 2 * FIT_PADDING_PX, height: height - FIT_PADDING_PX - bottom };
   }
 
-  /** The scale at which a diagram of `size` fills the fit area, at most DESIGN_SCALE. */
-  fitScale(size) {
-    if (!size || size.width <= 0 || size.height <= 0) {
+  /** The scale at which a shape of `size` (by default the whole diagram) fills the fit area, at most DESIGN_SCALE. */
+  fitScale(size = this.bounds) {
+    const area = this.fitArea();
+    if (!size || size.width <= 0 || size.height <= 0 || area.width <= 0 || area.height <= 0) {
       return DESIGN_SCALE;
     }
-    const area = this.fitArea();
     return Math.min(area.width / size.width, area.height / size.height, DESIGN_SCALE);
   }
 
-  /** The most detailed level whose whole diagram fits readably, else the overview; null before sizes and a canvas size are known. */
-  fitLevel() {
-    const { width, height } = this.size();
-    if (!this.sizes || width === 0 || height === 0) {
-      return null;
-    }
-    return [...LEVELS].reverse().find((level) => this.fitScale(this.sizes[level]) >= READABLE_MIN) ?? LEVELS[0];
+  /** The camera at `scale` with the world rectangle `box` in the middle of the fit area. */
+  centered(box, scale) {
+    const area = this.fitArea();
+    return {
+      x: box.x + box.width / 2 - this.size().width / 2 / scale,
+      y: box.y + box.height / 2 - (area.top + area.height / 2) / scale,
+      scale,
+    };
   }
 
-  /**
-   * The camera that shows the whole diagram shown, centered above the zoom controls. One too
-   * large for READABLE_MIN is shown at it, around the focused item or from its top left.
-   */
+  /** The camera that shows the whole diagram shown, centered above the zoom controls. */
   fitCamera() {
     const bounds = this.bounds ?? { width: 0, height: 0 };
     if (bounds.width <= 0 || bounds.height <= 0) {
       return { x: 0, y: 0, scale: DESIGN_SCALE };
     }
-    const area = this.fitArea();
-    const scale = clamp(this.fitScale(bounds), READABLE_MIN, DESIGN_SCALE);
-    const centered = (box) => ({
-      x: box.x + box.width / 2 - this.size().width / 2 / scale,
-      y: box.y + box.height / 2 - (area.top + area.height / 2) / scale,
-      scale,
-    });
-    if (this.fitScale(bounds) >= READABLE_MIN) {
-      return centered({ x: 0, y: 0, ...bounds });
-    }
-    const focused = this.stop(this.model?.focus);
-    if (focused) {
-      return centered(focused.getBBox());
-    }
-    return { x: -FIT_PADDING_PX / scale, y: -area.top / scale, scale };
+    return this.centered({ x: 0, y: 0, ...bounds }, this.fitScale());
   }
 
-  /** The camera of the layout shown: while another level is laid out, the one last shown. */
   current() {
-    if (!this.camera) {
-      return this.fitCamera();
-    }
-    return this.camera.detail === this.detail ? this.camera : (this.shown ?? this.fitCamera());
+    return this.camera ?? this.fitCamera();
+  }
+
+  /** The zoom range: down to ZOOM_MIN, or to the fit when the diagram fits only below it. */
+  zoomLimits() {
+    return [Math.min(ZOOM_MIN, this.fitScale()), ZOOM_MAX];
   }
 
   applyCamera() {
@@ -420,75 +473,171 @@ export class DiagramView {
       return;
     }
     const camera = this.current();
-    this.shown = camera;
     this.svg.setAttribute('viewBox', `${camera.x} ${camera.y} ${width / camera.scale} ${height / camera.scale}`);
-    this.zoomLabel.textContent = `${LEVEL_LABELS[this.detail]} ${Math.round(camera.scale * 100)}%`;
+    this.zoomLabel.textContent = `${Math.round(camera.scale * 100)}%`;
+    this.showZoom(camera.scale);
   }
 
   /**
-   * Moves the camera on the layout shown, keeps part of the diagram in view, shows and reports
-   * it. Without a canvas size (the tab is not shown) there is nothing to keep in view: no move.
+   * What the zoom changes besides the viewBox, set per element only when it changes: the text
+   * band, the size of pills and badges below LABEL_MIN_SCALE (scaled around their center), and
+   * arrowheads, which scale with the diagram up to 100% and keep that size on screen beyond.
    */
-  setCamera(camera) {
+  showZoom(scale) {
+    const shown = this.zoomShown;
+    if (scale === shown.scale) {
+      return;
+    }
+    shown.scale = scale;
+    const band = zoomBand(scale, shown.band);
+    if (band !== shown.band) {
+      this.svg.dataset.zoom = band;
+      shown.band = band;
+    }
+    const labels = Math.max(1, Math.ceil(LABEL_MIN_SCALE / scale / LABEL_SCALE_STEP) * LABEL_SCALE_STEP);
+    if (labels !== shown.labels) {
+      for (const label of this.labels) {
+        const growth = Math.min(labels, label.growth);
+        if (growth === label.shown) {
+          continue;
+        }
+        if (growth === 1) {
+          label.node.removeAttribute('transform');
+        } else {
+          label.node.setAttribute('transform', `matrix(${growth} 0 0 ${growth} ${label.x * (1 - growth)} ${label.y * (1 - growth)})`);
+        }
+        label.shown = growth;
+      }
+      shown.labels = labels;
+    }
+    const heads = Math.min(1, 1 / scale);
+    if (heads !== shown.heads) {
+      for (const { marker, size } of this.heads) {
+        marker.setAttribute('markerWidth', String(size * heads));
+        marker.setAttribute('markerHeight', String(size * heads));
+      }
+      shown.heads = heads;
+    }
+  }
+
+  /**
+   * Shows and reports a camera on the layout shown. Before a layout arrived, or without a
+   * canvas size (the tab is not shown), there is nothing to show: no move.
+   */
+  moveCamera(camera) {
     const { width, height } = this.size();
     if (width === 0 || height === 0) {
       return;
     }
-    const bounds = this.bounds ?? { width: 0, height: 0 };
-    const keep = KEEP_VISIBLE_PX / camera.scale;
-    this.camera = {
-      detail: this.detail,
-      x: clamp(camera.x, keep - width / camera.scale, bounds.width - keep),
-      y: clamp(camera.y, keep - height / camera.scale, bounds.height - keep),
-      scale: camera.scale,
-    };
-    this.applyCamera();
-    this.actions.onCamera(this.model.document.id, this.camera);
+    this.placeCamera(camera);
   }
 
-  /** Zooms by `factor` around a point of the canvas (client coordinates), by default its center. */
-  zoomBy(factor, clientX = null, clientY = null) {
-    this.zoomTo(this.current().scale * factor, clientX, clientY);
+  /** Shows (once the canvas has a size) and reports a camera on the layout shown. */
+  placeCamera(camera) {
+    if (!this.svg) {
+      return;
+    }
+    this.camera = camera;
+    this.applyCamera();
+    this.report();
+  }
+
+  /** Saves the level with the camera, or with the fit. */
+  report() {
+    const camera = this.camera ? { detail: this.detail, ...this.camera } : { detail: this.level };
+    this.actions.onCamera(this.model.document.id, camera);
+  }
+
+  /** Moves the camera with part of the diagram kept in view; a zoom on its way stops. */
+  setCamera(camera) {
+    this.stopAnimation();
+    this.moveCamera(this.limited(camera));
   }
 
   /**
-   * Zooms to `target` pixels per world unit around a point of the canvas. Past the end of the
-   * level's band it switches the level instead; until that layout arrives, zooming waits.
+   * The camera moved as little as keeps KEEP_VISIBLE_PX of the diagram in view, or all of it
+   * when it is smaller on screen. A pan `from` a camera already beyond that may stay as far
+   * out, never further, so the view never jumps.
    */
-  zoomTo(target, clientX = null, clientY = null) {
-    if (!this.svg || this.switching) {
-      return;
-    }
+  limited(camera, from = null) {
+    const { width, height } = this.size();
+    const bounds = this.bounds ?? { width: 0, height: 0 };
+    const axis = (value, view, extent, start) => {
+      const keep = Math.min(KEEP_VISIBLE_PX / camera.scale, extent);
+      const low = keep - view / camera.scale;
+      const high = extent - keep;
+      return start === null ? clamp(value, low, high) : clamp(value, Math.min(low, start), Math.max(high, start));
+    };
+    return {
+      x: axis(camera.x, width, bounds.width, from?.x ?? null),
+      y: axis(camera.y, height, bounds.height, from?.y ?? null),
+      scale: camera.scale,
+    };
+  }
+
+  /** The canvas point of a client point; without one, the canvas center. */
+  canvasPoint(clientX = null, clientY = null) {
     const rect = this.canvas.getBoundingClientRect();
-    const px = clientX === null ? rect.width / 2 : clientX - rect.left;
-    const py = clientY === null ? rect.height / 2 : clientY - rect.top;
-    const index = LEVELS.indexOf(this.detail);
-    if (target > READABLE_MAX && index < LEVELS.length - 1) {
-      this.switchLevel(LEVELS[index + 1], px, py);
+    return clientX === null ? [rect.width / 2, rect.height / 2] : [clientX - rect.left, clientY - rect.top];
+  }
+
+  /**
+   * `camera` zoomed to `scale` (within the zoom range) around the canvas point (px, py): the
+   * world point there stays there. Zooming out, or in on the diagram, keeps the diagram in
+   * view by itself; zooming in on the space beside it is limited as a pan is.
+   */
+  zoomedCamera(camera, scale, px, py) {
+    const [min, max] = this.zoomLimits();
+    // A camera below the range (a fit that grew) zooms on from where it is.
+    const next = clamp(scale, Math.min(min, camera.scale), max);
+    const world = [camera.x + px / camera.scale, camera.y + py / camera.scale];
+    const zoomed = { x: world[0] - px / next, y: world[1] - py / next, scale: next };
+    const bounds = this.bounds ?? { width: 0, height: 0 };
+    const onDiagram = world[0] >= 0 && world[0] <= bounds.width && world[1] >= 0 && world[1] <= bounds.height;
+    return next <= camera.scale || onDiagram ? zoomed : this.limited(zoomed);
+  }
+
+  /** Pinch and wheel: zooms to `scale` at once, around a client point. */
+  zoomAt(scale, clientX, clientY) {
+    if (!this.svg) {
       return;
     }
-    if (target < READABLE_MIN && index > 0) {
-      this.switchLevel(LEVELS[index - 1], px, py);
-      return;
+    this.stopAnimation();
+    this.moveCamera(this.zoomedCamera(this.current(), scale, ...this.canvasPoint(clientX, clientY)));
+  }
+
+  /** The canvas point a zoom by button or key keeps in place: the focused box's middle if one is shown, else the canvas center. */
+  zoomAnchor() {
+    const box = this.boxes.get(this.model?.focus);
+    if (!box) {
+      return this.canvasPoint();
     }
     const camera = this.current();
-    const scale = clamp(target, READABLE_MIN, READABLE_MAX);
-    // The world point under the anchor stays under it.
-    const worldX = camera.x + px / camera.scale;
-    const worldY = camera.y + py / camera.scale;
-    this.setCamera({ x: worldX - px / scale, y: worldY - py / scale, scale });
+    return [(box.x + box.width / 2 - camera.x) * camera.scale, (box.y + box.height / 2 - camera.y) * camera.scale];
+  }
+
+  /** One zoom step in (1) or out (-1), animated; steps in a row add up. */
+  zoomStep(direction) {
+    this.zoomAnimated((this.animation?.target ?? this.current()).scale * ZOOM_STEP ** direction);
+  }
+
+  /** Zooms to 100%, animated. */
+  zoomActual() {
+    this.zoomAnimated(DESIGN_SCALE);
+  }
+
+  zoomAnimated(scale) {
+    if (!this.svg) {
+      return;
+    }
+    this.animateTo(this.zoomedCamera(this.current(), scale, ...this.zoomAnchor()));
   }
 
   /** Pans by screen pixels. */
   panBy(dx, dy) {
+    this.stopAnimation();
     const camera = this.current();
-    this.setCamera({ x: camera.x + dx / camera.scale, y: camera.y + dy / camera.scale, scale: camera.scale });
-  }
-
-  /** Shows another level at DESIGN_SCALE, with the box at the canvas point (px, py) kept there. */
-  switchLevel(detail, px, py) {
-    this.switching = { detail, anchor: this.anchorAt(px, py), scale: DESIGN_SCALE };
-    this.showLevel();
+    this.moveCamera(this.limited({ x: camera.x + dx / camera.scale, y: camera.y + dy / camera.scale, scale: camera.scale }, camera));
   }
 
   /**
@@ -529,31 +678,72 @@ export class DiagramView {
     return { x: x - anchor.px / scale, y: y - anchor.py / scale, scale };
   }
 
-  /** One zoom step in (1) or out (-1), around the focused box if one is shown, else the center. */
-  zoomStep(direction) {
-    const box = this.boxes.get(this.model?.focus);
-    if (!box) {
-      this.zoomBy(ZOOM_STEP ** direction);
-      return;
-    }
-    const camera = this.current();
-    const rect = this.canvas.getBoundingClientRect();
-    const clientX = rect.left + (box.x + box.width / 2 - camera.x) * camera.scale;
-    const clientY = rect.top + (box.y + box.height / 2 - camera.y) * camera.scale;
-    this.zoomBy(ZOOM_STEP ** direction, clientX, clientY);
-  }
-
   /** One pan step per axis: -1, 0 or 1. */
   panStep(dx, dy) {
     this.panBy(dx * PAN_STEP_PX, dy * PAN_STEP_PX);
   }
 
-  /** Fits the whole diagram, at the most detailed level that fits readably. */
+  /** Fits the whole diagram, animated; it stays fitted when the canvas changes size. */
   fit() {
-    this.camera = null;
-    this.switching = null;
-    this.actions.onCamera(this.model.document.id, null);
-    this.showLevel();
+    if (!this.svg) {
+      return;
+    }
+    this.animateTo(this.fitCamera(), () => this.placeCamera(null));
+  }
+
+  /** Zooms to a box: centered at 100%, or whole when larger; zoomed in further, at that zoom. */
+  zoomToBox(id) {
+    const box = this.boxes.get(id);
+    if (!box) {
+      return;
+    }
+    const scale = Math.max(this.current().scale, Math.min(DESIGN_SCALE, this.fitScale(box)));
+    this.animateTo(this.limited(this.centered(box, scale)));
+  }
+
+  /**
+   * Moves the camera to `target` over ZOOM_ANIMATION_MS, easing out, zooming around the one
+   * canvas point both cameras show the same world point at; then `done` (by default the
+   * target is shown and reported, also when the tab was hidden meanwhile). With reduced
+   * motion, at once.
+   */
+  animateTo(target, done = () => this.placeCamera(target)) {
+    this.stopAnimation();
+    const from = this.current();
+    if (reducedMotion() || (from.x === target.x && from.y === target.y && from.scale === target.scale)) {
+      done();
+      return;
+    }
+    const start = performance.now();
+    const frame = (now) => {
+      const progress = Math.min(1, (now - start) / ZOOM_ANIMATION_MS);
+      if (progress >= 1) {
+        this.animation = null;
+        done();
+        return;
+      }
+      this.camera = between(from, target, 1 - (1 - progress) ** 3);
+      this.applyCamera();
+      this.animation.frame = requestAnimationFrame(frame);
+    };
+    this.animation = { target, done, frame: requestAnimationFrame(frame) };
+  }
+
+  /** Stops a zoom on its way where it is, and reports that camera. */
+  stopAnimation() {
+    if (!this.animation) {
+      return;
+    }
+    cancelAnimationFrame(this.animation.frame);
+    this.animation = null;
+    if (this.camera) {
+      this.report();
+    }
+  }
+
+  /** Whether a zoom is on its way. */
+  animating() {
+    return this.animation !== null;
   }
 
   /** Pans the least amount that brings the shape into view, with a margin. */
@@ -592,6 +782,7 @@ export class DiagramView {
   onPointerDown(event) {
     this.pointerFocus = true;
     this.suppressClick = false;
+    this.stopAnimation();
     if (event.button !== 0) {
       return;
     }
@@ -618,7 +809,8 @@ export class DiagramView {
         // The pointer is already gone; the drag ends with its pointerup anyway.
       }
     }
-    this.setCamera({ x: press.camera.x - dx / press.camera.scale, y: press.camera.y - dy / press.camera.scale, scale: press.camera.scale });
+    const next = { x: press.camera.x - dx / press.camera.scale, y: press.camera.y - dy / press.camera.scale, scale: press.camera.scale };
+    this.moveCamera(this.limited(next, this.current()));
   }
 
   onPointerUp(event) {
@@ -662,6 +854,14 @@ export class DiagramView {
     this.pointerFocus = false;
   }
 
+  /** A double-click on a box zooms to it. */
+  onDoubleClick(event) {
+    const box = event.target.closest?.('[data-kind="box"]');
+    if (box) {
+      this.zoomToBox(box.dataset.id);
+    }
+  }
+
   /** Tab onto a shape focuses its item and brings it into view; a press or click does neither here. */
   onFocusIn(event) {
     const shape = event.target.closest?.('[data-id]');
@@ -678,7 +878,7 @@ export class DiagramView {
       // A trackpad pinch in Chromium and WebView2, or Ctrl (⌘) with a mouse wheel.
       if (this.gesture === null) {
         const delta = clamp(event.deltaY, -WHEEL_NOTCH_PX, WHEEL_NOTCH_PX);
-        this.zoomBy(ZOOM_STEP ** (-delta / WHEEL_NOTCH_PX), event.clientX, event.clientY);
+        this.zoomAt(this.current().scale * ZOOM_STEP ** (-delta / WHEEL_NOTCH_PX), event.clientX, event.clientY);
       }
       return;
     }
@@ -686,31 +886,42 @@ export class DiagramView {
     this.panBy(sideways ? event.deltaY : event.deltaX, sideways ? 0 : event.deltaY);
   }
 
-  /** The zoom is the gesture's scale times `base`; after a level change, the gesture goes on from the new scale. */
+  /** The zoom is the gesture's scale times `base`, the zoom when it started. */
   onGesture(event) {
     event.preventDefault();
-    if (event.type === 'gesturestart' || this.gesture === null || this.gesture.detail !== this.detail) {
-      this.gesture = { base: this.current().scale / (event.scale || 1), detail: this.detail };
+    if (event.type === 'gesturestart' || this.gesture === null) {
+      this.gesture = { base: this.current().scale / (event.scale || 1) };
     }
     if (event.type === 'gesturechange') {
-      this.zoomTo(this.gesture.base * event.scale, event.clientX, event.clientY);
+      this.zoomAt(this.gesture.base * event.scale, event.clientX, event.clientY);
     }
   }
 
   // Export
 
   /**
-   * The whole diagram as a standalone SVG file: what the theme paints is written into
-   * presentation attributes, so the file looks the same outside the app.
+   * The whole diagram as a standalone SVG file of the level shown: what the theme paints is
+   * written into presentation attributes, so the file looks the same outside the app. What
+   * the zoom changes is left out: every text shows, pills, badges and arrowheads at their size.
    */
   exportSvg() {
     if (!this.svg || !this.diagram) {
       return null;
     }
-    const marked = VIEW_CLASSES.map((name) => [name, [...this.svg.querySelectorAll(`.${name}`)]]);
-    marked.forEach(([name, nodes]) => nodes.forEach((node) => node.classList.remove(name)));
-    const copy = this.svg.cloneNode(true);
-    const originals = [this.svg, ...this.svg.querySelectorAll(EXPORT_SHAPES)];
+    // The theme is read from a hidden copy without the view's classes and the zoom band, so
+    // the SVG shown does not change.
+    const staged = this.svg.cloneNode(true);
+    VIEW_CLASSES.forEach((name) => staged.querySelectorAll(`.${name}`).forEach((node) => node.classList.remove(name)));
+    delete staged.dataset.zoom;
+    const stage = h('div', { hidden: true }, staged);
+    this.element.append(stage);
+    const copy = staged.cloneNode(true);
+    copy.querySelectorAll(LABEL_SHAPES).forEach((node) => node.removeAttribute('transform'));
+    copy.querySelectorAll('marker').forEach((marker, index) => {
+      marker.setAttribute('markerWidth', String(this.heads[index].size));
+      marker.setAttribute('markerHeight', String(this.heads[index].size));
+    });
+    const originals = [staged, ...staged.querySelectorAll(EXPORT_SHAPES)];
     const copies = [copy, ...copy.querySelectorAll(EXPORT_SHAPES)];
     originals.forEach((node, index) => {
       const style = getComputedStyle(node);
@@ -718,7 +929,7 @@ export class DiagramView {
         copies[index].setAttribute(property, style.getPropertyValue(property));
       }
     });
-    marked.forEach(([name, nodes]) => nodes.forEach((node) => node.classList.add(name)));
+    stage.remove();
     copy.removeAttribute('class');
     copy.setAttribute('width', String(this.bounds.width));
     copy.setAttribute('height', String(this.bounds.height));
@@ -727,14 +938,95 @@ export class DiagramView {
   }
 }
 
-/** A camera of a known level within the readable band. */
-function usableCamera(camera) {
-  return (
-    LEVELS.includes(camera?.detail) &&
-    [camera.x, camera.y, camera.scale].every(Number.isFinite) &&
-    camera.scale >= READABLE_MIN &&
-    camera.scale <= READABLE_MAX
-  );
+/** The level a saved camera names, else DEFAULT_LEVEL. */
+function savedLevel(camera) {
+  return LEVELS.includes(camera?.detail) ? camera.detail : DEFAULT_LEVEL;
+}
+
+/** The zoom and pan of a saved camera of a known level within the zoom range; else null, which fits. */
+function savedPosition(camera) {
+  const usable =
+    LEVELS.includes(camera?.detail) && [camera.x, camera.y, camera.scale].every(Number.isFinite) && camera.scale > 0 && camera.scale <= ZOOM_MAX;
+  return usable ? { x: camera.x, y: camera.y, scale: camera.scale } : null;
+}
+
+/**
+ * The text band of a zoom (ZOOM_BANDS): a band is left, up or down, only past its limit by
+ * ZOOM_BAND_HYSTERESIS; without a `current` band, at the limit.
+ */
+function zoomBand(scale, current) {
+  const index = current === null ? null : ZOOM_BANDS.indexOf(current);
+  const reached = ZOOM_BAND_LIMITS.filter((limit, position) => {
+    if (index === null) {
+      return scale >= limit;
+    }
+    return scale >= limit * (position < index ? 1 - ZOOM_BAND_HYSTERESIS : 1 + ZOOM_BAND_HYSTERESIS);
+  });
+  return ZOOM_BANDS[reached.length];
+}
+
+/**
+ * The camera `share` of the way from `from` to `to`: the scale on a log scale, the position so
+ * that the canvas point both show the same world point at stays put; a pan without a zoom,
+ * straight.
+ */
+function between(from, to, share) {
+  const scale = from.scale * (to.scale / from.scale) ** share;
+  const axis = (start, end) => {
+    if (from.scale === to.scale) {
+      return start + (end - start) * share;
+    }
+    const fixed = (end - start) / (1 / from.scale - 1 / to.scale);
+    return start + fixed / from.scale - fixed / scale;
+  };
+  return { x: axis(from.x, to.x), y: axis(from.y, to.y), scale };
+}
+
+function reducedMotion() {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+}
+
+/** The rectangle of a shape from its attributes. */
+function rectOf(shape) {
+  const [x, y, width, height] = ['x', 'y', 'width', 'height'].map((name) => Number(shape.getAttribute(name)));
+  return { x, y, width, height };
+}
+
+/**
+ * Pills and badges, each with the middle of its shape and how far it may grow around it:
+ * LABEL_GAP apart from every other one growing as much, a badge inside its lane, at most
+ * LABEL_MAX_GROWTH; `shown` is the growth shown.
+ */
+function labelLimits(svg) {
+  const labels = [...svg.querySelectorAll(LABEL_SHAPES)].map((node) => {
+    const rect = rectOf(node.querySelector('.prism-shape'));
+    return { node, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, half: [rect.width / 2, rect.height / 2], growth: LABEL_MAX_GROWTH, shown: 1 };
+  });
+  // Two labels growing by g overlap only while both their distances are below g times their half sizes.
+  labels.forEach((label, index) => {
+    for (const other of labels.slice(index + 1)) {
+      const across = (Math.abs(label.x - other.x) - LABEL_GAP) / (label.half[0] + other.half[0]);
+      const along = (Math.abs(label.y - other.y) - LABEL_GAP) / (label.half[1] + other.half[1]);
+      const growth = Math.max(1, across, along);
+      label.growth = Math.min(label.growth, growth);
+      other.growth = Math.min(other.growth, growth);
+    }
+  });
+  const lanes = [...svg.querySelectorAll('.prism-lane > .prism-shape')].map(rectOf);
+  for (const label of labels.filter(({ node }) => node.dataset.kind === 'gate')) {
+    const lane = lanes.find((rect) => label.x >= rect.x && label.x <= rect.x + rect.width && label.y >= rect.y && label.y <= rect.y + rect.height);
+    if (!lane) {
+      continue;
+    }
+    const room = Math.min(
+      (label.x - lane.x) / label.half[0],
+      (lane.x + lane.width - label.x) / label.half[0],
+      (label.y - lane.y) / label.half[1],
+      (lane.y + lane.height - label.y) / label.half[1],
+    );
+    label.growth = Math.min(label.growth, Math.max(1, room));
+  }
+  return labels;
 }
 
 /** The SVG of a layout, ready to show, or null when it is not one. */

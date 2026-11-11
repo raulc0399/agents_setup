@@ -277,6 +277,13 @@ const DIAGRAM_VIEWS = {
   'diagram-titles': { focus: null, cameras: { [RELEASE]: { detail: 'names', x: -40, y: -24, scale: 1 } } },
   'diagram-full': { focus: null, cameras: { [RELEASE]: { detail: 'full', x: -40, y: -24, scale: 1 } } },
   'diagram-summary': { focus: null, cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -24, scale: 1 } } },
+  // Zoomed out and in: text fades below 55% and 45%, pills and badges keep a readable size,
+  // lines their width, arrowheads at most their size at 100%.
+  'diagram-zoom-30': { focus: null, cameras: { [RELEASE]: { detail: 'full', x: -200, y: -120, scale: 0.3 } } },
+  'diagram-zoom-60': { focus: null, cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -40, scale: 0.6 } } },
+  'diagram-zoom-250': { focus: null, cameras: { [RELEASE]: { detail: 'subtitles', x: 250, y: 60, scale: 2.5 } } },
+  // One lane in rows of three: arrows past a box in their row, several into one side, up a row.
+  'diagram-routes': { focus: null, cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -60, scale: 1 } } },
   // Long texts: fitted, and the full text of the longest box.
   'diagram-long': { focus: null, cameras: {} },
   'diagram-long-full': { focus: releaseItem(4), cameras: { [RELEASE]: { detail: 'full', x: -40, y: 180, scale: 1 } } },
@@ -327,6 +334,29 @@ function longTextContents() {
   const live = structuredClone(CONTENTS[LIVE]);
   const release = live.documents.find((candidate) => candidate.id === RELEASE);
   Object.entries(LONG_TEXTS).forEach(([id, change]) => Object.assign(release.elements[id], change));
+  return { ...CONTENTS, [LIVE]: live };
+}
+
+/** Scenarios whose release flow is one lane with more arrows (`routeContents`). */
+const ROUTE_SCENARIOS = ['diagram-routes'];
+const MORE_ROUTES = [
+  [1, 3, 'directed'],
+  [4, 6, 'bidirectional'],
+  [1, 5, 'directed'],
+  [2, 5, 'directed'],
+  [6, 2, 'directed'],
+  [5, 1, 'bidirectional'],
+];
+
+/** The fixture's contents with the release flow ungrouped, in one lane, and MORE_ROUTES. */
+function routeContents() {
+  const live = structuredClone(CONTENTS[LIVE]);
+  const release = live.documents.find((candidate) => candidate.id === RELEASE);
+  release.groups = {};
+  MORE_ROUTES.forEach(([from, to, direction], index) => {
+    const route = { ...relationship(1, from, to, 'more'), id: `b4000000-0000-4000-8000-0000000000${10 + index}`, direction };
+    release.relationships[route.id] = route;
+  });
   return { ...CONTENTS, [LIVE]: live };
 }
 
@@ -388,6 +418,9 @@ export function fixture(scenario) {
   let contents = DROPPED_SCENARIOS[scenario] ? droppedContents(DROPPED_SCENARIOS[scenario]) : CONTENTS;
   if (LONG_TEXT_SCENARIOS.includes(scenario)) {
     contents = longTextContents();
+  }
+  if (ROUTE_SCENARIOS.includes(scenario)) {
+    contents = routeContents();
   }
   return { state: { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) }, contents };
 }

@@ -79,6 +79,9 @@ const RUN_STEPS: usize = 16;
 const RUN_TOLERANCE: f32 = 16.0;
 /// Room a line keeps to boxes, badges, lane titles and lane edges.
 const RUN_MARGIN: f32 = 4.0;
+/// Room below a lane's last row: an arrow past a box in that row runs `ARROW_END_RUN` below
+/// it, and a second one `RUN_SPACING` further, both clear of the lane's edge.
+const LANE_BOTTOM_PADDING: f32 = ARROW_END_RUN + RUN_SPACING + RUN_MARGIN;
 /// Room an arrow's end keeps to the corners of its box side.
 const PORT_INSET: f32 = 12.0;
 /// Where along a segment a pill may sit, tried in this order.
@@ -107,6 +110,13 @@ const DROPPED_LABEL: &str = "dropped";
 /// Arrowhead markers: one per arrow color (see `COLOR_MARK`), and the focused one.
 const HEAD: &str = "prism-head";
 const HEAD_FOCUS: &str = "prism-head-focus";
+/// Width and height of an arrowhead in world units, whatever the line's stroke width
+/// (`markerUnits="userSpaceOnUse"`), so a viewer can size it on screen.
+const ARROW_HEAD_SIZE: f32 = 11.5;
+/// An arrow runs straight into its head, and out of a start head, for at least this long: a
+/// bend never sits inside the head.
+pub const ARROW_END_RUN: f32 = ARROW_HEAD_SIZE + HEAD_CLEARANCE;
+const HEAD_CLEARANCE: f32 = 8.0;
 
 const BACKGROUND: &str = "#101418";
 const BOX_FILL: &str = "#1a2027";
@@ -437,7 +447,12 @@ impl GraphLayout {
             let lane = |id: &Id| layout.lanes[lane_of[id]].rect;
             let lanes = (lane(&relationship.from), lane(&relationship.to));
             let mut route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
-            separate_runs(&mut route, &layout.edges, &runs);
+            let heads = match relationship.direction {
+                Direction::Directed => (false, true),
+                Direction::Bidirectional => (true, true),
+                Direction::Undirected => (false, false),
+            };
+            separate_runs(&mut route, heads, &layout.edges, &runs);
             let points = route.points;
             let text = single_line(&relationship.label);
             let label = format!("{step} {text}");
@@ -668,7 +683,8 @@ impl GraphLayout {
                 });
             }
             let lane_height = title_height
-                + LANE_PADDING * 2.0
+                + LANE_PADDING
+                + LANE_BOTTOM_PADDING
                 + (row_y - lane_top - title_height - LANE_PADDING)
                 + row_height;
             let dropped = group.is_some_and(|id| document.groups[&id].archived);
@@ -795,7 +811,7 @@ impl GraphLayout {
         for (id, color) in heads {
             let _ = write!(
                 svg,
-                r#"<marker id="{id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>"#
+                r#"<marker id="{id}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="{ARROW_HEAD_SIZE}" markerHeight="{ARROW_HEAD_SIZE}" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>"#
             );
         }
         svg.push_str("</defs>");
@@ -1196,8 +1212,10 @@ fn shared(a: (f32, f32), b: (f32, f32), earlier: &[Edge]) -> f32 {
 /// beside, and off boxes, badges and lane titles. A segment between two bends moves within
 /// its band (see `Runs::band`; vertical ones within the lanes' width), the first and last
 /// along their box side, which spreads several arrows over one side. Where no place is free,
-/// the segment takes the place it shares least, so a shared line is a last resort.
-fn separate_runs(route: &mut Route, earlier: &[Edge], runs: &Runs) {
+/// the segment takes the place it shares least, so a shared line is a last resort. A bend
+/// next to an end with a head (`heads`: at the start, at the end) keeps the arrow's straight
+/// run into that head.
+fn separate_runs(route: &mut Route, heads: (bool, bool), earlier: &[Edge], runs: &Runs) {
     let count = route.points.len();
     for index in 0..count.saturating_sub(1) {
         let (a, b) = (route.points[index], route.points[index + 1]);
@@ -1243,7 +1261,9 @@ fn separate_runs(route: &mut Route, earlier: &[Edge], runs: &Runs) {
                 ends.iter().any(|(_, (rect, _))| rect == other)
                     || !overlaps(&line, other, RUN_MARGIN)
             });
-            placed && clear
+            let kept = (!heads.0 || index != 1 || keeps_end_run(route.points[0], a, c))
+                && (!heads.1 || index + 3 != count || keeps_end_run(route.points[count - 1], b, d));
+            placed && clear && kept
         };
         if fits(0.0) && shared(a, b, earlier) == 0.0 {
             continue;
@@ -1264,6 +1284,15 @@ fn separate_runs(route: &mut Route, earlier: &[Edge], runs: &Runs) {
             route.points[index + 1] = d;
         }
     }
+}
+
+/// Whether the straight run from an arrow's `end` to its `bend` stays at least
+/// `ARROW_END_RUN` long, in its direction, with the bend `moved`.
+fn keeps_end_run(end: (f32, f32), bend: (f32, f32), moved: (f32, f32)) -> bool {
+    let length = (bend.0 - end.0).abs() + (bend.1 - end.1).abs();
+    length > 0.0
+        && ((moved.0 - end.0) * (bend.0 - end.0) + (moved.1 - end.1) * (bend.1 - end.1)) / length
+            >= ARROW_END_RUN
 }
 
 /// The relationships drawn as arrows, each with its step number: pills count them from 1 in
@@ -1546,7 +1575,7 @@ fn route(
                 (end_x, enter),
             ]
         } else {
-            let step = sign * BOX_GAP_Y / 4.0;
+            let step = sign * ARROW_END_RUN;
             let channel = if from.right() + BOX_GAP_X < lane_width {
                 from.right() + BOX_GAP_X / 2.0
             } else {
@@ -1585,7 +1614,7 @@ fn route(
             && other.bottom() > from.y.min(to.y)
     });
     if between {
-        let below = row_bottom(from, obstacles) + BOX_GAP_Y / 4.0;
+        let below = row_bottom(from, obstacles) + ARROW_END_RUN;
         return Route {
             points: vec![
                 (from.center_x(), from.bottom()),

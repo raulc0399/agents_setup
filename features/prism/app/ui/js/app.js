@@ -1,5 +1,5 @@
-import { DiagramView, layoutKey } from './diagram.js';
-import { h } from './dom.js';
+import { DiagramView, LEVELS, layoutKey } from './diagram.js';
+import { MOD_KEY, h } from './dom.js';
 import { agentLabel, projectName, shortConversation } from './format.js';
 import { ACCEPT_NOTE, DROPPED_NOTE, ListView } from './list.js';
 import { DetailPanel } from './panel.js';
@@ -15,7 +15,7 @@ const EARLY_REPLY_KEEP_MS = 10000;
 /**
  * Per tab, saved by the host. `modes`: list or diagram per document ID, chosen with V; none
  * shows the default for its content. `cameras`: the diagram's detail level, zoom and pan per
- * document ID; none fits it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
+ * document ID; one without zoom and pan, or none, fits it. `filter`: text the items must contain; `selected`: item IDs selected for one action.
  */
 const DEFAULT_VIEW = { document: null, focus: null, hidden: [], filter: '', selected: [], modes: {}, cameras: {}, kept: {} };
 /** What a document shows: its entry in `modes`, else the diagram when it has something to draw; V switches. */
@@ -54,6 +54,8 @@ const KEY_HINTS = {
     [['U'], 'undo', 2],
     [['+', '-'], 'zoom', 3],
     [['0'], 'fit', 4],
+    [[`${MOD_KEY}+0`], '100%', 5],
+    [['1', '2', '3'], 'detail', 3],
     [['Esc'], 'clear', 4],
     [['H'], 'hide', 3],
     [['/'], 'filter', 3],
@@ -62,6 +64,9 @@ const KEY_HINTS = {
     [['V'], 'list', 3],
   ],
 };
+/** Diagram keys that zoom, animated (`diagramKeys`), and keys that only modify others: neither stops a zoom on its way. */
+const ZOOM_KEYS = new Set(['+', '=', '-', '0']);
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'CapsLock']);
 const SESSION_GROUPS = [
   ['Live', ['live']],
   ['Disconnected', ['disconnected', 'waiting']],
@@ -102,8 +107,8 @@ class App {
     this.listViews = new Map();
     this.diagramViews = new Map();
     /**
-     * Per tab, `{key, steps, sizes}`: the arrows' step numbers and the diagram's sizes for what
-     * it lists (`layoutKey`), from prism-core; both are null while asked.
+     * Per tab, `{key, steps}`: the arrows' step numbers for what it lists (`layoutKey`), from
+     * prism-core; null while asked.
      */
     this.sized = new Map();
     this.panels = new Map();
@@ -371,7 +376,7 @@ class App {
 
   /**
    * The list shows the arrows' step numbers without drawing the diagram: it asks for the
-   * sizes alone, once per thing listed. The diagram starts from those sizes.
+   * sizes alone, once per thing listed.
    */
   requestSized(key, current) {
     const visible = current.rows.map((row) => row.id);
@@ -379,13 +384,13 @@ class App {
     if (Object.keys(current.document.relationships).length === 0 || this.sized.get(key)?.key === wanted) {
       return;
     }
-    this.sized.set(key, { key: wanted, steps: null, sizes: null });
+    this.sized.set(key, { key: wanted, steps: null });
     // Without them the list shows no steps; the next change of what it lists asks again.
     this.diagramLayout(key, current.document, visible, null).catch(() => {});
   }
 
-  /** Keeps and shows steps and sizes that arrived for what the tab lists now; those of what it listed before are dropped. */
-  storeSized(key, wanted, { steps, sizes }) {
+  /** Keeps and shows steps that arrived for what the tab lists now; those of what it listed before are dropped. */
+  storeSized(key, wanted, { steps }) {
     const current = this.current(key);
     if (!current || layoutKey(current.document, current.rows.map((row) => row.id)) !== wanted) {
       return;
@@ -394,7 +399,7 @@ class App {
     if (entry?.key === wanted && entry.steps !== null) {
       return;
     }
-    this.sized.set(key, { key: wanted, steps, sizes });
+    this.sized.set(key, { key: wanted, steps });
     this.render();
   }
 
@@ -626,7 +631,7 @@ class App {
       const diagramView = this.diagramView(key);
       this.showBody(diagramView, key);
       // Only an item the user picked: without one the panel shows the overview.
-      diagramView.render({ ...details, focus: view.focus, camera: view.cameras?.[current.document.id] ?? null, sizes: this.sizedFor(key, current.document, current.rows)?.sizes ?? null });
+      diagramView.render({ ...details, focus: view.focus, camera: view.cameras?.[current.document.id] ?? null });
       panel.render({ ...details, focus: view.focus, counts: diagramView.counts() });
       return;
     }
@@ -1579,6 +1584,15 @@ class App {
       return;
     }
     const modifier = event.metaKey || event.ctrlKey;
+    // ⌘/Ctrl+0: the diagram at 100%, as actual size elsewhere.
+    if (modifier && event.key === '0') {
+      const key = this.activeKey();
+      if (key && this.mode(key) === 'diagram') {
+        event.preventDefault();
+        this.diagramView(key).zoomActual();
+      }
+      return;
+    }
     if (modifier && /^[1-9]$/.test(event.key)) {
       const key = this.myWindow()?.tabs[Number(event.key) - 1];
       if (key) {
@@ -1631,6 +1645,10 @@ class App {
       w: () => this.closeDocument(key, this.current(key)?.document),
       v: () => this.switchMode(key),
     };
+    // Any other key stops a zoom on its way; zoom keys go on from where it was heading.
+    if (this.mode(key) === 'diagram' && !ZOOM_KEYS.has(event.key) && !MODIFIER_KEYS.has(event.key)) {
+      this.diagramView(key).stopAnimation();
+    }
     const diagram = this.mode(key) === 'diagram' ? this.diagramKeys(key) : {};
     const action = event.key in diagram ? diagram[event.key] : actions[event.key];
     if (action) {
@@ -1657,6 +1675,8 @@ class App {
       '=': () => diagram.zoomStep(1),
       '-': () => diagram.zoomStep(-1),
       0: () => diagram.fit(),
+      // 1 to 3: titles, summary, full text.
+      ...Object.fromEntries(LEVELS.map((level, index) => [index + 1, () => diagram.setLevel(level)])),
       ' ': () => focused() && this.toggleSelection(key, focused().id),
       // A selection clears first, then the focus.
       Escape: () => (this.view(key).selected.length > 0 ? this.clearSelection(key) : this.clearDiagramFocus(key)),

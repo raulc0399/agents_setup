@@ -921,9 +921,13 @@ button {
   border-color: transparent;
 }
 
+.diagram-controls .segmented {
+  margin-right: 4px;
+}
+
 .diagram-controls .zoom {
-  /* Room for the widest level and zoom, "Full text 125%", so the buttons stay put. */
-  min-width: 96px;
+  /* Room for the widest zoom, "400%", so the buttons stay put. */
+  min-width: 40px;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -1083,6 +1087,36 @@ button {
 
 .diagram-svg .prism-background {
   fill: var(--canvas);
+}
+
+/* Lines and outlines keep their width on screen at every zoom, the pointer's hit band too. */
+.diagram-svg .prism-line,
+.diagram-svg .prism-hit,
+.diagram-svg .prism-shape {
+  vector-effect: non-scaling-stroke;
+}
+
+/* Zoomed out, small text fades instead of shrinking: diagram.js sets data-zoom to near, mid
+   (no text lines) or far (no kind and number line either), so the titles remain. The fade
+   runs only while data-zoom is set, and not with reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .diagram-svg[data-zoom] .prism-subtitle,
+  .diagram-svg[data-zoom] .prism-body,
+  .diagram-svg[data-zoom] .prism-kind,
+  .diagram-svg[data-zoom] .prism-number,
+  .diagram-svg[data-zoom] .prism-dropped-label {
+    transition: opacity 150ms ease-out;
+  }
+}
+
+.diagram-svg[data-zoom="mid"] .prism-subtitle,
+.diagram-svg[data-zoom="mid"] .prism-body,
+.diagram-svg[data-zoom="far"] .prism-subtitle,
+.diagram-svg[data-zoom="far"] .prism-body,
+.diagram-svg[data-zoom="far"] .prism-kind,
+.diagram-svg[data-zoom="far"] .prism-number,
+.diagram-svg[data-zoom="far"] .prism-dropped-label {
+  opacity: 0;
 }
 
 .diagram-svg [data-id] {

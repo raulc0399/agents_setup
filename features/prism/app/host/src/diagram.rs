@@ -1,5 +1,5 @@
 //! The diagram of one document as a tab shows it. `prism_core::graph` lays it out at the
-//! detail the UI's zoom asks for and writes the SVG; the UI only places, themes and zooms it.
+//! detail the user picks in the UI and writes the SVG; the UI only places, themes and zooms it.
 use prism_core::graph::{Detail, GraphLayout};
 use prism_core::model::{Document, Id};
 use serde::Serialize;
@@ -12,8 +12,8 @@ const DEFAULT_FILE_STEM: &str = "diagram";
 
 /// What the shell's `diagram_layout` returns: the size of the whole diagram at every detail,
 /// from placing its boxes alone, the step number of every arrow, and the layout of the
-/// detail asked for. The UI's fit picks the most detailed one that fits its canvas from the
-/// sizes before it asks for a layout; the list shows the steps without a layout.
+/// detail asked for. The UI fits and pans the layout within its size; the list shows the
+/// steps without a layout.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Diagram {
     pub sizes: BTreeMap<Detail, Size>,

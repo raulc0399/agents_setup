@@ -1,6 +1,6 @@
 use prism_core::graph::{
-    ARROW_COLORS, Detail, GraphLayout, KIND_ARROW, KIND_BOX, KIND_GATE, KIND_LANE, KIND_PILL,
-    WorldRect,
+    ARROW_COLORS, ARROW_END_RUN, Detail, GraphLayout, KIND_ARROW, KIND_BOX, KIND_GATE, KIND_LANE,
+    KIND_PILL, WorldRect,
 };
 use prism_core::model::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -667,8 +667,34 @@ fn segments(points: &[(f32, f32)]) -> Vec<Segment> {
 fn no_two_arrows_share_a_line() {
     let (document, visible) = three_lanes();
     let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
-    let arrows = lines(&svg);
-    assert_eq!(arrows.len(), 5);
+    assert_no_shared_line(&svg, 5);
+}
+
+#[test]
+fn arrows_past_a_box_in_a_lanes_last_row_keep_apart_and_off_its_edge() {
+    // Rows of three: 7 -> 9 and 9 -> 7 both pass box 8 below the last row.
+    let (document, visible) = arrows(9, &[(7, 9), (9, 7)], 0);
+    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+    assert_no_shared_line(&svg, 2);
+    let lane = lane_rects(&svg)[0];
+    for (id, points) in lines(&svg) {
+        for (a, b) in segments(&points) {
+            if a.1 == b.1 {
+                assert!(
+                    a.1 <= lane.bottom() - 4.0,
+                    "{id} runs at {}, on the lane's edge at {}",
+                    a.1,
+                    lane.bottom()
+                );
+            }
+        }
+    }
+}
+
+/// Asserts that the SVG has `count` arrows and no two of them run on one line.
+fn assert_no_shared_line(svg: &str, count: usize) {
+    let arrows = lines(svg);
+    assert_eq!(arrows.len(), count);
     for (index, (first, points)) in arrows.iter().enumerate() {
         for (second, others) in &arrows[index + 1..] {
             for (a, b) in segments(points) {
@@ -850,7 +876,7 @@ fn neighboring_arrows_differ_in_color() {
     assert!(arrow.inner.contains(r#"stroke-dasharray="6 5""#));
     assert!(arrow.inner.contains(r#"marker-end="url(#prism-head-c2)""#));
     assert!(svg.contains(&format!(
-        r#"<marker id="prism-head-c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
+        r#"<marker id="prism-head-c2" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="11.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
     )));
     assert!(pill.inner.contains(&format!(r#"fill="{color}""#)));
 }
@@ -1269,4 +1295,86 @@ fn details_are_named_in_lower_case_for_the_app() {
         serde_json::from_str::<Detail>(r#""full""#).unwrap(),
         Detail::Full
     );
+}
+
+/// The sign of `value`: -1, 0 or 1 (`f32::signum` gives 1 for 0).
+fn sign(value: f32) -> i8 {
+    (value > 0.0) as i8 - (value < 0.0) as i8
+}
+
+/// The length of the straight run a polyline ends with: its last segment and the ones before
+/// it that go on in the same direction.
+fn end_run(points: &[(f32, f32)]) -> f32 {
+    let segments = segments(points);
+    let direction = |(a, b): &Segment| (sign(b.0 - a.0), sign(b.1 - a.1));
+    let Some(last) = segments.last() else {
+        return 0.0;
+    };
+    segments
+        .iter()
+        .rev()
+        .take_while(|segment| direction(segment) == direction(last))
+        .map(|(a, b)| (b.0 - a.0).abs() + (b.1 - a.1).abs())
+        .sum()
+}
+
+#[test]
+fn arrows_run_straight_into_their_heads() {
+    // Side by side, past a box in the row, several arrows into one side, up and down rows.
+    let mut one_lane = arrows(
+        9,
+        &[
+            (1, 2),
+            (2, 3),
+            (1, 3),
+            (3, 1),
+            (1, 5),
+            (2, 5),
+            (3, 5),
+            (4, 5),
+            (6, 5),
+            (9, 5),
+            (7, 5),
+            (5, 1),
+            (8, 2),
+            (7, 3),
+        ],
+        0,
+    );
+    // Across lanes, both ways, into one side.
+    let mut lanes = three_lanes();
+    for (id, from, to) in [(65, 1, 6), (66, 6, 1), (67, 5, 2), (68, 2, 6), (69, 1, 4)] {
+        let (key, relationship) = link(id, from, to, "more", false);
+        lanes.0.relationships.insert(key, relationship);
+        lanes.1.insert(key);
+    }
+    for (document, _) in [&mut one_lane, &mut lanes] {
+        for (index, relationship) in document.relationships.values_mut().enumerate() {
+            if index % 3 == 0 {
+                relationship.direction = Direction::Bidirectional;
+            }
+        }
+    }
+    for (document, visible) in [&one_lane, &lanes] {
+        for detail in Detail::ALL {
+            let svg = GraphLayout::new(document, visible, detail).svg(None, &BTreeSet::new());
+            let arrows = lines(&svg);
+            assert!(arrows.len() >= 10, "{} arrows", arrows.len());
+            for (id, points) in arrows {
+                let end = end_run(&points);
+                assert!(
+                    end >= ARROW_END_RUN,
+                    "{id} at {detail:?} ends in a run of {end}: {points:?}"
+                );
+                if document.relationships[&id].direction == Direction::Bidirectional {
+                    let reversed: Vec<_> = points.iter().rev().copied().collect();
+                    let start = end_run(&reversed);
+                    assert!(
+                        start >= ARROW_END_RUN,
+                        "{id} at {detail:?} starts with a run of {start}: {points:?}"
+                    );
+                }
+            }
+        }
+    }
 }
