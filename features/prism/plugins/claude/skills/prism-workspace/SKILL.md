@@ -16,11 +16,19 @@ automatically extract conversation content or open another agent conversation.
 - Every element, relationship and group keeps the number of its first
   publication: what a publish adds goes after the last item and nothing
   existing moves, dropped items included, so the user's item numbers stay valid.
-- List relationships in the order the data flows: diagrams number arrows in
-  publication order and never renumber them. When a flow changes in the
-  middle, publish the diagram as a new document rather than adding a mid-flow
-  arrow to the old one. Do not put step numbers into relationship labels:
-  Prism numbers the arrows.
+- List relationships strictly in the order the data flows: step 1 is the first
+  thing that happens, and diagrams number arrows in publication order and never
+  renumber them. When a flow changes in the middle, publish the diagram as a new
+  document rather than adding a mid-flow arrow to the old one. Keep relationship
+  labels to at most 3 words and do not put step numbers into them: Prism
+  numbers the arrows.
+- Publish one document per diagram with at most 7 boxes and 9 arrows; split a
+  topic into two documents rather than crowd one.
+- Keep a box title to at most 3 words and its body (subtitle) to at most 5
+  words; set `source` to the file when there is one.
+- Use kind `text` for actors and stores (their box shows only the title),
+  `step` for things that happen, and `finding` and `question` for problems and
+  open points; these show as badges on the box they point at.
 - Treat acceptance as content feedback, never permission to implement changes.
 - All Prism content and document state is shared through the bridge store: a
   close, drop, accept, question or answer is seen by you and every app view;
@@ -41,7 +49,8 @@ automatically extract conversation content or open another agent conversation.
   referenced content if asked.
 - Relationships accept `manual: true` for manual or review steps; diagrams
   draw them dashed. Groups become lanes in diagrams, so group by where things
-  run (device, service, operator) when drawing architecture or data flow.
+  run (for example Container, Host app) when drawing architecture or data
+  flow, with at most 3 lanes.
 - The `/prism` command reports the published documents and whether the Prism
   app is connected, without a model turn; tell the user about it when they only
   want to check the current workspace.

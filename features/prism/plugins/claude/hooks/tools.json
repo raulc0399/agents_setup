@@ -1,7 +1,7 @@
 [
   {
     "name": "publish",
-    "description": "Publish or revise requested visual content in Prism for this Claude conversation; the Prism app shows it. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Every element, relationship and group keeps the position of its first publication: what a publish adds goes after the last record, and nothing existing moves. Diagrams number arrows in that order and never renumber them, so list relationships in the order the data flows; when a flow changes in the middle, publish the diagram as a new document instead of adding a mid-flow arrow. Retrying the same request ID requires the identical payload.",
+    "description": "Publish or revise requested visual content in Prism for this Claude conversation; the Prism app shows it. Use fresh UUIDs only for new content; reuse returned IDs and expected revision for updates. Omitted records remain unchanged. Every element, relationship and group keeps the position of its first publication: what a publish adds goes after the last record, and nothing existing moves. Diagrams number arrows in that order and never renumber them, so list relationships in the order the data flows; when a flow changes in the middle, publish the diagram as a new document instead of adding a mid-flow arrow. For a diagram keep to at most 7 boxes, 9 arrows and 3 lanes per document. Retrying the same request ID requires the identical payload.",
     "inputSchema": {
       "type": "object",
       "properties": {
