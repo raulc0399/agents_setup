@@ -64,6 +64,7 @@ function records(document) {
       source: item.source,
       details: item.source ? `${item.body}\nSource: ${item.source}` : item.body,
       revision: item.semantic_revision,
+      created: item.created_revision,
       accepted: item.accepted_revision,
       dropped: item.archived,
       rank: RANKS.element,
@@ -81,6 +82,7 @@ function records(document) {
         source: null,
         details,
         revision: item.semantic_revision,
+        created: item.created_revision,
         accepted: item.accepted_revision,
         dropped: item.archived,
         rank: RANKS.link,
@@ -98,6 +100,7 @@ function records(document) {
         source: null,
         details,
         revision: item.semantic_revision,
+        created: item.created_revision,
         accepted: item.accepted_revision,
         dropped: item.archived,
         rank: RANKS.group,
@@ -121,8 +124,25 @@ function matches(record, filter) {
 }
 
 /**
+ * What the latest publication did to a record while older content exists: 'new' when it first
+ * published it, 'changed' when it revised one published before (or stored without a created
+ * revision); null when it did neither, the record is accepted or dropped, or it was accepted
+ * before and already shows "changed since accepted".
+ */
+function latestChange(record, latest, hasOlderContent) {
+  if (!hasOlderContent || record.revision !== latest || record.accepted === record.revision || record.dropped) {
+    return null;
+  }
+  if (record.created === latest) {
+    return 'new';
+  }
+  const acceptedBefore = record.accepted !== null && record.accepted !== undefined;
+  return acceptedBefore ? null : 'changed';
+}
+
+/**
  * Visible rows, numbered from 1 in display order (the number an `ask` refers to).
- * `changed`: revised by the latest publication while older content exists.
+ * `latestChange`: 'new', 'changed' or null, see `latestChange`.
  */
 export function rows(document, hidden, filter = '') {
   const all = records(document);
@@ -138,7 +158,7 @@ export function rows(document, hidden, filter = '') {
       kindLabel: KIND_LABELS[record.kind] ?? record.kind,
       isAccepted: record.accepted === record.revision,
       staleAcceptance: record.accepted !== null && record.accepted !== undefined && record.accepted !== record.revision,
-      changed: hasOlderContent && record.revision === latest && record.accepted !== record.revision && !record.dropped,
+      latestChange: latestChange(record, latest, hasOlderContent),
     }));
 }
 

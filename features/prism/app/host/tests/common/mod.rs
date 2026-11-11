@@ -147,6 +147,7 @@ pub fn document(id: u128, revision: u64, titles: &[&str]) -> Document {
                 kind: ElementKind::Step,
                 source: None,
                 order: index as u64,
+                created_revision: None,
                 semantic_revision: revision,
                 accepted_revision: None,
                 archived: false,

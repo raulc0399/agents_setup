@@ -1203,13 +1203,16 @@ async function actionChecks(backend, app) {
     Object.values(document.groups)[0].order = 7;
     document.elements[plan(3)].body = 'Revised by a partial publish.';
     document.elements[plan(3)].semantic_revision = 6;
-    document.elements[appended] = { ...document.elements[plan(1)], id: appended, title: 'Appended', order: 8, semantic_revision: 6 };
-    document.relationships[appendedLink] = { ...Object.values(document.relationships)[0], id: appendedLink, from: appended, label: 'appended link', order: 9, semantic_revision: 6 };
+    document.elements[appended] = { ...document.elements[plan(1)], id: appended, title: 'Appended', order: 8, created_revision: 6, semantic_revision: 6 };
+    document.relationships[appendedLink] = { ...Object.values(document.relationships)[0], id: appendedLink, from: appended, label: 'appended link', order: 9, created_revision: 6, semantic_revision: 6 };
   });
   await settle();
   const after = numbers();
   const expectedAfter = [...JSON.parse(numbered), [appended, '9'], [appendedLink, '10']];
   expect(JSON.stringify(after) === JSON.stringify(expectedAfter), `every number is stable after a partial publish: ${JSON.stringify(after)}`);
+  // The revised item is marked "changed", the ones it added "new".
+  const latestBadge = (id) => card(id).querySelector('.badge.changed')?.textContent;
+  expect(latestBadge(plan(3)) === 'changed' && latestBadge(appended) === 'new' && latestBadge(appendedLink) === 'new', `a partial publish marks what it revised and added: ${latestBadge(plan(3))}, ${latestBadge(appended)}, ${latestBadge(appendedLink)}`);
   backend.update(KEYS.LIVE, structuredClone(original));
   await settle();
   app.updateView(KEYS.LIVE, { selected: [plan(2), plan(4)], focus: plan(4) });

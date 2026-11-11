@@ -75,6 +75,10 @@ pub struct Element {
     /// the element's first publication and kept by every later one.
     #[serde(default)]
     pub order: u64,
+    /// Revision that first published it, kept by every later change; `None` when stored before
+    /// records had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_revision: Option<u64>,
     pub semantic_revision: u64,
     pub accepted_revision: Option<u64>,
     pub archived: bool,
@@ -94,6 +98,10 @@ pub struct Relationship {
     /// relationships had one (see `Document::positions`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<u64>,
+    /// Revision that first published it, kept by every later change; `None` when stored before
+    /// records had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_revision: Option<u64>,
     pub semantic_revision: u64,
     pub accepted_revision: Option<u64>,
     pub archived: bool,
@@ -108,6 +116,10 @@ pub struct Group {
     /// groups had one (see `Document::positions`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<u64>,
+    /// Revision that first published it, kept by every later change; `None` when stored before
+    /// records had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_revision: Option<u64>,
     pub semantic_revision: u64,
     pub accepted_revision: Option<u64>,
     pub archived: bool,

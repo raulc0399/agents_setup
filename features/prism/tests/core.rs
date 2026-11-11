@@ -2,7 +2,7 @@ use prism::actions::*;
 use prism::model::*;
 use prism::store::Store;
 use prism_core::graph::GraphLayout;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn key(conversation: &str) -> WorkspaceKey {
     WorkspaceKey {
@@ -888,6 +888,145 @@ fn a_document_stored_before_positions_keeps_its_numbering_and_appends() {
     store.publish(workspace, &added).unwrap();
     today.extend([new.id, added.relationships[0].id]);
     assert_eq!(numbered(&store, workspace, document), today);
+}
+
+/// Every record's ID with the revision that first published it.
+fn created_revisions(document: &Document) -> BTreeMap<Id, Option<u64>> {
+    document
+        .elements
+        .values()
+        .map(|item| (item.id, item.created_revision))
+        .chain(
+            document
+                .relationships
+                .values()
+                .map(|item| (item.id, item.created_revision)),
+        )
+        .chain(
+            document
+                .groups
+                .values()
+                .map(|item| (item.id, item.created_revision)),
+        )
+        .collect()
+}
+
+#[test]
+fn created_revision_is_set_at_the_first_publication_and_never_changed() {
+    let (mut store, workspace, request, result) = setup();
+    let document = result.document_id;
+    let first = request.elements[0].id;
+    let created = created_revisions(&store.document(workspace, document).unwrap());
+    assert!(created.values().all(|revision| *revision == Some(1)));
+
+    // Revising every record keeps it; a record added by the revision gets the revision.
+    let mut revision = edit(&request, &result, 1);
+    revision.elements[0].body = "Revised".into();
+    revision.relationships[0].label = "revised".into();
+    revision.groups[0].title = "Revised".into();
+    let new = element_input("New");
+    revision.elements.push(new.clone());
+    store.publish(workspace, &revision).unwrap();
+    let stored = store.document(workspace, document).unwrap();
+    assert_eq!(stored.elements[&first].semantic_revision, 2);
+    assert_eq!(stored.elements[&new.id].created_revision, Some(2));
+    let mut expected = created;
+    expected.insert(new.id, Some(2));
+    assert_eq!(created_revisions(&stored), expected);
+
+    // Accept, drop, undo, close and reopen keep it too.
+    store
+        .apply(
+            workspace,
+            document,
+            2,
+            &ContentAction::Accept { ids: vec![first] },
+        )
+        .unwrap();
+    let dropped = store
+        .apply(
+            workspace,
+            document,
+            3,
+            &ContentAction::Archive { ids: vec![first] },
+        )
+        .unwrap();
+    assert_eq!(
+        created_revisions(&store.document(workspace, document).unwrap()),
+        expected
+    );
+    store.undo(workspace, document, 4, dropped.undo_id).unwrap();
+    store
+        .apply(workspace, document, 5, &ContentAction::Close {})
+        .unwrap();
+    store
+        .apply(workspace, document, 6, &ContentAction::Reopen {})
+        .unwrap();
+    assert_eq!(
+        created_revisions(&store.document(workspace, document).unwrap()),
+        expected
+    );
+}
+
+#[test]
+fn a_document_stored_before_created_revisions_loads_without_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let request = publication();
+    let result = store.publish(workspace, &request).unwrap();
+    let document = result.document_id;
+    drop(store);
+
+    // As stored before: no record has a created revision.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let content: String = connection
+        .query_row(
+            "SELECT content FROM documents WHERE id=?1",
+            [document.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: serde_json::Value = serde_json::from_str(&content).unwrap();
+    for records in ["elements", "relationships", "groups"] {
+        for record in stored[records].as_object_mut().unwrap().values_mut() {
+            assert!(
+                record
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("created_revision")
+                    .is_some()
+            );
+        }
+    }
+    connection
+        .execute(
+            "UPDATE documents SET content=?2 WHERE id=?1",
+            rusqlite::params![document.to_string(), stored.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    // The records stored before stay without one, also when revised; a new one gets one.
+    let mut store = Store::open(&path).unwrap();
+    let loaded = store.document(workspace, document).unwrap();
+    assert!(
+        created_revisions(&loaded)
+            .iter()
+            .all(|(_, revision)| revision.is_none())
+    );
+    let mut revision = edit(&request, &result, 1);
+    revision.elements[0].body = "Revised".into();
+    let new = element_input("New");
+    revision.elements.push(new.clone());
+    store.publish(workspace, &revision).unwrap();
+    let stored = store.document(workspace, document).unwrap();
+    assert_eq!(
+        stored.elements[&request.elements[0].id].created_revision,
+        None
+    );
+    assert_eq!(stored.elements[&new.id].created_revision, Some(2));
 }
 
 #[test]

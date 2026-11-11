@@ -95,8 +95,8 @@ export class ListView {
     card.dataset.id = row.id;
 
     const badges = stateBadges(row);
-    if (row.changed) {
-      badges.push(h('span', { class: 'badge changed', text: 'new' }));
+    if (row.latestChange) {
+      badges.push(h('span', { class: 'badge changed', text: row.latestChange }));
     }
     if (questions.length > 0) {
       const latest = questionState(questions[0]);

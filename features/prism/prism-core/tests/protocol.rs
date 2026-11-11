@@ -18,6 +18,7 @@ fn document() -> Document {
         kind: ElementKind::Step,
         source: Some("src/device.rs".into()),
         order: 0,
+        created_revision: None,
         semantic_revision: 1,
         accepted_revision: None,
         archived: false,

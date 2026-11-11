@@ -215,6 +215,7 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
             kind: input.kind.clone(),
             source: input.source.clone(),
             order,
+            created_revision: previous.map_or(Some(revision), |item| item.created_revision),
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,
@@ -242,6 +243,7 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
                     .and_then(|item| item.order)
                     .unwrap_or_else(|| sequence.take()),
             ),
+            created_revision: previous.map_or(Some(revision), |item| item.created_revision),
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,
@@ -273,6 +275,7 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
                     .and_then(|item| item.order)
                     .unwrap_or_else(|| sequence.take()),
             ),
+            created_revision: previous.map_or(Some(revision), |item| item.created_revision),
             semantic_revision: revision,
             accepted_revision: previous.and_then(|item| item.accepted_revision),
             archived: false,
