@@ -1010,6 +1010,7 @@ mod tests {
             elements: vec![],
             relationships: vec![],
             groups: vec![],
+            lanes: None,
         };
         let call = || BridgeCall {
             version: PROTOCOL_VERSION,
@@ -1076,6 +1077,7 @@ mod tests {
                     }],
                     relationships: vec![],
                     groups: vec![],
+                    lanes: None,
                 },
             )
             .unwrap();

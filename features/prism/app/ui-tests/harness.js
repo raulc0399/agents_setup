@@ -10,7 +10,7 @@ import { DROPPED_NOTE } from '../ui/js/list.js';
 import { questionBlock } from '../ui/js/panel.js';
 import { fakeBackend } from './fake-backend.js';
 import { formatTime } from '../ui/js/format.js';
-import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, SEEN_AT_MS, VERSION_PROBLEM, fixture } from './fixtures.js';
+import { CONTENTS_FOR_TESTS, KEYS, RELEASE_BACK, RELEASE_IDS, SEEN_AT_MS, VERSION_PROBLEM, fixture, withHandovers } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 // Under a virtual time budget headless Chromium hardly runs animation frames: timers stand in.
@@ -19,20 +19,57 @@ window.requestAnimationFrame = (callback) => setTimeout(() => callback(performan
 window.cancelAnimationFrame = (frame) => clearTimeout(frame);
 const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks, 'pane-checks': paneChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+/** Sizes prism-core's graph.rs draws at: a pill's height and an arrowhead's (`PILL_HEIGHT`, `ARROW_HEAD_SIZE`). */
+const PILL_HEIGHT = 18;
+const HEAD_SIZE = 10;
 const key = (name, options = {}) =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...options }));
+
+/**
+ * The polyline of an arrow's line from its `d`: the `M` point, the bend of every rounded corner
+ * (the control point of its `Q`) and the last point.
+ */
+function polyline(line) {
+  const tokens = line.getAttribute('d').split(' ');
+  const point = (token) => token.replace(/^[MLQ]/, '').split(',').map(Number);
+  return [point(tokens[0]), ...tokens.filter((token) => token.startsWith('Q')).map(point), ...(tokens.length > 1 ? [point(tokens.at(-1))] : [])];
+}
 
 /** Line segments of every arrow in the shown diagram, from the `d` of its line. */
 function arrowSegments(svg) {
   return [...svg.querySelectorAll('[data-kind="arrow"] .prism-line')].map((line) => {
-    const points = line
-      .getAttribute('d')
-      .split(/[ML]/)
-      .map((point) => point.trim())
-      .filter(Boolean)
-      .map((point) => point.split(',').map(Number));
+    const points = polyline(line);
     return points.slice(1).map((point, index) => [points[index], point]).filter(([a, b]) => a[0] !== b[0] || a[1] !== b[1]);
   });
+}
+
+/**
+ * Arrows whose line is drawn wrong for the smooth look: a bend without its rounded corner, a
+ * head not on a straight run of at least its size, or a hit band off the line.
+ */
+function unroundedArrows(svg) {
+  return [...svg.querySelectorAll('[data-kind="arrow"]')]
+    .filter((arrow) => {
+      const line = arrow.querySelector('.prism-line');
+      const tokens = line.getAttribute('d').split(' ');
+      const point = (token) => token.replace(/^[MLQ]/, '').split(',').map(Number);
+      const corners = polyline(line).length - 2;
+      const bends = tokens.filter((token) => token.startsWith('Q')).length;
+      const last = tokens.findLastIndex((token) => token.startsWith('Q'));
+      const end = last < 0 ? point(tokens[0]) : point(tokens[last + 1]);
+      const tip = point(tokens.at(-1));
+      const straight = Math.abs(tip[0] - end[0]) + Math.abs(tip[1] - end[1]);
+      return bends !== corners || straight < HEAD_SIZE - 0.01 || arrow.querySelector('.prism-hit').getAttribute('d') !== line.getAttribute('d');
+    })
+    .map((arrow) => arrow.dataset.id);
+}
+
+/** Whether the shown diagram's lanes are columns side by side (else rows stacked), from their shapes. */
+function laneColumns(svg) {
+  const lanes = [...svg.querySelectorAll('.prism-lane > .prism-shape')].map((shape) => ['x', 'y', 'width', 'height'].map((name) => Number(shape.getAttribute(name))));
+  const columns = lanes.every(([x, y, , height], index) => index === 0 || (y === lanes[0][1] && height === lanes[0][3] && x > lanes[index - 1][0] + lanes[index - 1][2]));
+  const rows = lanes.every(([x, y, width], index) => index === 0 || (x === lanes[0][0] && width === lanes[0][2] && y > lanes[index - 1][1] + lanes[index - 1][3]));
+  return lanes.length > 1 && columns ? 'columns' : lanes.length > 1 && rows ? 'rows' : null;
 }
 
 /** Pairs of arrows that run on one line: collinear, closer than 12 units, less than 16 apart end to end. */
@@ -361,6 +398,11 @@ async function diagramChecks(backend, app) {
   expect(inView() && scale() <= 1, `the whole diagram fits at start: ${label()}`);
   const shared = sharedLines(svg());
   expect(shared.length === 0, `no two arrows run on one line: ${JSON.stringify(shared)}`);
+  // The release flow hands over from lane to lane, but its lanes of two boxes would make flat
+  // columns: they stay rows. Bends are rounded, heads sit on straight runs, and the pointer's
+  // band follows the rounded line.
+  expect(laneColumns(svg()) === 'rows', `lanes as rows: ${laneColumns(svg())}`);
+  expect(svg().querySelectorAll('[data-kind="arrow"] .prism-line[d*="Q"]').length >= 3 && unroundedArrows(svg()).length === 0, `rounded arrows: ${unroundedArrows(svg())}`);
 
   // 5.3 Clicks focus an item and fill the panel; Esc clears.
   click(shape('box', item(4)));
@@ -570,7 +612,7 @@ async function diagramChecks(backend, app) {
   const farHead = head();
   view().zoomAt(2.5, ...center);
   expect(far.every((stroke) => stroke.startsWith('non-scaling-stroke')) && JSON.stringify(far) === JSON.stringify(strokes()), `line widths stay on screen: ${far} ${strokes()}`);
-  expect(Math.abs(farHead - 11.5 * 0.3) < 0.01 && Math.abs(head() - 11.5) < 0.01, `arrowheads: ${farHead} px at 30%, ${head()} px at 250%`);
+  expect(Math.abs(farHead - HEAD_SIZE * 0.3) < 0.01 && Math.abs(head() - HEAD_SIZE) < 0.01, `arrowheads: ${farHead} px at 30%, ${head()} px at 250%`);
 
   // Zoomed out, text lines fade, then the kind and number line; titles remain. A band changes
   // past its limit by a margin, so zooming around it does not flicker.
@@ -600,14 +642,16 @@ async function diagramChecks(backend, app) {
   expect(faded() === '1,1,1,1', `zoomed in, every text returns: ${faded()}`);
 
   // Pills and badges keep 80% of their size on screen when zoomed out, growing at most twice
-  // in the world; further out they shrink too.
+  // in the world and a badge only as far as it stays in its lane; further out they shrink too.
   const height = (kind, id) => shape(kind, id).querySelector('.prism-shape').getBoundingClientRect().height;
+  const inLane = view().labels.find((label) => label.node.dataset.id === item(7)).growth;
   view().zoomAt(0.45, ...center);
-  expect(Math.abs(height('pill', link(1)) - 20 * 0.8) < 0.1 && Math.abs(height('gate', item(7)) - 18 * 0.8) < 0.1, `pills and badges keep a readable size: ${height('pill', link(1))} ${height('gate', item(7))}`);
+  const badge = 18 * 0.45 * Math.min(Math.ceil(0.8 / 0.45 / 0.02) * 0.02, inLane);
+  expect(Math.abs(height('pill', link(1)) - PILL_HEIGHT * 0.8) < 0.1 && Math.abs(height('gate', item(7)) - badge) < 0.1 && inLane > 1, `pills and badges keep a readable size: ${height('pill', link(1))} ${height('gate', item(7))} ${badge}`);
   view().zoomAt(0.3, ...center);
-  expect(Math.abs(height('pill', link(1)) - 20 * 0.6) < 0.1, `far out, they grow at most twice: ${height('pill', link(1))}`);
+  expect(Math.abs(height('pill', link(1)) - PILL_HEIGHT * 0.6) < 0.1, `far out, they grow at most twice: ${height('pill', link(1))}`);
   view().zoomAt(1.5, ...center);
-  expect(Math.abs(height('pill', link(1)) - 30) < 0.1 && !shape('pill', link(1)).hasAttribute('transform'), `zoomed in, they scale with the diagram: ${height('pill', link(1))}`);
+  expect(Math.abs(height('pill', link(1)) - PILL_HEIGHT * 1.5) < 0.1 && !shape('pill', link(1)).hasAttribute('transform'), `zoomed in, they scale with the diagram: ${height('pill', link(1))}`);
 
   // Input stops a zoom on its way where it is: a press, the wheel, a key. With reduced motion there is none.
   const stopsOn = async (start, input) => {
@@ -796,11 +840,11 @@ async function diagramChecks(backend, app) {
     click(levelButton(name));
     await settled();
   }
-  expect(near(scale(), 2.5) && Math.abs(head() - 11.5) < 0.01, `arrowheads after a round trip at 250%: ${head()} px`);
+  expect(near(scale(), 2.5) && Math.abs(head() - HEAD_SIZE) < 0.01, `arrowheads after a round trip at 250%: ${head()} px`);
   key('s');
   await settle();
   const roundTrip = new DOMParser().parseFromString(backend.exports.at(-1).svg, 'image/svg+xml').documentElement;
-  expect([...roundTrip.querySelectorAll('marker')].every((marker) => marker.getAttribute('markerWidth') === '11.5'), 'and the export has them at their size');
+  expect([...roundTrip.querySelectorAll('marker')].every((marker) => marker.getAttribute('markerWidth') === String(HEAD_SIZE)), 'and the export has them at their size');
   // Zoomed out, the export still has every text at full opacity, pills, badges and arrowheads at their size.
   view().zoomAt(0.3, ...center);
   await fade();
@@ -812,7 +856,7 @@ async function diagramChecks(backend, app) {
   const small = new DOMParser().parseFromString(backend.exports.at(-1).svg, 'image/svg+xml').documentElement;
   const opacities = new Set([...small.querySelectorAll('text')].map((text) => text.getAttribute('opacity')));
   expect(band() === 'far' && JSON.stringify([...opacities]) === '["1"]', `zoomed out, the export shows every text: ${[...opacities]}`);
-  expect(!small.querySelector('[transform]') && [...small.querySelectorAll('marker')].every((marker) => marker.getAttribute('markerWidth') === '11.5') && !small.hasAttribute('data-zoom'), 'without the zoom on pills, badges and arrowheads');
+  expect(!small.querySelector('[transform]') && [...small.querySelectorAll('marker')].every((marker) => marker.getAttribute('markerWidth') === String(HEAD_SIZE)) && !small.hasAttribute('data-zoom'), 'without the zoom on pills, badges and arrowheads');
   click(levelButton('Full text'));
   await settled();
   key('s');
@@ -879,6 +923,33 @@ async function diagramChecks(backend, app) {
     .flatMap((rule) => (rule.cssRules ? [...rule.cssRules].map((inner) => [rule, inner]) : [[null, rule]]))
     .filter(([, rule]) => rule.selectorText?.includes('data-zoom') && rule.style.transition);
   expect(fadeRules.length > 0 && fadeRules.every(([media]) => media?.conditionText === '(prefers-reduced-motion: no-preference)'), `fades only without reduced motion: ${fadeRules.map(([media]) => media?.conditionText)}`);
+
+  // Lanes as columns: the agent's `lanes`, or lanes of three boxes that mostly hand over; as
+  // rows again for arrows mostly inside the lanes. Rounded and apart in every orientation.
+  const arrowCount = () => svg().querySelectorAll('[data-kind="arrow"]').length;
+  const withLanes = (revision, change) => {
+    const content = structuredClone(published);
+    const flow = content.documents.find((candidate) => candidate.id === KEYS.RELEASE);
+    flow.revision = revision;
+    change(flow);
+    backend.update(KEYS.LIVE, content);
+  };
+  const drawnWell = () => unroundedArrows(svg()).length === 0 && sharedLines(svg()).length === 0 && textsInside().length === 0;
+  withLanes(14, (flow) => {
+    flow.lanes = 'columns';
+  });
+  expect((await waitFor(() => laneColumns(svg()) === 'columns')) && drawnWell(), `the agent's columns: ${laneColumns(svg())} ${unroundedArrows(svg())}`);
+  withLanes(15, withHandovers);
+  expect((await waitFor(() => arrowCount() === 7)) && laneColumns(svg()) === 'columns' && drawnWell(), `hand-overs between lanes of three take columns: ${laneColumns(svg())}`);
+  withLanes(16, (flow) => {
+    RELEASE_BACK.forEach(([from, to], index) => {
+      const back = { ...flow.relationships[link(1)], id: `b4000000-0000-4000-8000-0000000000a${index}`, from: item(from), to: item(to), label: 'back' };
+      flow.relationships[back.id] = back;
+    });
+  });
+  expect((await waitFor(() => arrowCount() === 8)) && laneColumns(svg()) === 'rows' && drawnWell(), `a flow mostly inside its lanes takes rows: ${laneColumns(svg())}`);
+  withLanes(17, () => {});
+  expect((await waitFor(() => arrowCount() === 5)) && laneColumns(svg()) === 'rows', `as published, rows again: ${laneColumns(svg())}`);
 
   // The view choice and the cameras are view state, restored when the tab opens again.
   key('v');

@@ -50,7 +50,10 @@ automatically extract conversation content or open another agent conversation.
 - Relationships accept `manual: true` for manual or review steps; diagrams
   draw them dashed. Groups become lanes in diagrams, so group by where things
   run (for example Container, Host app) when drawing architecture or data
-  flow, with at most 3 lanes.
+  flow, with at most 3 lanes. Lanes are laid out as rows or columns, chosen
+  automatically at the first publish with two lanes and kept; omitting `lanes`
+  keeps it, `auto` chooses again, and set `rows` or `columns` only when the
+  automatic choice reads badly.
 - The `/prism` command reports the published documents and whether the Prism
   app is connected, without a model turn; tell the user about it when they only
   want to check the current workspace.

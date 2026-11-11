@@ -1,4 +1,5 @@
 use crate::model::*;
+use prism_core::graph::GraphLayout;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -60,6 +61,21 @@ pub struct PublishRequest {
     pub elements: Vec<ElementInput>,
     pub relationships: Vec<RelationshipInput>,
     pub groups: Vec<GroupInput>,
+    /// What this publish does to the diagram's lane orientation (`Document::lanes`); absent
+    /// (or null) keeps it. Left out when absent, so a retried request from before it hashes
+    /// the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<LaneChoice>,
+}
+
+/// A publish's choice of lane orientation: `auto` chooses again (`automatic_lanes`) and stores
+/// the result, `rows` and `columns` store themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneChoice {
+    Auto,
+    Rows,
+    Columns,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +287,16 @@ pub(crate) fn publish_into(mut document: Document, request: &PublishRequest) -> 
     }
     document.revision = revision;
     validate_document(&document)?;
+    // Sticky, so the diagram does not flip as it grows: a document without an orientation
+    // gets the automatic one at its first publication with two lanes, and keeps it.
+    document.lanes = match request.lanes {
+        Some(LaneChoice::Rows) => Some(Lanes::Rows),
+        Some(LaneChoice::Columns) => Some(Lanes::Columns),
+        Some(LaneChoice::Auto) => GraphLayout::automatic_lanes(&document),
+        None => document
+            .lanes
+            .or_else(|| GraphLayout::automatic_lanes(&document)),
+    };
     Ok(document)
 }
 

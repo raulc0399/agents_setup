@@ -1,6 +1,6 @@
 use prism_core::graph::{
-    ARROW_COLORS, ARROW_END_RUN, Detail, GraphLayout, KIND_ARROW, KIND_BOX, KIND_GATE, KIND_LANE,
-    KIND_PILL, WorldRect,
+    ARROW_COLORS, ARROW_END_RUN, ARROW_HEAD_SIZE, Detail, GraphLayout, KIND_ARROW, KIND_BOX,
+    KIND_GATE, KIND_LANE, KIND_PILL, WorldRect,
 };
 use prism_core::model::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +71,7 @@ fn fixture() -> (Document, BTreeSet<Id>) {
             link(GATE_LINK, FINDING, STEP_A, "blocks", false),
         ]),
         groups: BTreeMap::from([(lane.id, lane)]),
+        lanes: None,
     };
     let visible = document
         .elements
@@ -421,6 +422,7 @@ fn steps(count: u128) -> (Document, BTreeSet<Id>) {
         elements,
         relationships: BTreeMap::new(),
         groups: BTreeMap::new(),
+        lanes: None,
     };
     let visible = document.elements.keys().copied().collect();
     (document, visible)
@@ -609,8 +611,8 @@ fn number(text: &str) -> f32 {
     text.parse().unwrap()
 }
 
-/// The polyline of every arrow, from the `d` of its visible line.
-fn lines(svg: &str) -> Vec<(Id, Vec<(f32, f32)>)> {
+/// The `d` of every arrow's visible line.
+fn paths(svg: &str) -> Vec<(Id, String)> {
     let (groups, _) = split(svg);
     groups
         .iter()
@@ -621,17 +623,34 @@ fn lines(svg: &str) -> Vec<(Id, Vec<(f32, f32)>)> {
                 .split(r#"class="prism-line" d=""#)
                 .nth(1)
                 .unwrap();
-            let path = line.split('"').next().unwrap();
-            let points = path
-                .split(['M', 'L'])
-                .map(str::trim)
-                .filter(|point| !point.is_empty())
-                .map(|point| {
-                    let (x, y) = point.split_once(',').unwrap();
-                    (number(x), number(y))
-                })
-                .collect();
-            (group.id, points)
+            (group.id, line.split('"').next().unwrap().to_owned())
+        })
+        .collect()
+}
+
+fn point(text: &str) -> (f32, f32) {
+    let (x, y) = text.split_once(',').unwrap();
+    (number(x), number(y))
+}
+
+/// The polyline of every arrow, from the `d` of its visible line: its `M` point, the bend of
+/// every rounded corner (the control point of its `Q`) and its last point.
+fn lines(svg: &str) -> Vec<(Id, Vec<(f32, f32)>)> {
+    paths(svg)
+        .into_iter()
+        .map(|(id, path)| {
+            let tokens: Vec<&str> = path.split(' ').collect();
+            let mut points = vec![point(tokens[0].strip_prefix('M').unwrap())];
+            points.extend(
+                tokens
+                    .iter()
+                    .filter_map(|token| token.strip_prefix('Q'))
+                    .map(point),
+            );
+            if tokens.len() > 1 {
+                points.push(point(tokens[tokens.len() - 1].strip_prefix('L').unwrap()));
+            }
+            (id, points)
         })
         .collect()
 }
@@ -707,29 +726,71 @@ fn segments(points: &[(f32, f32)]) -> Vec<Segment> {
         .collect()
 }
 
+const ORIENTATIONS: [Lanes; 2] = [Lanes::Rows, Lanes::Columns];
+
+/// The document with its lanes laid out as `lanes`.
+fn as_lanes(
+    (document, visible): &(Document, BTreeSet<Id>),
+    lanes: Lanes,
+) -> (Document, BTreeSet<Id>) {
+    let mut document = document.clone();
+    document.lanes = Some(lanes);
+    (document, visible.clone())
+}
+
+/// `rect` mirrored on the diagonal, so that column lanes read as rows.
+fn transposed(rect: WorldRect) -> WorldRect {
+    WorldRect {
+        x: rect.y,
+        y: rect.x,
+        width: rect.height,
+        height: rect.width,
+    }
+}
+
 #[test]
 fn no_two_arrows_share_a_line() {
-    let (document, visible) = three_lanes();
-    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
-    assert_no_shared_line(&svg, 5);
+    // Crowded lanes still share lines where more arrows pass a gap than fit in it (rows of
+    // `crossing_lanes`, `dense` both ways), as before columns came.
+    let cases = [
+        (Lanes::Rows, three_lanes(), 5),
+        (Lanes::Columns, three_lanes(), 5),
+        (Lanes::Columns, crossing_lanes(), 10),
+    ];
+    for (lanes, fixture, count) in &cases {
+        let (document, visible) = as_lanes(fixture, *lanes);
+        let svg =
+            GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+        assert_no_shared_line(&svg, *count);
+    }
 }
 
 #[test]
 fn arrows_past_a_box_in_a_lanes_last_row_keep_apart_and_off_its_edge() {
-    // Rows of three: 7 -> 9 and 9 -> 7 both pass box 8 below the last row.
-    let (document, visible) = arrows(9, &[(7, 9), (9, 7)], 0);
-    let svg = GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
-    assert_no_shared_line(&svg, 2);
-    let lane = lane_rects(&svg)[0];
-    for (id, points) in lines(&svg) {
-        for (a, b) in segments(&points) {
-            if a.1 == b.1 {
-                assert!(
-                    a.1 <= lane.bottom() - 4.0,
-                    "{id} runs at {}, on the lane's edge at {}",
-                    a.1,
-                    lane.bottom()
-                );
+    // Rows of three: 7 -> 9 and 9 -> 7 both pass box 8 below the last row. As columns of five,
+    // 1 -> 3 and 3 -> 1 pass box 2 right of the last column.
+    for (lanes, ends) in [
+        (Lanes::Rows, [(7, 9), (9, 7)]),
+        (Lanes::Columns, [(1, 3), (3, 1)]),
+    ] {
+        let (document, visible) = as_lanes(&arrows(9, &ends, 0), lanes);
+        let svg =
+            GraphLayout::new(&document, &visible, Detail::Subtitles).svg(None, &BTreeSet::new());
+        assert_no_shared_line(&svg, 2);
+        let lane = lane_rects(&svg)[0];
+        for (id, points) in lines(&svg) {
+            for (a, b) in segments(&points) {
+                // Across the lane: level in a row lane, upright in a column lane.
+                let (across, edge) = match lanes {
+                    Lanes::Rows => ((a.1 == b.1).then_some(a.1), lane.bottom()),
+                    Lanes::Columns => ((a.0 == b.0).then_some(a.0), lane.right()),
+                };
+                if let Some(at) = across {
+                    assert!(
+                        at <= edge - 4.0,
+                        "{lanes:?}: {id} runs at {at}, on the lane's edge at {edge}"
+                    );
+                }
             }
         }
     }
@@ -775,36 +836,51 @@ fn assert_no_shared_line(svg: &str, count: usize) {
 
 #[test]
 fn lines_stay_in_their_lane_or_the_middle_of_a_gap_and_clear_of_badges() {
-    let (document, visible) = three_lanes();
-    let layout = GraphLayout::new(&document, &visible, Detail::Subtitles);
-    let svg = layout.svg(None, &BTreeSet::new());
-    let lanes = lane_rects(&svg);
-    assert_eq!(lanes.len(), 3);
-    let badges: Vec<WorldRect> = [40, 41]
-        .into_iter()
-        .map(|id| layout.rect_of(Id::from_u128(id)).unwrap())
-        .collect();
-    for (id, points) in lines(&svg) {
-        for (a, b) in segments(&points) {
-            let line = span(a, b);
-            for badge in &badges {
-                assert!(!overlaps(&line, badge), "{id} crosses a badge");
+    for orientation in ORIENTATIONS {
+        let (document, visible) = as_lanes(&three_lanes(), orientation);
+        let layout = GraphLayout::new(&document, &visible, Detail::Subtitles);
+        let svg = layout.svg(None, &BTreeSet::new());
+        // Read as rows: a column lane's title is on top, not beside where its lines run.
+        let (lanes, title, read) = match orientation {
+            Lanes::Rows => (lane_rects(&svg), 22.0, None),
+            Lanes::Columns => (
+                lane_rects(&svg).into_iter().map(transposed).collect(),
+                0.0,
+                Some(transposed as fn(WorldRect) -> WorldRect),
+            ),
+        };
+        assert_eq!(lanes.len(), 3);
+        let badges: Vec<WorldRect> = [40, 41]
+            .into_iter()
+            .map(|id| layout.rect_of(Id::from_u128(id)).unwrap())
+            .collect();
+        for (id, points) in lines(&svg) {
+            for (a, b) in segments(&points) {
+                let line = span(a, b);
+                for badge in &badges {
+                    assert!(
+                        !overlaps(&line, badge),
+                        "{orientation:?}: {id} crosses a badge"
+                    );
+                }
+                let line = read.map_or(line, |read| read(line));
+                if line.height != 0.0 {
+                    continue;
+                }
+                let y = line.y;
+                let inside = lanes
+                    .iter()
+                    .any(|lane| y > lane.y + title && y < lane.bottom() - 2.0);
+                let in_gap = lanes.windows(2).any(|pair| {
+                    let middle = (pair[0].bottom() + pair[1].y) / 2.0;
+                    // Two steps of 6 off the middle at most, give or take rounding.
+                    y > pair[0].bottom() + 2.0 && y < pair[1].y - 2.0 && (y - middle).abs() < 12.01
+                });
+                assert!(
+                    inside || in_gap,
+                    "{orientation:?}: {id} runs at {y}, on a lane edge or title"
+                );
             }
-            if a.1 != b.1 {
-                continue;
-            }
-            let y = a.1;
-            let inside = lanes
-                .iter()
-                .any(|lane| y > lane.y + 22.0 && y < lane.bottom() - 2.0);
-            let in_gap = lanes.windows(2).any(|pair| {
-                let middle = (pair[0].bottom() + pair[1].y) / 2.0;
-                y > pair[0].bottom() + 2.0 && y < pair[1].y - 2.0 && (y - middle).abs() <= 12.0
-            });
-            assert!(
-                inside || in_gap,
-                "{id} runs at {y}, on a lane edge or title"
-            );
         }
     }
 }
@@ -915,7 +991,7 @@ fn neighboring_arrows_differ_in_color() {
     assert!(arrow.inner.contains(r#"stroke-dasharray="6 5""#));
     assert!(arrow.inner.contains(r#"marker-end="url(#prism-head-c2)""#));
     assert!(svg.contains(&format!(
-        r#"<marker id="prism-head-c2" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="11.5" markerHeight="11.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
+        r#"<marker id="prism-head-c2" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/>"#
     )));
     assert!(pill.inner.contains(&format!(r#"fill="{color}""#)));
 }
@@ -1277,13 +1353,29 @@ fn control_characters_in_the_text_are_escaped_at_every_detail() {
 
 #[test]
 fn the_bounds_come_from_placing_the_boxes_alone() {
-    let (document, visible) = three_lanes();
-    for detail in Detail::ALL {
-        assert_eq!(
-            GraphLayout::bounds_for(&document, &visible, detail),
-            GraphLayout::new(&document, &visible, detail).bounds,
-            "{detail:?}"
-        );
+    for fixture in [three_lanes(), crossing_lanes(), dense()] {
+        for lanes in ORIENTATIONS {
+            let (document, visible) = as_lanes(&fixture, lanes);
+            for detail in Detail::ALL {
+                let layout = GraphLayout::new(&document, &visible, detail);
+                assert_eq!(
+                    GraphLayout::bounds_for(&document, &visible, detail),
+                    layout.bounds,
+                    "{lanes:?} {detail:?}"
+                );
+                assert_eq!(
+                    GraphLayout::bounds_and_steps(&document, &visible, detail).0,
+                    layout.bounds,
+                    "{lanes:?} {detail:?}"
+                );
+                // Everything drawn is inside the bounds.
+                let svg = layout.svg(None, &BTreeSet::new());
+                for rect in lane_rects(&svg) {
+                    assert!(rect.right() <= layout.bounds.width);
+                    assert!(rect.bottom() <= layout.bounds.height);
+                }
+            }
+        }
     }
 }
 
@@ -1365,7 +1457,13 @@ fn arrows_run_straight_into_their_heads() {
             }
         }
     }
-    for (document, visible) in [&one_lane, &lanes] {
+    let fixtures = ORIENTATIONS.into_iter().flat_map(|orientation| {
+        [
+            as_lanes(&one_lane, orientation),
+            as_lanes(&lanes, orientation),
+        ]
+    });
+    for (document, visible) in &fixtures.collect::<Vec<_>>() {
         for detail in Detail::ALL {
             let svg = GraphLayout::new(document, visible, detail).svg(None, &BTreeSet::new());
             let arrows = lines(&svg);
@@ -1389,29 +1487,34 @@ fn arrows_run_straight_into_their_heads() {
     }
 }
 
-/// Asserts that no two of the layout's pills overlap, at every detail, and that the layout is
-/// the same when made again.
+/// Asserts that no two of the layout's pills overlap, at every detail and with lanes as rows
+/// and as columns, and that the layout is the same when made again.
 fn assert_no_pills_overlap(document: &Document, visible: &BTreeSet<Id>, count: usize) {
-    for detail in Detail::ALL {
+    let fixture = (document.clone(), visible.clone());
+    for (lanes, detail) in ORIENTATIONS
+        .into_iter()
+        .flat_map(|lanes| Detail::ALL.map(|detail| (lanes, detail)))
+    {
+        let (document, visible) = &as_lanes(&fixture, lanes);
         let layout = GraphLayout::new(document, visible, detail);
         let svg = layout.svg(None, &BTreeSet::new());
         let pills: Vec<(Id, WorldRect)> = lines(&svg)
             .into_iter()
             .map(|(id, _)| (id, layout.rect_of(id).unwrap()))
             .collect();
-        assert_eq!(pills.len(), count, "{detail:?}");
+        assert_eq!(pills.len(), count, "{lanes:?} {detail:?}");
         for (index, (first, rect)) in pills.iter().enumerate() {
             for (second, other) in &pills[index + 1..] {
                 assert!(
                     !overlaps(rect, other),
-                    "{detail:?}: pill {first} {rect:?} overlaps pill {second} {other:?}"
+                    "{lanes:?} {detail:?}: pill {first} {rect:?} overlaps pill {second} {other:?}"
                 );
             }
         }
         assert_eq!(
             GraphLayout::new(document, visible, detail).svg(None, &BTreeSet::new()),
             svg,
-            "{detail:?}: the same document gets the same layout"
+            "{lanes:?} {detail:?}: the same document gets the same layout"
         );
     }
 }
@@ -1575,7 +1678,11 @@ fn no_arrow_runs_through_a_box() {
         side_by_side(&[(1, 2), (2, 1), (1, 2)], false),
         side_by_side(&[(1, 2), (2, 1), (1, 2)], true),
     ];
-    for (document, visible) in &documents {
+    for (lanes, fixture) in ORIENTATIONS
+        .into_iter()
+        .flat_map(|lanes| documents.iter().map(move |fixture| (lanes, fixture)))
+    {
+        let (document, visible) = &as_lanes(fixture, lanes);
         for detail in Detail::ALL {
             let layout = GraphLayout::new(document, visible, detail);
             let svg = layout.svg(None, &BTreeSet::new());
@@ -1586,7 +1693,7 @@ fn no_arrow_runs_through_a_box() {
                     for (node, rect) in &boxes {
                         assert!(
                             !overlaps(&line, rect),
-                            "{detail:?}: {id} runs through box {node}: {points:?}"
+                            "{lanes:?} {detail:?}: {id} runs through box {node}: {points:?}"
                         );
                     }
                 }
@@ -1613,20 +1720,47 @@ fn pills_keep_off_lane_borders_where_they_can() {
             .label = label.into();
     }
     document.elements.get_mut(&Id::from_u128(6)).unwrap().kind = ElementKind::Text;
-    for detail in Detail::ALL {
+    let fixtures = [(document, visible), crossing_lanes(), dense()];
+    for (fixture, lanes, detail) in fixtures.iter().flat_map(|fixture| {
+        ORIENTATIONS
+            .into_iter()
+            .flat_map(move |lanes| Detail::ALL.map(move |detail| (fixture, lanes, detail)))
+    }) {
+        let (document, visible) = as_lanes(fixture, lanes);
         let layout = GraphLayout::new(&document, &visible, detail);
         let svg = layout.svg(None, &BTreeSet::new());
-        let lanes = lane_rects(&svg);
+        let lanes_drawn = lane_rects(&svg);
+        // The borders arrows cross, between row lanes level and between column lanes upright:
+        // not on them, nor flush against them. No pill straddles any other lane border.
+        let read = |rect: WorldRect| match lanes {
+            Lanes::Rows => rect,
+            Lanes::Columns => transposed(rect),
+        };
         for (id, _) in lines(&svg) {
             let pill = layout.rect_of(id).unwrap();
-            for lane in &lanes {
-                // Not on it, nor flush against it.
-                for y in [lane.y, lane.bottom()] {
+            for lane in &lanes_drawn {
+                let (across, lane_across) = (read(pill), read(*lane));
+                for y in [lane_across.y, lane_across.bottom()] {
                     assert!(
-                        !(pill.y - 4.0 < y && y < pill.bottom() + 4.0),
-                        "{detail:?}: pill {id} {pill:?} on the lane border at {y}"
+                        !(across.y - 4.0 < y && y < across.bottom() + 4.0),
+                        "{lanes:?} {detail:?}: pill {id} {pill:?} on the lane border at {y}"
                     );
                 }
+                let straddles = |low: f32, high: f32, edge: f32| low < edge && edge < high;
+                let beside = pill.y < lane.bottom() && lane.y < pill.bottom();
+                let below = pill.x < lane.right() && lane.x < pill.right();
+                assert!(
+                    !(beside
+                        && (straddles(pill.x, pill.right(), lane.x)
+                            || straddles(pill.x, pill.right(), lane.right()))),
+                    "{lanes:?} {detail:?}: pill {id} {pill:?} across the side of {lane:?}"
+                );
+                assert!(
+                    !(below
+                        && (straddles(pill.y, pill.bottom(), lane.y)
+                            || straddles(pill.y, pill.bottom(), lane.bottom()))),
+                    "{lanes:?} {detail:?}: pill {id} {pill:?} across the edge of {lane:?}"
+                );
             }
         }
     }
@@ -1725,13 +1859,284 @@ const LARGE_LAYOUT_SECONDS: u64 = 60;
 
 #[test]
 fn a_large_diagram_lays_out_in_time() {
-    let (document, visible) = large(500, 1000, 20);
-    let start = std::time::Instant::now();
-    let layout = GraphLayout::new(&document, &visible, Detail::Names);
-    let elapsed = start.elapsed();
-    assert!(layout.edge_count() > 900);
-    assert!(
-        elapsed < std::time::Duration::from_secs(LARGE_LAYOUT_SECONDS),
-        "500 boxes and 1000 arrows took {elapsed:?}"
+    let fixture = large(500, 1000, 20);
+    for lanes in ORIENTATIONS {
+        let (document, visible) = as_lanes(&fixture, lanes);
+        let start = std::time::Instant::now();
+        let layout = GraphLayout::new(&document, &visible, Detail::Names);
+        let elapsed = start.elapsed();
+        assert!(layout.edge_count() > 900);
+        assert!(
+            elapsed < std::time::Duration::from_secs(LARGE_LAYOUT_SECONDS),
+            "{lanes:?}: 500 boxes and 1000 arrows took {elapsed:?}"
+        );
+    }
+}
+
+/// `lanes` lanes of `per_lane` boxes each, numbered on from 1 lane by lane, joined by arrows
+/// 70, 71, ... with the given ends.
+fn grouped(lanes: u128, per_lane: u128, ends: &[(u128, u128)]) -> (Document, BTreeSet<Id>) {
+    let (mut document, mut visible) = arrows(lanes * per_lane, ends, 0);
+    for lane in 0..lanes {
+        let group = Group {
+            id: Id::from_u128(30 + lane),
+            title: format!("Lane {lane}"),
+            members: (lane * per_lane + 1..=(lane + 1) * per_lane)
+                .map(Id::from_u128)
+                .collect(),
+            order: None,
+            semantic_revision: REVISION,
+            accepted_revision: None,
+            archived: false,
+        };
+        visible.insert(group.id);
+        document.groups.insert(group.id, group);
+    }
+    (document, visible)
+}
+
+#[test]
+fn the_orientation_follows_the_flow_and_the_canvas_shape() {
+    let chosen = |(document, visible): &(Document, BTreeSet<Id>)| {
+        let lanes = GraphLayout::orientation(document);
+        for detail in Detail::ALL {
+            assert_eq!(
+                GraphLayout::new(document, visible, detail).orientation,
+                lanes,
+                "the same at {detail:?}"
+            );
+        }
+        lanes
+    };
+    // How far a shape is off 16:10, as a factor of at least 1.
+    let misfit = |fixture: &(Document, BTreeSet<Id>), lanes| {
+        let (document, visible) = as_lanes(fixture, lanes);
+        let bounds = GraphLayout::bounds_for(&document, &visible, Detail::Subtitles);
+        let ratio = bounds.width / bounds.height / 1.6;
+        ratio.max(1.0 / ratio)
+    };
+    // One lane keeps rows.
+    assert_eq!(chosen(&dense()), Lanes::Rows);
+    // Most arrows hand over from lane to lane: columns; most stay inside a lane: rows.
+    let handover = grouped(3, 4, &[(1, 5), (5, 9), (2, 6), (6, 10)]);
+    assert_eq!(chosen(&handover), Lanes::Columns);
+    let inside = grouped(3, 2, &[(1, 2), (3, 4), (5, 6), (2, 3)]);
+    assert_eq!(chosen(&inside), Lanes::Rows);
+    // Against the flow where the other shape is more than 1.5 times closer to 16:10: lanes of
+    // two boxes make flat columns, lanes of four a tall stack of rows.
+    let flat = three_lanes();
+    assert!(misfit(&flat, Lanes::Columns) > 1.5 * misfit(&flat, Lanes::Rows));
+    assert_eq!(chosen(&flat), Lanes::Rows);
+    let tall = grouped(3, 4, &[(1, 2), (2, 3), (5, 6), (9, 10), (4, 5)]);
+    assert!(misfit(&tall, Lanes::Rows) > 1.5 * misfit(&tall, Lanes::Columns));
+    assert_eq!(chosen(&tall), Lanes::Columns);
+    // Without a majority the shape closer to 16:10 decides.
+    for (fixture, lanes) in [
+        (grouped(3, 2, &[(1, 2), (2, 3)]), Lanes::Rows),
+        (grouped(3, 2, &[]), Lanes::Rows),
+        (grouped(3, 6, &[]), Lanes::Columns),
+    ] {
+        assert_eq!(chosen(&fixture), lanes);
+        let other = ORIENTATIONS
+            .into_iter()
+            .find(|other| *other != lanes)
+            .unwrap();
+        assert!(misfit(&fixture, lanes) < misfit(&fixture, other));
+    }
+    // It is the whole document's, whatever is shown: hiding items never flips it.
+    let (document, visible) = three_lanes();
+    for hidden in [1, 3, 30, 60, 61, 63, 64] {
+        let mut shown = visible.clone();
+        shown.remove(&Id::from_u128(hidden));
+        assert_eq!(
+            GraphLayout::new(&document, &shown, Detail::Subtitles).orientation,
+            chosen(&(document.clone(), visible.clone()))
+        );
+    }
+    // The agent's choice wins.
+    assert_eq!(
+        chosen(&as_lanes(&three_lanes(), Lanes::Columns)),
+        Lanes::Columns
     );
+    assert_eq!(chosen(&as_lanes(&dense(), Lanes::Columns)), Lanes::Columns);
+}
+
+#[test]
+fn column_lanes_stand_side_by_side_and_fill_top_to_bottom() {
+    let rows = as_lanes(&three_lanes(), Lanes::Rows);
+    let (document, visible) = as_lanes(&three_lanes(), Lanes::Columns);
+    for detail in Detail::ALL {
+        let layout = GraphLayout::new(&document, &visible, detail);
+        let svg = layout.svg(None, &BTreeSet::new());
+        let lanes = lane_rects(&svg);
+        assert_eq!(lanes.len(), 3);
+        for pair in lanes.windows(2) {
+            assert_eq!((pair[0].y, pair[0].height), (pair[1].y, pair[1].height));
+            assert!(pair[1].x - pair[0].right() >= 48.0, "{detail:?}: {lanes:?}");
+        }
+        let boxes = box_rects(&layout, 6);
+        for (lane, pair) in lanes.iter().zip(boxes.chunks(2)) {
+            assert_eq!(pair[0].x, pair[1].x, "{detail:?}: one column");
+            assert!(pair[1].y > pair[0].bottom(), "{detail:?}: top to bottom");
+            assert!(pair.iter().all(|rect| overlaps(rect, lane)));
+        }
+        assert!(
+            boxes[0].y == boxes[2].y && boxes[2].y == boxes[4].y,
+            "{detail:?}: the rows of all lanes line up"
+        );
+        // Badges sit on top of their box.
+        let badge = layout.rect_of(Id::from_u128(40)).unwrap();
+        assert!(badge.y < boxes[0].y && badge.right() <= boxes[0].right());
+
+        // Inside a lane an arrow runs down; from lane to lane it leaves right and enters left.
+        let rect = |id: u128| boxes[id as usize - 1];
+        for (id, points) in lines(&svg) {
+            let relationship = &document.relationships[&id];
+            let (from, to) = (
+                rect(relationship.from.as_u128()),
+                rect(relationship.to.as_u128()),
+            );
+            let (first, last) = (points[0], *points.last().unwrap());
+            if from.x == to.x {
+                assert_eq!((first.1, last.1), (from.bottom(), to.y), "{detail:?}: {id}");
+            } else {
+                assert_eq!((first.0, last.0), (from.right(), to.x), "{detail:?}: {id}");
+            }
+        }
+
+        // The same order, numbers and steps as in rows; hits answer where the shapes are.
+        let in_rows = GraphLayout::new(&rows.0, &rows.1, detail);
+        assert_eq!(layout.ids(), in_rows.ids(), "{detail:?}");
+        assert_eq!(
+            GraphLayout::bounds_and_steps(&document, &visible, detail).1,
+            GraphLayout::bounds_and_steps(&rows.0, &rows.1, detail).1
+        );
+        box_numbers_as_listed(&svg, &document, &visible);
+        let middle = |rect: WorldRect| (rect.center_x(), rect.center_y());
+        for id in [1, 6] {
+            let (x, y) = middle(rect(id));
+            assert_eq!(layout.hit(x, y), Some(Id::from_u128(id)));
+        }
+        for (id, points) in lines(&svg) {
+            let (x, y) = middle(layout.rect_of(id).unwrap());
+            assert_eq!(layout.hit(x, y), Some(id), "{detail:?}: pill of {id}");
+            // Somewhere along its line, outside pills and boxes, the arrow answers.
+            let along = segments(&points).into_iter().flat_map(|(a, b)| {
+                [0.25, 0.5, 0.75]
+                    .map(|share| (a.0 + (b.0 - a.0) * share, a.1 + (b.1 - a.1) * share))
+            });
+            assert!(
+                along.into_iter().any(|(x, y)| layout.hit(x, y) == Some(id)),
+                "{detail:?}: line of {id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn arrow_bends_are_rounded_and_heads_sit_on_straight_runs() {
+    let mut bidirectional = crossing_lanes();
+    for relationship in bidirectional.0.relationships.values_mut() {
+        relationship.direction = Direction::Bidirectional;
+    }
+    let fixtures = [dense(), three_lanes(), bidirectional];
+    let distance = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
+    let mut rounded = 0;
+    for (lanes, fixture) in ORIENTATIONS
+        .into_iter()
+        .flat_map(|lanes| fixtures.iter().map(move |fixture| (lanes, fixture)))
+    {
+        let (document, visible) = as_lanes(fixture, lanes);
+        for detail in Detail::ALL {
+            let svg = GraphLayout::new(&document, &visible, detail).svg(None, &BTreeSet::new());
+            let (groups, _) = split(&svg);
+            for (id, path) in paths(&svg) {
+                // The pointer's hit band follows the same rounded line.
+                let arrow = groups
+                    .iter()
+                    .find(|group| group.kind == KIND_ARROW && group.id == id)
+                    .unwrap();
+                assert!(
+                    arrow
+                        .inner
+                        .contains(&format!(r#"class="prism-hit" d="{path}""#))
+                );
+                assert!(arrow.inner.contains(r#"stroke-width="1.5""#));
+
+                let tokens: Vec<&str> = path.split(' ').collect();
+                let bends: Vec<usize> = (0..tokens.len())
+                    .filter(|index| tokens[*index].starts_with('Q'))
+                    .collect();
+                rounded += bends.len();
+                for index in &bends {
+                    // L before, Q at the bend, the curve's end after: within the radius.
+                    let bend = point(&tokens[*index][1..]);
+                    let before = point(&tokens[index - 1][1..]);
+                    let after = point(tokens[index + 1]);
+                    assert!(
+                        distance(before, bend) <= 8.0 + 1e-3 && distance(bend, after) <= 8.0 + 1e-3
+                    );
+                }
+                // The last piece, and with a start head the first, is straight and holds the head.
+                let tip = point(&tokens[tokens.len() - 1][1..]);
+                let end = bends
+                    .last()
+                    .map_or(point(&tokens[0][1..]), |index| point(tokens[index + 1]));
+                assert!(
+                    distance(end, tip) >= ARROW_HEAD_SIZE - 1e-3,
+                    "{lanes:?} {detail:?}: {id} ends in {path}"
+                );
+                if document.relationships[&id].direction == Direction::Bidirectional
+                    && let Some(first) = bends.first()
+                {
+                    let start = point(&tokens[0][1..]);
+                    let curve = point(&tokens[first - 1][1..]);
+                    assert!(
+                        distance(start, curve) >= ARROW_HEAD_SIZE - 1e-3,
+                        "{lanes:?} {detail:?}: {id} starts in {path}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(rounded > 100, "{rounded} rounded bends");
+}
+
+#[test]
+fn long_hand_over_labels_keep_their_text_in_columns() {
+    // 24 characters: more than the old cap of the room between column lanes took.
+    let (mut document, visible) = as_lanes(&three_lanes(), Lanes::Columns);
+    for relationship in document.relationships.values_mut() {
+        relationship.label = "hands the batch over now".into();
+    }
+    for detail in Detail::ALL {
+        let svg = GraphLayout::new(&document, &visible, detail).svg(None, &BTreeSet::new());
+        let (groups, _) = split(&svg);
+        for (id, _) in lines(&svg) {
+            let pill = groups
+                .iter()
+                .find(|group| group.kind == KIND_PILL && group.id == id)
+                .unwrap();
+            assert!(
+                pill.inner.contains(" hands the batch over now</text>"),
+                "{detail:?}: {id} lost its label"
+            );
+        }
+    }
+}
+
+#[test]
+fn large_diagrams_lay_their_lanes_out_near_16_to_10() {
+    let fixture = large(500, 1000, 20);
+    for lanes in ORIENTATIONS {
+        let (document, visible) = as_lanes(&fixture, lanes);
+        let bounds = GraphLayout::bounds_for(&document, &visible, Detail::Subtitles);
+        let ratio = bounds.width / bounds.height / 1.6;
+        assert!(
+            ratio.max(1.0 / ratio) <= 2.0,
+            "{lanes:?}: {} by {}",
+            bounds.width,
+            bounds.height
+        );
+    }
 }

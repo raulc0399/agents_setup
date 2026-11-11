@@ -12,7 +12,7 @@ const COMMAND_NAME = 'prism';
 const QUESTION_POLL_MS = 1000;
 const filledQuestions = new Set();
 const TOOL_FIELDS = {
-  publish: ['request_id', 'document_id', 'expected_revision', 'title', 'elements', 'relationships', 'groups'],
+  publish: ['request_id', 'document_id', 'expected_revision', 'title', 'elements', 'relationships', 'groups', 'lanes'],
   inspect: ['document_id', 'cursor'],
   action: ['document_id', 'expected_revision', 'action'],
   questions: ['request_id', 'cursor'],

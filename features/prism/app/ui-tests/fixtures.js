@@ -290,6 +290,11 @@ const DIAGRAM_VIEWS = {
   'diagram-zoom-250': { focus: null, cameras: { [RELEASE]: { detail: 'subtitles', x: 250, y: 60, scale: 2.5 } } },
   // One lane in rows of three: arrows past a box in their row, several into one side, up a row.
   'diagram-routes': { focus: null, cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -60, scale: 1 } } },
+  // Lanes as columns: chosen by the agent, and chosen for a flow of three steps a lane that
+  // mostly hands over from lane to lane; as rows for a flow that mostly stays inside its lanes.
+  'diagram-columns': { focus: null, cameras: {} },
+  'diagram-handover': { focus: null, cameras: {} },
+  'diagram-inside': { focus: null, cameras: {} },
   // Long texts: fitted, and the full text of the longest box.
   'diagram-long': { focus: null, cameras: {} },
   'diagram-long-full': { focus: releaseItem(4), cameras: { [RELEASE]: { detail: 'full', x: -40, y: 180, scale: 1 } } },
@@ -368,6 +373,54 @@ function routeContents() {
   release.groups = {};
   MORE_ROUTES.forEach(([from, to, direction], index) => {
     const route = { ...relationship(1, from, to, 'more'), id: `b4000000-0000-4000-8000-0000000000${10 + index}`, direction };
+    release.relationships[route.id] = route;
+  });
+  return { ...CONTENTS, [LIVE]: live };
+}
+
+/** Arrows back inside each lane of the release flow, by box number: most of its arrows then stay inside a lane. */
+export const RELEASE_BACK = [
+  [2, 1],
+  [4, 3],
+  [6, 5],
+];
+
+/**
+ * Adds a third step to each lane of the release flow `flow` and two more hand-overs from lane
+ * to lane: its lanes stand as columns.
+ */
+export function withHandovers(flow) {
+  const added = [
+    ['Device', 'Sign batch', 'Adds the device signature to the batch.'],
+    ['Server staging', 'Hold flagged', 'Keeps flagged readings until reviewed.'],
+    ['Server live', 'Notify owners', 'Mails device owners about rejected readings.'],
+  ].map(([lane, title, body], index) => {
+    const step = element(`a4000000-0000-4000-8000-0000000000c${index}`, 'step', 8 + index, title, body, { semantic_revision: 2 });
+    flow.elements[step.id] = step;
+    Object.values(flow.groups).find((group) => group.title === lane).members.push(step.id);
+    return step.id;
+  });
+  [[added[0], added[1], 'hand over'], [added[1], added[2], 'notify']].forEach(([from, to, label], index) => {
+    const route = { ...relationship(1, 1, 2, label), id: `b4000000-0000-4000-8000-0000000000c${index}`, from, to };
+    flow.relationships[route.id] = route;
+  });
+}
+
+/** Scenarios whose release flow is laid out by the agent's `lanes`, or changed so that the automatic choice differs (`laneContents`). */
+const LANE_SCENARIOS = { 'diagram-columns': { lanes: 'columns' }, 'diagram-handover': { handovers: true }, 'diagram-inside': { back: RELEASE_BACK } };
+
+/** The fixture's contents with the release flow's `lanes` set, more hand-overs, or arrows `back` inside its lanes. */
+function laneContents({ lanes = null, handovers = false, back = [] }) {
+  const live = structuredClone(CONTENTS[LIVE]);
+  const release = live.documents.find((candidate) => candidate.id === RELEASE);
+  if (lanes) {
+    release.lanes = lanes;
+  }
+  if (handovers) {
+    withHandovers(release);
+  }
+  back.forEach(([from, to], index) => {
+    const route = { ...relationship(1, from, to, 'send back'), id: `b4000000-0000-4000-8000-0000000000a${index}` };
     release.relationships[route.id] = route;
   });
   return { ...CONTENTS, [LIVE]: live };
@@ -452,6 +505,9 @@ export function fixture(scenario) {
   }
   if (ROUTE_SCENARIOS.includes(scenario)) {
     contents = routeContents();
+  }
+  if (LANE_SCENARIOS[scenario]) {
+    contents = laneContents(LANE_SCENARIOS[scenario]);
   }
   const state = { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) };
   state.arrangement.windows[0].pane_width = PANE_WIDTHS[scenario] ?? null;

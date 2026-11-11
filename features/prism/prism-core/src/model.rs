@@ -113,6 +113,15 @@ pub struct Group {
     pub archived: bool,
 }
 
+/// How a diagram lays out its lanes: as rows stacked top to bottom, or as columns side by side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lanes {
+    #[default]
+    Rows,
+    Columns,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
     pub id: Id,
@@ -121,6 +130,13 @@ pub struct Document {
     pub elements: BTreeMap<Id, Element>,
     pub relationships: BTreeMap<Id, Relationship>,
     pub groups: BTreeMap<Id, Group>,
+    /// The diagram's lane orientation: the agent's choice, or the automatic one the bridge
+    /// stored at the first publication with two lanes (see `graph::GraphLayout::orientation`);
+    /// `None` before that and in documents stored before it. Optional and left out when
+    /// `None`, so such documents load and older peers read documents. An older bridge drops
+    /// it on publish, and an older store loses it when it rewrites the document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<Lanes>,
 }
 
 impl Document {

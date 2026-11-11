@@ -3,7 +3,11 @@
 //! and `data-kind` (one of the `KIND_*` values). Shapes and texts carry `prism-*` classes, so
 //! a stylesheet can theme what the presentation attributes paint by default. Archived
 //! (dropped) content keeps its place and number: it is drawn faded, with `prism-dropped`.
-use crate::model::{Direction, Document, ElementKind, Id, Relationship, single_line};
+//! Lanes are rows or columns (see `GraphLayout::orientation`); arrows run orthogonal, drawn
+//! with rounded bends (see `rounded_path`).
+use crate::model::{
+    Direction, Document, Element, ElementKind, Id, Lanes, Relationship, single_line,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -16,8 +20,12 @@ const BOX_GAP_X: f32 = 48.0;
 const BOX_GAP_Y: f32 = 64.0;
 pub const LANE_PADDING: f32 = 24.0;
 const LANE_TITLE_HEIGHT: f32 = 22.0;
-/// Room between lanes; an arrow from one lane to another turns in its middle.
+/// Room between lanes; an arrow from one lane to another turns in its middle. Column lanes
+/// leave more where pills need it (see `ColumnRoom`), up to `MAX_COLUMN_GAP`.
 const LANE_GAP: f32 = 48.0;
+const MAX_COLUMN_GAP: f32 = 240.0;
+/// Room left and right of a column lane's boxes at most (see `ColumnRoom::side`).
+const MAX_COLUMN_SIDE: f32 = 100.0;
 /// Width per character of a lane title (upper case, letter-spaced), and the room added
 /// around it, for keeping pills and lines off it.
 const LANE_TITLE_CHAR_WIDTH: f32 = 8.5;
@@ -53,10 +61,22 @@ const TEXT_CHAR_EM: f32 = 0.52;
 /// ends in "…".
 const TITLE_MAX_LINES: usize = 3;
 const BODY_MAX_LINES: usize = 12;
+/// Boxes per row of a row lane at most; a column lane stacks up to `MAX_STACK` boxes before it
+/// starts another column, as its boxes are wide and low.
 const MAX_COLUMNS: usize = 4;
-const PILL_HEIGHT: f32 = 20.0;
+const MAX_STACK: usize = 6;
+/// A lane shape further off 16:10 than this factor takes another number of boxes a line.
+const MAX_MISFIT: f32 = 2.0;
+/// The automatic lane orientation (see `GraphLayout::orientation`) prefers the shape closer to
+/// a canvas of this width over height, and weighs the orientation against the flow by
+/// `FLOW_PREFERENCE`.
+const TARGET_ASPECT: f32 = 16.0 / 10.0;
+const FLOW_PREFERENCE: f32 = 1.5;
+/// All labels lost would add half the cost.
+const LOST_LABEL_WEIGHT: f32 = 0.5;
+const PILL_HEIGHT: f32 = 18.0;
 const PILL_CHAR_WIDTH: f32 = 6.6;
-const PILL_PADDING: f32 = 16.0;
+const PILL_PADDING: f32 = 14.0;
 /// Free space a pill keeps to boxes and badges; a pill without it shows only its number.
 const PILL_MARGIN: f32 = 4.0;
 /// Free space a pill keeps to every other pill, so that each reads as its own.
@@ -120,7 +140,12 @@ const HEAD: &str = "prism-head";
 const HEAD_FOCUS: &str = "prism-head-focus";
 /// Width and height of an arrowhead in world units, whatever the line's stroke width
 /// (`markerUnits="userSpaceOnUse"`), so a viewer can size it on screen.
-const ARROW_HEAD_SIZE: f32 = 11.5;
+pub const ARROW_HEAD_SIZE: f32 = 10.0;
+/// Width of an arrow's line, and of the focused one.
+const ARROW_STROKE: f32 = 1.5;
+const ARROW_FOCUS_STROKE: f32 = 3.0;
+/// Radius of an arrow's rounded bends, less where a segment is short (see `rounded_path`).
+const CORNER_RADIUS: f32 = 8.0;
 /// An arrow runs straight into its head, and out of a start head, for at least this long: a
 /// bend never sits inside the head.
 pub const ARROW_END_RUN: f32 = ARROW_HEAD_SIZE + HEAD_CLEARANCE;
@@ -214,6 +239,16 @@ impl WorldRect {
     pub fn bottom(&self) -> f32 {
         self.y + self.height
     }
+
+    /// The rectangle mirrored on the diagonal: x for y, width for height.
+    fn transposed(&self) -> WorldRect {
+        WorldRect {
+            x: self.y,
+            y: self.x,
+            width: self.height,
+            height: self.width,
+        }
+    }
 }
 
 struct Lane {
@@ -286,7 +321,19 @@ struct Placement<'a> {
     /// The visible relationships between shown boxes; `consumed_edges` became badges.
     relationships: Vec<&'a Relationship>,
     consumed_edges: BTreeSet<Id>,
-    lane_width: f32,
+    /// What all lanes share across them: the width of rows, the height of columns.
+    lane_length: f32,
+    gaps: Gaps,
+}
+
+/// The room between boxes and between lanes, as routing sees it: for column lanes transposed.
+#[derive(Clone, Copy)]
+struct Gaps {
+    /// Between boxes side by side in a row.
+    beside: f32,
+    /// Between rows of boxes.
+    rows: f32,
+    lanes: f32,
 }
 
 #[derive(Default)]
@@ -296,6 +343,8 @@ pub struct GraphLayout {
     edges: Vec<Edge>,
     pub bounds: WorldRect,
     pub detail: Detail,
+    /// Lanes as rows or columns (see `GraphLayout::orientation`).
+    pub orientation: Lanes,
 }
 
 fn kind_color(kind: &ElementKind) -> &'static str {
@@ -416,19 +465,29 @@ impl GraphLayout {
     /// the caller leaves out hidden and filtered-out content. An arrow is drawn only when both
     /// of its ends are.
     pub fn new(document: &Document, visible: &BTreeSet<Id>, detail: Detail) -> Self {
-        let placement = Self::place(document, visible, detail);
+        Self::new_as(document, visible, detail, Self::orientation(document))
+    }
+
+    /// `new` with lanes as `lanes`.
+    fn new_as(document: &Document, visible: &BTreeSet<Id>, detail: Detail, lanes: Lanes) -> Self {
+        let placement = Self::place_as(document, visible, detail, lanes);
         let arrows = arrow_steps(document, &placement);
         let Placement {
             mut layout,
             lane_of,
             numbers,
-            lane_width,
+            lane_length,
+            gaps,
             ..
         } = placement;
+        // Arrows are routed as between row lanes: column lanes, their mirror, are routed
+        // transposed (x for y) and their lines turned back before the pills are placed.
+        let columns = layout.orientation == Lanes::Columns;
+        let routed = |rect: WorldRect| if columns { rect.transposed() } else { rect };
         let rects: BTreeMap<Id, WorldRect> = layout
             .nodes
             .iter()
-            .map(|node| (node.id, node.rect))
+            .map(|node| (node.id, routed(node.rect)))
             .collect();
         // What a pill must not cover: boxes, badges and lane titles.
         let titles = layout
@@ -450,19 +509,36 @@ impl GraphLayout {
             })
             .chain(titles)
             .collect();
+        let blocked_routed: Vec<WorldRect> = blocked.iter().copied().map(routed).collect();
         let obstacles: Vec<WorldRect> = rects.values().copied().collect();
+        // A column lane's title is on top, not where its level (transposed) lines run.
         let lane_bands: Vec<(WorldRect, f32)> = layout
             .lanes
             .iter()
-            .map(|lane| (lane.rect, title_height(&lane.title)))
+            .map(|lane| {
+                let title = if columns {
+                    0.0
+                } else {
+                    title_height(&lane.title)
+                };
+                (routed(lane.rect), title)
+            })
             .collect();
         let runs = Runs {
-            blocked: &blocked,
+            blocked: &blocked_routed,
             boxes: &obstacles,
-            blocked_grid: Grid::of(&blocked),
+            blocked_grid: Grid::of(&blocked_routed),
             box_grid: Grid::of(&obstacles),
             lanes: &lane_bands,
-            width: lane_width,
+            // Column lanes keep their title band at the top free, as rows keep their left edge.
+            across: (
+                if columns {
+                    lane_bands_top(&layout.lanes) + RUN_MARGIN
+                } else {
+                    RUN_MARGIN
+                },
+                lane_length - RUN_MARGIN,
+            ),
         };
         // All routes first: straight arrows on one line spread apart before any is separated.
         let mut routes = Vec::new();
@@ -472,12 +548,19 @@ impl GraphLayout {
             else {
                 continue;
             };
-            let lane = |id: &Id| layout.lanes[lane_of[id]].rect;
+            let lane = |id: &Id| routed(layout.lanes[lane_of[id]].rect);
             let lanes = (lane(&relationship.from), lane(&relationship.to));
-            let route = route(from, to, (&lanes.0, &lanes.1), lane_width, &obstacles);
+            let route = route(
+                from,
+                to,
+                (&lanes.0, &lanes.1),
+                lane_length,
+                gaps,
+                &obstacles,
+            );
             routes.push((relationship, step, route));
         }
-        spread_straight_runs(&mut routes, &obstacles);
+        spread_straight_runs(&mut routes, &obstacles, columns);
         let mut ends = Vec::new();
         for (relationship, step, mut route) in routes {
             let heads = match relationship.direction {
@@ -508,6 +591,13 @@ impl GraphLayout {
                 color: 0,
                 dropped: relationship.archived,
             });
+        }
+        if columns {
+            for edge in &mut layout.edges {
+                for point in &mut edge.points {
+                    *point = (point.1, point.0);
+                }
+            }
         }
         // In step order: each pill keeps clear of the pills before it, and where it can of
         // every line and lane border.
@@ -560,8 +650,89 @@ impl GraphLayout {
         (placement.layout.bounds, steps)
     }
 
-    /// Lanes and boxes with their badges, and the bounds; the arrows are left to `new`.
+    /// Lanes and boxes with their badges, and the bounds, in the lane orientation of
+    /// `orientation`; the arrows are left to `new`.
     fn place<'a>(document: &'a Document, visible: &BTreeSet<Id>, detail: Detail) -> Placement<'a> {
+        Self::place_as(document, visible, detail, Self::orientation(document))
+    }
+
+    /// The lane orientation of the diagram: the one stored with the document (the bridge
+    /// stores `automatic_lanes` at the first publication with two lanes), else, for a document
+    /// stored before that, `automatic_lanes` now, else rows. It never depends on what is shown.
+    pub fn orientation(document: &Document) -> Lanes {
+        document
+            .lanes
+            .or_else(|| Self::automatic_lanes(document))
+            .unwrap_or_default()
+    }
+
+    /// The automatic lane orientation of the whole document, dropped content included; `None`
+    /// while it has fewer than two lanes. It lays the document out both ways with subtitles and
+    /// takes the orientation of the lower cost, rows on a tie. The cost is the factor by which
+    /// the bounds' width over height is off `TARGET_ASPECT` (one or more), times
+    /// `FLOW_PREFERENCE` for the orientation against the flow, times one plus
+    /// `LOST_LABEL_WEIGHT` times the share of labelled arrows whose pill shows only its number. Columns go with the flow when more of
+    /// the arrows drawn run from one lane to another than stay inside one (hand-overs between
+    /// places), rows when fewer; on a tie neither does. So the flow decides unless the other
+    /// orientation's shape is more than `FLOW_PREFERENCE` times closer to 16:10, as for lanes
+    /// of two boxes, which make flat columns, or it keeps more labels.
+    pub fn automatic_lanes(document: &Document) -> Option<Lanes> {
+        let all: BTreeSet<Id> = document
+            .elements
+            .keys()
+            .chain(document.relationships.keys())
+            .chain(document.groups.keys())
+            .copied()
+            .collect();
+        let rows = Self::place_as(document, &all, Detail::Subtitles, Lanes::Rows);
+        if rows.layout.lanes.len() < 2 {
+            return None;
+        }
+        let (crossing, inside): (Vec<_>, Vec<_>) = arrow_steps(document, &rows)
+            .into_iter()
+            .partition(|(item, _)| rows.lane_of[&item.from] != rows.lane_of[&item.to]);
+        let flow = match crossing.len().cmp(&inside.len()) {
+            std::cmp::Ordering::Greater => Some(Lanes::Columns),
+            std::cmp::Ordering::Less => Some(Lanes::Rows),
+            std::cmp::Ordering::Equal => None,
+        };
+        let cost = |lanes: Lanes| {
+            let layout = Self::new_as(document, &all, Detail::Subtitles, lanes);
+            let ratio = layout.bounds.width / layout.bounds.height / TARGET_ASPECT;
+            let against = flow.is_some_and(|flow| flow != lanes);
+            let (lost, labelled) = layout.lost_labels();
+            ratio.max(1.0 / ratio)
+                * if against { FLOW_PREFERENCE } else { 1.0 }
+                * (1.0 + LOST_LABEL_WEIGHT * lost as f32 / labelled.max(1) as f32)
+        };
+        if cost(Lanes::Columns) < cost(Lanes::Rows) {
+            Some(Lanes::Columns)
+        } else {
+            Some(Lanes::Rows)
+        }
+    }
+
+    /// Arrows whose pill shows only its number though they have a label, and arrows with one.
+    fn lost_labels(&self) -> (usize, usize) {
+        let labelled: Vec<&Edge> = self
+            .edges
+            .iter()
+            .filter(|edge| !edge.text.trim().is_empty())
+            .collect();
+        let lost = labelled
+            .iter()
+            .filter(|edge| edge.shown == edge.step.to_string())
+            .count();
+        (lost, labelled.len())
+    }
+
+    /// Lanes and boxes with their badges, and the bounds, with lanes as `lanes`.
+    fn place_as<'a>(
+        document: &'a Document,
+        visible: &BTreeSet<Id>,
+        detail: Detail,
+        lanes: Lanes,
+    ) -> Placement<'a> {
         let elements: Vec<_> = {
             let mut items: Vec<_> = document
                 .elements
@@ -682,103 +853,116 @@ impl GraphLayout {
             lane_members.push((None, title, rest));
         }
 
-        let columns = lane_members
+        // Every box shaped first: column lanes line their rows up by the tallest box of each.
+        let shaped: Vec<(Option<Id>, String, Vec<Shaped>)> = lane_members
+            .into_iter()
+            .map(|(group, title, members)| {
+                let members = members
+                    .into_iter()
+                    .map(|id| shape(&document.elements[&id], detail))
+                    .collect();
+                (group, title, members)
+            })
+            .collect();
+        let most = shaped
             .iter()
             .map(|(_, _, members)| members.len())
             .max()
             .unwrap_or(1)
             .max(1);
-        let columns = ((columns as f32).sqrt().ceil() as usize).clamp(1, MAX_COLUMNS);
         let box_width = detail.box_width();
-        let lane_width =
-            LANE_PADDING * 2.0 + columns as f32 * box_width + (columns - 1) as f32 * BOX_GAP_X;
         let mut layout = GraphLayout {
             detail,
+            orientation: lanes,
             ..Default::default()
         };
-        let mut y = 0.0;
+        let heights: Vec<Vec<f32>> = shaped
+            .iter()
+            .map(|(_, _, members)| members.iter().map(|item| item.height).collect())
+            .collect();
+        let titles: Vec<f32> = shaped
+            .iter()
+            .map(|(_, title, _)| title_height(title))
+            .collect();
+        let room = column_room(&shaped, &relationships, &consumed_edges);
+        let places_with = |heights: &[Vec<f32>], per_line: usize, box_width: f32| match lanes {
+            Lanes::Rows => row_places(heights, &titles, per_line, box_width),
+            Lanes::Columns => column_places(heights, &titles, per_line, box_width, room),
+        };
+        // Boxes per line along the lane (per row of a row lane, per column of a column lane):
+        // a square-ish block of at most `MAX_COLUMNS` a row, or a stack of at most `MAX_STACK`.
+        // Where that cap makes long lanes a strip more than `MAX_MISFIT` off 16:10, the number
+        // closest to 16:10 instead. Chosen with subtitles, so the same at every detail.
+        let usual = match lanes {
+            Lanes::Rows => ((most as f32).sqrt().ceil() as usize).clamp(1, MAX_COLUMNS),
+            Lanes::Columns => most.div_ceil(most.div_ceil(MAX_STACK)),
+        };
+        let reference: Vec<Vec<f32>> = shaped
+            .iter()
+            .map(|(_, _, members)| {
+                members
+                    .iter()
+                    .map(|item| {
+                        box_height(Detail::Subtitles, &document.elements[&item.id].kind, 1, 1)
+                    })
+                    .collect()
+            })
+            .collect();
+        let shape_of = |per_line: usize| {
+            misfit(&places_with(
+                &reference,
+                per_line,
+                Detail::Subtitles.box_width(),
+            ))
+        };
+        let capped = match lanes {
+            Lanes::Rows => most > MAX_COLUMNS * MAX_COLUMNS,
+            Lanes::Columns => most > MAX_STACK,
+        };
+        let per_line = if !capped || shape_of(usual) <= MAX_MISFIT {
+            usual
+        } else {
+            (1..=most)
+                .min_by(|a, b| shape_of(*a).total_cmp(&shape_of(*b)))
+                .unwrap_or(usual)
+        };
+        let places = places_with(&heights, per_line, box_width);
         let mut lane_of: BTreeMap<Id, usize> = BTreeMap::new();
-        for (index, (group, title, members)) in lane_members.into_iter().enumerate() {
-            let color = LANE_COLORS[index % LANE_COLORS.len()];
-            let title_height = title_height(&title);
-            let lane_top = y;
-            let mut row_y = lane_top + title_height + LANE_PADDING;
-            let mut row_height: f32 = 0.0;
-            for (position, id) in members.iter().enumerate() {
-                let element = &document.elements[id];
-                let name = single_line(&element.title);
-                // Without a head line, the dropped label shares the title's lines.
-                let chars = if element.archived && !has_head_line(&element.kind) {
-                    let room = (DROPPED_LABEL_ROOM / (TITLE_SIZE * TITLE_CHAR_EM)).ceil() as usize;
-                    detail.title_chars().saturating_sub(room)
-                } else {
-                    detail.title_chars()
-                };
-                let title = title_lines(&name, detail, chars);
-                let text = text_lines(&element.body, detail);
-                let height = box_height(detail, &element.kind, title.len(), text.len());
-                let column = position % columns;
-                if column == 0 && position > 0 {
-                    row_y += row_height + BOX_GAP_Y;
-                    row_height = 0.0;
-                }
-                row_height = row_height.max(height);
-                let rect = WorldRect {
-                    x: LANE_PADDING + column as f32 * (box_width + BOX_GAP_X),
-                    y: row_y,
-                    width: box_width,
-                    height,
-                };
-                let node_gates = place_gates(gates.remove(id).unwrap_or_default(), &rect);
-                lane_of.insert(*id, index);
+        let lanes_and_boxes = places.lanes.iter().zip(&places.boxes);
+        for (index, ((group, title, members), (lane_rect, rects))) in
+            shaped.into_iter().zip(lanes_and_boxes).enumerate()
+        {
+            for (item, rect) in members.into_iter().zip(rects) {
+                let element = &document.elements[&item.id];
+                lane_of.insert(item.id, index);
                 layout.nodes.push(Node {
-                    id: *id,
-                    number: numbers[id],
-                    rect,
-                    name,
-                    title,
-                    text,
+                    id: item.id,
+                    number: numbers[&item.id],
+                    rect: *rect,
+                    name: item.name,
+                    title: item.title,
+                    text: item.text,
                     kind: element.kind.clone(),
                     color: kind_color(&element.kind),
-                    gates: node_gates,
+                    gates: place_gates(gates.remove(&item.id).unwrap_or_default(), rect),
                     dropped: element.archived,
                 });
             }
-            let lane_height = title_height
-                + LANE_PADDING
-                + LANE_BOTTOM_PADDING
-                + (row_y - lane_top - title_height - LANE_PADDING)
-                + row_height;
-            let dropped = group.is_some_and(|id| document.groups[&id].archived);
-            let name = group.map_or(String::new(), |id| {
-                let title = single_line(&document.groups[&id].title);
-                format!("Group: {title}{}", dropped_suffix(dropped))
-            });
-            layout.lanes.push(Lane {
-                group,
-                title,
-                name,
-                color,
-                rect: WorldRect {
-                    x: 0.0,
-                    y: lane_top,
-                    width: lane_width,
-                    height: lane_height,
-                },
-                dropped,
-            });
-            y = lane_top + lane_height + LANE_GAP;
+            layout
+                .lanes
+                .push(lane(document, index, group, title, *lane_rect));
         }
 
-        let height = layout.lanes.last().map_or(0.0, |lane| lane.rect.bottom());
+        let (width, height) = layout.lanes.iter().fold((0.0_f32, 0.0_f32), |size, lane| {
+            (
+                size.0.max(lane.rect.right()),
+                size.1.max(lane.rect.bottom()),
+            )
+        });
         layout.bounds = WorldRect {
             x: 0.0,
             y: 0.0,
-            width: if layout.lanes.is_empty() {
-                0.0
-            } else {
-                lane_width
-            },
+            width,
             height,
         };
         Placement {
@@ -787,7 +971,8 @@ impl GraphLayout {
             numbers,
             relationships,
             consumed_edges,
-            lane_width,
+            lane_length: places.length,
+            gaps: places.gaps,
         }
     }
 
@@ -831,6 +1016,8 @@ impl GraphLayout {
     }
 
     /// The topmost shape at a point, in reverse paint order: pills, badges, boxes, arrows.
+    /// An arrow answers along its polyline (`Edge::points`), not the rounded line drawn: a
+    /// rounded bend stays within `CORNER_RADIUS` of its corner, well inside the hit distance.
     pub fn hit(&self, x: f32, y: f32) -> Option<Id> {
         if let Some(edge) = self.edges.iter().find(|edge| edge.pill.contains(x, y)) {
             return Some(edge.id);
@@ -919,10 +1106,7 @@ impl GraphLayout {
         for edge in &self.edges {
             let focused = focus == Some(edge.id);
             let (stroke, marker) = edge_paint(edge, focused);
-            let mut path = String::new();
-            for (index, (x, y)) in edge.points.iter().enumerate() {
-                let _ = write!(path, "{}{x},{y}", if index == 0 { "M" } else { " L" });
-            }
+            let path = rounded_path(&edge.points);
             let head = format!("url(#{marker})");
             let markers = match edge.direction {
                 Direction::Directed => format!(r#" marker-end="{head}""#),
@@ -940,7 +1124,8 @@ impl GraphLayout {
                 None,
                 edge.dropped,
             );
-            // An invisible wide stroke makes the thin arrow easy to hit with a pointer.
+            // An invisible wide stroke along the same rounded line makes the thin arrow easy to
+            // hit with a pointer.
             let _ = write!(
                 svg,
                 r#"<path class="prism-hit" d="{path}" fill="none" stroke="{BACKGROUND}" stroke-opacity="0" stroke-width="{}" pointer-events="stroke"/>"#,
@@ -949,7 +1134,11 @@ impl GraphLayout {
             let _ = write!(
                 svg,
                 r#"<path class="prism-line" d="{path}" fill="none" stroke="{stroke}" stroke-width="{}"{}{markers}/></g>"#,
-                if focused { 3.0 } else { 1.8 },
+                if focused {
+                    ARROW_FOCUS_STROKE
+                } else {
+                    ARROW_STROKE
+                },
                 if edge.dropped {
                     format!(r#" stroke-dasharray="{DROPPED_DASH}""#)
                 } else if edge.dashed {
@@ -1134,12 +1323,13 @@ impl GraphLayout {
             );
             let _ = write!(
                 svg,
-                r#"<title>{}</title><rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="10" fill="{stroke}"/><text class="prism-label" x="{}" y="{}" text-anchor="middle" fill="{PILL_TEXT}" font-size="11" font-weight="700">{}</text></g>"#,
+                r#"<title>{}</title><rect class="prism-shape" x="{}" y="{}" width="{}" height="{}" rx="{}" fill="{stroke}"/><text class="prism-label" x="{}" y="{}" text-anchor="middle" fill="{PILL_TEXT}" font-size="11" font-weight="700">{}</text></g>"#,
                 escape(&name),
                 p.x,
                 p.y,
                 p.width,
                 p.height,
+                PILL_HEIGHT / 2.0,
                 p.center_x(),
                 p.center_y() + 4.0,
                 escape(&edge.shown)
@@ -1197,6 +1387,272 @@ fn place_gates(mut gates: Vec<Gate>, rect: &WorldRect) -> Vec<Gate> {
     gates
 }
 
+/// A box's texts and height, before it has its place.
+struct Shaped {
+    id: Id,
+    name: String,
+    title: Vec<String>,
+    text: Vec<String>,
+    height: f32,
+}
+
+fn shape(element: &Element, detail: Detail) -> Shaped {
+    let name = single_line(&element.title);
+    // Without a head line, the dropped label shares the title's lines.
+    let chars = if element.archived && !has_head_line(&element.kind) {
+        let room = (DROPPED_LABEL_ROOM / (TITLE_SIZE * TITLE_CHAR_EM)).ceil() as usize;
+        detail.title_chars().saturating_sub(room)
+    } else {
+        detail.title_chars()
+    };
+    let title = title_lines(&name, detail, chars);
+    let text = text_lines(&element.body, detail);
+    let height = box_height(detail, &element.kind, title.len(), text.len());
+    Shaped {
+        id: element.id,
+        name,
+        title,
+        text,
+        height,
+    }
+}
+
+/// The lane at `index` of the group `group` (none for the lane of ungrouped boxes).
+fn lane(
+    document: &Document,
+    index: usize,
+    group: Option<Id>,
+    title: String,
+    rect: WorldRect,
+) -> Lane {
+    let dropped = group.is_some_and(|id| document.groups[&id].archived);
+    let name = group.map_or(String::new(), |id| {
+        let title = single_line(&document.groups[&id].title);
+        format!("Group: {title}{}", dropped_suffix(dropped))
+    });
+    Lane {
+        group,
+        title,
+        name,
+        color: LANE_COLORS[index % LANE_COLORS.len()],
+        rect,
+        dropped,
+    }
+}
+
+/// Where the lanes and their boxes go: each lane's rectangle and its boxes' in order, what all
+/// lanes share across them (`Placement::lane_length`) and the gaps as routing sees them.
+struct Places {
+    lanes: Vec<WorldRect>,
+    boxes: Vec<Vec<WorldRect>>,
+    length: f32,
+    gaps: Gaps,
+}
+
+/// Row lanes stacked top to bottom, of boxes as high as `heights` (per lane) and titles as
+/// high as `titles`: `per_line` boxes a row, each row as high as its tallest box.
+fn row_places(heights: &[Vec<f32>], titles: &[f32], per_line: usize, box_width: f32) -> Places {
+    let width =
+        LANE_PADDING * 2.0 + per_line as f32 * box_width + (per_line - 1) as f32 * BOX_GAP_X;
+    let mut places = Places {
+        lanes: Vec::new(),
+        boxes: Vec::new(),
+        length: width,
+        gaps: Gaps {
+            beside: BOX_GAP_X,
+            rows: BOX_GAP_Y,
+            lanes: LANE_GAP,
+        },
+    };
+    let mut y = 0.0;
+    for (members, title_height) in heights.iter().zip(titles) {
+        let lane_top = y;
+        let mut row_y = lane_top + title_height + LANE_PADDING;
+        let mut row_height: f32 = 0.0;
+        let mut boxes = Vec::new();
+        for (position, height) in members.iter().enumerate() {
+            let column = position % per_line;
+            if column == 0 && position > 0 {
+                row_y += row_height + BOX_GAP_Y;
+                row_height = 0.0;
+            }
+            row_height = row_height.max(*height);
+            boxes.push(WorldRect {
+                x: LANE_PADDING + column as f32 * (box_width + BOX_GAP_X),
+                y: row_y,
+                width: box_width,
+                height: *height,
+            });
+        }
+        let lane_height = title_height
+            + LANE_PADDING
+            + LANE_BOTTOM_PADDING
+            + (row_y - lane_top - title_height - LANE_PADDING)
+            + row_height;
+        places.lanes.push(WorldRect {
+            x: 0.0,
+            y: lane_top,
+            width,
+            height: lane_height,
+        });
+        places.boxes.push(boxes);
+        y = lane_top + lane_height + LANE_GAP;
+    }
+    places
+}
+
+/// Column lanes side by side, the mirror of `row_places`, so that routing can run on them
+/// transposed (see `GraphLayout::new`): boxes fill each column of a lane top to bottom,
+/// `per_line` a column, and columns follow left to right, with `room` beside them and between
+/// lanes. The gaps between boxes stay as in rows (between columns at least as wide as the
+/// room beside them), so that pills fit; the title stays on top;
+/// the rows of all lanes line up, each as tall as its tallest box, so that a line from lane
+/// to lane can run straight.
+fn column_places(
+    heights: &[Vec<f32>],
+    titles: &[f32],
+    per_line: usize,
+    box_width: f32,
+    room: ColumnRoom,
+) -> Places {
+    let mut row_heights = vec![0.0_f32; per_line];
+    for members in heights {
+        for (position, height) in members.iter().enumerate() {
+            let row = position % per_line;
+            row_heights[row] = row_heights[row].max(*height);
+        }
+    }
+    let top = titles.iter().copied().fold(0.0, f32::max) + LANE_PADDING;
+    let side = room.side;
+    // Between the columns of a lane, arrows past a box run as beside the lane's last one.
+    let between = side.max(BOX_GAP_X);
+    let row_tops: Vec<f32> = row_heights
+        .iter()
+        .scan(top, |next, height| {
+            let row_top = *next;
+            *next += height + BOX_GAP_Y;
+            Some(row_top)
+        })
+        .collect();
+    let lane_height = row_tops[per_line - 1] + row_heights[per_line - 1] + LANE_PADDING;
+    // As routing sees them, transposed.
+    let mut places = Places {
+        lanes: Vec::new(),
+        boxes: Vec::new(),
+        length: lane_height,
+        gaps: Gaps {
+            beside: BOX_GAP_Y,
+            rows: between,
+            lanes: room.gap,
+        },
+    };
+    let mut x = 0.0;
+    for members in heights {
+        let columns = members.len().div_ceil(per_line).max(1);
+        let boxes = members
+            .iter()
+            .enumerate()
+            .map(|(position, height)| WorldRect {
+                x: x + side + (position / per_line) as f32 * (box_width + between),
+                y: row_tops[position % per_line],
+                width: box_width,
+                height: *height,
+            })
+            .collect();
+        let lane_width = 2.0 * side + columns as f32 * box_width + (columns - 1) as f32 * between;
+        places.lanes.push(WorldRect {
+            x,
+            y: 0.0,
+            width: lane_width,
+            height: lane_height,
+        });
+        places.boxes.push(boxes);
+        x += lane_width + room.gap;
+    }
+    places
+}
+
+/// Room around column lanes, from the labels of the arrows that run there (step numbers are
+/// not known yet: a pill counts with the number of arrows).
+#[derive(Clone, Copy)]
+struct ColumnRoom {
+    /// Between lanes, where arrows from lane to lane turn: the widest pill of such an arrow
+    /// fits on its upright line, clear of both lanes by `PILL_MARGIN` also with the line
+    /// `RUN_SPACING` off the middle (beside another one), between `LANE_GAP` and
+    /// `MAX_COLUMN_GAP`.
+    gap: f32,
+    /// Left and right of a lane's boxes, where an arrow past a box of its column runs (the
+    /// mirror of `below_row`), `ARROW_END_RUN` and a second `RUN_SPACING` further out: the
+    /// widest pill of an arrow inside a lane that skips a box fits there off the lane's edge,
+    /// between `LANE_BOTTOM_PADDING` and `MAX_COLUMN_SIDE`.
+    side: f32,
+}
+
+fn column_room(
+    lanes: &[(Option<Id>, String, Vec<Shaped>)],
+    relationships: &[&Relationship],
+    consumed: &BTreeSet<Id>,
+) -> ColumnRoom {
+    let place: HashMap<Id, (usize, usize)> = lanes
+        .iter()
+        .enumerate()
+        .flat_map(|(lane, (_, _, members))| {
+            members
+                .iter()
+                .enumerate()
+                .map(move |(position, item)| (item.id, (lane, position)))
+        })
+        .collect();
+    let number = relationships.len();
+    let pill = |item: &Relationship| {
+        pill_rect(
+            (0.0, 0.0),
+            &format!("{number} {}", single_line(&item.label)),
+        )
+        .width
+    };
+    let mut room = ColumnRoom {
+        gap: LANE_GAP,
+        side: LANE_BOTTOM_PADDING,
+    };
+    for item in relationships
+        .iter()
+        .filter(|item| !consumed.contains(&item.id))
+    {
+        let (Some(from), Some(to)) = (place.get(&item.from), place.get(&item.to)) else {
+            continue;
+        };
+        if from.0 != to.0 {
+            room.gap = room.gap.max(pill(item) + 2.0 * (PILL_MARGIN + RUN_SPACING));
+        } else if from.1.abs_diff(to.1) > 1 {
+            room.side = room
+                .side
+                .max(ARROW_END_RUN + RUN_SPACING + pill(item) / 2.0 + PILL_MARGIN);
+        }
+    }
+    ColumnRoom {
+        gap: room.gap.min(MAX_COLUMN_GAP),
+        side: room.side.min(MAX_COLUMN_SIDE),
+    }
+}
+
+/// The height of the tallest lane title: the band on top of column lanes.
+fn lane_bands_top(lanes: &[Lane]) -> f32 {
+    lanes
+        .iter()
+        .map(|lane| title_height(&lane.title))
+        .fold(0.0, f32::max)
+}
+
+/// How far the lanes' extent is off `TARGET_ASPECT`, as a factor of one or more.
+fn misfit(places: &Places) -> f32 {
+    let (width, height) = places.lanes.iter().fold((0.0_f32, 0.0_f32), |size, lane| {
+        (size.0.max(lane.right()), size.1.max(lane.bottom()))
+    });
+    let ratio = width / height / TARGET_ASPECT;
+    ratio.max(1.0 / ratio)
+}
+
 fn title_height(title: &str) -> f32 {
     if title.is_empty() {
         0.0
@@ -1215,7 +1671,9 @@ struct Runs<'a> {
     box_grid: Grid,
     /// Each lane with the height of its title.
     lanes: &'a [(WorldRect, f32)],
-    width: f32,
+    /// Where a line across the lanes (upright, as routing sees them) may run: within what
+    /// all lanes share across them (`Placement::lane_length`), clear of their edges.
+    across: (f32, f32),
 }
 
 impl Runs<'_> {
@@ -1271,8 +1729,13 @@ fn on_side(point: (f32, f32), rect: &WorldRect, side: Side) -> bool {
 /// pill and `PILL_GAP` when upright. Where side-by-side boxes leave room for fewer level
 /// lines, the later arrows run below the row (`below_row`). Where the upright lines' boxes
 /// leave less room, they share it evenly; closer than `RUN_SPACING`, `separate_runs` places
-/// them instead.
-fn spread_straight_runs(routes: &mut [(&Relationship, usize, Route)], obstacles: &[WorldRect]) {
+/// them instead. Routes of column lanes are `transposed`: their level lines are upright on
+/// screen, so they keep the pills' width apart, and the upright ones their height.
+fn spread_straight_runs(
+    routes: &mut [(&Relationship, usize, Route)],
+    obstacles: &[WorldRect],
+    transposed: bool,
+) {
     // Level or not, the line's level, and the stretch it covers.
     let straight = |route: &Route| -> Option<(bool, f32, (f32, f32))> {
         let points = &route.points;
@@ -1329,7 +1792,7 @@ fn spread_straight_runs(routes: &mut [(&Relationship, usize, Route)], obstacles:
                     )
                 }
             });
-        let wanted = if level_line {
+        let wanted = if level_line != transposed {
             PILL_HEIGHT + PILL_GAP
         } else {
             group
@@ -1415,7 +1878,7 @@ fn separate_runs(route: &mut Route, heads: (bool, bool), earlier: &[Edge], runs:
         let band = if horizontal {
             runs.band(a.1)
         } else {
-            (RUN_MARGIN, runs.width - RUN_MARGIN)
+            runs.across
         };
         let mut ends = Vec::new();
         if index == 0 {
@@ -1543,12 +2006,17 @@ fn arrow_steps<'a>(
         .collect()
 }
 
+/// What a pill's place costs, compared in order: the area it overlaps, whether it is on a lane
+/// border (1) or not (0), the label (0) or the number (1), and the lines it covers.
+type PillCost = (f32, usize, usize, f32);
+
 /// Puts the pill of arrow `index` on its line, clear of boxes, badges and lane titles by
 /// `PILL_MARGIN` and of the pills of earlier steps by `PILL_GAP`: with its step number and
-/// label, else with its number only (beside boxes the gap is narrow); the whole label stays in
-/// its accessible name. It tries the arrow's segments longest first, each from its middle
-/// outwards (see `slide_positions`), and of the free places takes the first that covers the
-/// least of the other arrows' lines, of its own arrowheads and of the lane `borders`. Where
+/// label, else with its number only (beside boxes the gap is narrow, and a place off the lane
+/// borders comes first); the whole label stays in its accessible name. It tries the arrow's
+/// segments longest first, each from its middle outwards (see `slide_positions`), and of the
+/// free places takes the first that covers the least of the other arrows' lines, of its own
+/// arrowheads and of the lane `borders`. Where
 /// no place is free, it takes the one that overlaps least, so that pills stack only as a last
 /// resort.
 fn place_pill(index: usize, edges: &[Edge], room: &PillRoom) -> (String, WorldRect) {
@@ -1562,10 +2030,15 @@ fn place_pill(index: usize, edges: &[Edge], room: &PillRoom) -> (String, WorldRe
         .collect();
     segments.sort_by(|a, b| length(b).total_cmp(&length(a)));
     let heads = head_runs(edge);
-    let mut best: Option<((f32, usize, f32), String, WorldRect)> = None;
+    let mut best: Option<(PillCost, String, WorldRect)> = None;
     for (form, text) in [label.as_str(), number.as_str()].into_iter().enumerate() {
-        // A free place for the whole label comes before any for the number.
-        if form > 0 && best.as_ref().is_some_and(|(least, _, _)| least.0 == 0.0) {
+        // A free place for the whole label, off the lane borders, comes before any for the
+        // number.
+        if form > 0
+            && best
+                .as_ref()
+                .is_some_and(|(least, _, _)| least.0 == 0.0 && least.1 == 0)
+        {
             break;
         }
         let size = pill_rect((0.0, 0.0), text);
@@ -1587,16 +2060,19 @@ fn place_pill(index: usize, edges: &[Edge], room: &PillRoom) -> (String, WorldRe
                 if best.as_ref().is_some_and(|(least, _, _)| area > least.0) {
                     continue;
                 }
-                let cost = (area, form, near.covered(&pill, room, &heads));
+                let (lines, borders) = near.covered(&pill, room, &heads);
+                let cost = (area, usize::from(borders > 0.0), form, lines + borders);
                 // Free and on no other line: nothing comes before it.
-                if cost == (0.0, 0, 0.0) {
+                if cost == (0.0, 0, 0, 0.0) {
                     return (text.to_owned(), pill);
                 }
-                // Overlap first, then the label before the number, then the lines covered.
+                // Overlap first, then off the lane borders, then the label before the number,
+                // then the lines covered.
                 let better = best.as_ref().is_none_or(|(least, _, _)| {
                     let order = cost.0.total_cmp(&least.0);
                     let order = order.then(cost.1.cmp(&least.1));
-                    order.then(cost.2.total_cmp(&least.2)).is_lt()
+                    let order = order.then(cost.2.cmp(&least.2));
+                    order.then(cost.3.total_cmp(&least.3)).is_lt()
                 });
                 if better {
                     best = Some((cost, text.to_owned(), pill));
@@ -1757,9 +2233,9 @@ impl Near {
         boxes + pills
     }
 
-    /// The length of other arrows' lines, of the arrow's own `heads` and of lane borders
-    /// within `PILL_MARGIN` that `pill` covers.
-    fn covered(&self, pill: &WorldRect, room: &PillRoom, heads: &[Segment]) -> f32 {
+    /// The length of other arrows' lines and of the arrow's own `heads` that `pill` covers,
+    /// and of lane borders within `PILL_MARGIN`.
+    fn covered(&self, pill: &WorldRect, room: &PillRoom, heads: &[Segment]) -> (f32, f32) {
         let on = |rect: &WorldRect, lines: &[usize]| -> f32 {
             lines
                 .iter()
@@ -1779,7 +2255,7 @@ impl Near {
             .iter()
             .map(|(a, b)| covered_length(pill, *a, *b))
             .sum();
-        on(pill, &self.lines) + own + on(&grown, &self.borders)
+        (on(pill, &self.lines) + own, on(&grown, &self.borders))
     }
 }
 
@@ -2044,12 +2520,14 @@ fn escape(text: &str) -> String {
 /// two lanes, never on a lane's edge; a run that would cross another box detours through the
 /// gap beside the column. Beside the target it runs from side to side; past a box in between
 /// it runs below the row, clear of the badges on top. Below a row means below its tallest box:
-/// with the full text, boxes of one row differ in height.
+/// with the full text, boxes of one row differ in height. Boxes side by side across the turn
+/// (column lanes, routed transposed) are joined by one straight line where they overlap.
 fn route(
     from: &WorldRect,
     to: &WorldRect,
     lanes: (&WorldRect, &WorldRect),
     lane_width: f32,
+    gaps: Gaps,
     obstacles: &[WorldRect],
 ) -> Route {
     let (from_lane, to_lane) = lanes;
@@ -2070,18 +2548,21 @@ fn route(
             (from.y, to.bottom(), -1.0, (Side::Top, Side::Bottom))
         };
         let turn = if from_lane == to_lane && downwards {
-            row_bottom(from, obstacles) + BOX_GAP_Y / 2.0
+            row_bottom(from, obstacles) + gaps.rows / 2.0
         } else if from_lane == to_lane {
-            leave - BOX_GAP_Y / 2.0
+            leave - gaps.rows / 2.0
         } else if downwards {
-            from_lane.bottom() + LANE_GAP / 2.0
+            from_lane.bottom() + gaps.lanes / 2.0
         } else {
-            from_lane.y - LANE_GAP / 2.0
+            from_lane.y - gaps.lanes / 2.0
         };
-        let (start_x, end_x) = (from.center_x(), to.center_x());
-        let points = if !blocked(start_x, leave.min(turn), leave.max(turn))
-            && !blocked(end_x, turn.min(enter), turn.max(enter))
-        {
+        let (start_x, end_x) = upright_ends(from, to);
+        let free = !blocked(start_x, leave.min(turn), leave.max(turn))
+            && !blocked(end_x, turn.min(enter), turn.max(enter));
+        // One straight line moves as a whole (see `separate_runs`), never into a jog.
+        let points = if free && start_x == end_x {
+            vec![(start_x, leave), (end_x, enter)]
+        } else if free {
             vec![
                 (start_x, leave),
                 (start_x, turn),
@@ -2090,17 +2571,40 @@ fn route(
             ]
         } else {
             let step = sign * ARROW_END_RUN;
-            let channel = if from.right() + BOX_GAP_X < lane_width {
-                from.right() + BOX_GAP_X / 2.0
+            // The gap right of the column, else left of it, else (the lane's only column)
+            // the middle of the room right of it, off the lane's edge.
+            let right = column_right(from, obstacles);
+            let channel = if right + gaps.beside < lane_width {
+                right + gaps.beside / 2.0
+            } else if from.x > gaps.beside {
+                from.x - gaps.beside / 2.0
             } else {
-                from.x - BOX_GAP_X / 2.0
+                (right + lane_width) / 2.0
+            };
+            // From lane to lane it turns in the gaps between lanes, where it has room to
+            // keep apart from others, unless a box of the lane is in the way there.
+            let cross = from_lane != to_lane;
+            let first = if cross && !blocked(start_x, leave.min(turn), leave.max(turn)) {
+                turn
+            } else {
+                leave + step
+            };
+            let near_to = if downwards {
+                to_lane.y - gaps.lanes / 2.0
+            } else {
+                to_lane.bottom() + gaps.lanes / 2.0
+            };
+            let last = if cross && !blocked(end_x, near_to.min(enter), near_to.max(enter)) {
+                near_to
+            } else {
+                enter - step
             };
             vec![
                 (start_x, leave),
-                (start_x, leave + step),
-                (channel, leave + step),
-                (channel, enter - step),
-                (end_x, enter - step),
+                (start_x, first),
+                (channel, first),
+                (channel, last),
+                (end_x, last),
                 (end_x, enter),
             ]
         };
@@ -2163,6 +2667,29 @@ fn below_row(from: &WorldRect, to: &WorldRect, obstacles: &[WorldRect]) -> Route
     }
 }
 
+/// Where an arrow from `from` to `to` above or below it leaves and enters: the middle of the
+/// stretch both boxes cover side by side, so the line runs straight, else each box's middle.
+fn upright_ends(from: &WorldRect, to: &WorldRect) -> (f32, f32) {
+    let (left, right) = (from.x.max(to.x), from.right().min(to.right()));
+    if right - left >= 2.0 * PORT_INSET {
+        let middle = (left + right) / 2.0;
+        (middle, middle)
+    } else {
+        (from.center_x(), to.center_x())
+    }
+}
+
+/// The right edge of the column of `rect`: boxes of one column share their left edge, the
+/// widest one sets it. Row lanes' boxes are all as wide; those of column lanes, routed
+/// transposed, differ in height.
+fn column_right(rect: &WorldRect, obstacles: &[WorldRect]) -> f32 {
+    obstacles
+        .iter()
+        .filter(|other| other.x == rect.x)
+        .map(WorldRect::right)
+        .fold(rect.right(), f32::max)
+}
+
 /// The bottom of the row of `rect`: boxes of one row share their top edge, the tallest one
 /// sets the bottom.
 fn row_bottom(rect: &WorldRect, obstacles: &[WorldRect]) -> f32 {
@@ -2171,6 +2698,78 @@ fn row_bottom(rect: &WorldRect, obstacles: &[WorldRect]) -> f32 {
         .filter(|other| other.y == rect.y)
         .map(WorldRect::bottom)
         .fold(rect.bottom(), f32::max)
+}
+
+/// The SVG path of an arrow's polyline with rounded bends: each bend becomes a quadratic curve
+/// from `CORNER_RADIUS` before it to as far after it, with the bend as its control point. The
+/// radius is less where a segment is short: an inner segment gives each of its two bends at
+/// most half of it, an end segment keeps `ARROW_HEAD_SIZE` straight for a head, so a head
+/// always sits on a straight run. Every bend is a `Q`, one of radius 0 too, so the polyline
+/// reads back as the `M` point, the control point of every `Q` and the last point. Points on
+/// one straight line are no bends and are left out.
+fn rounded_path(points: &[(f32, f32)]) -> String {
+    let mut corners: Vec<(f32, f32)> = Vec::with_capacity(points.len());
+    for point in points {
+        if corners.last() == Some(point) {
+            continue;
+        }
+        if corners.len() >= 2 {
+            let (a, b) = (corners[corners.len() - 2], corners[corners.len() - 1]);
+            if direction(a, b) == direction(b, *point) {
+                corners.pop();
+            }
+        }
+        corners.push(*point);
+    }
+    let mut path = String::new();
+    let Some(first) = corners.first() else {
+        return path;
+    };
+    let _ = write!(path, "M{},{}", first.0, first.1);
+    let last = corners.len() - 1;
+    for index in 1..last {
+        let (a, b, c) = (corners[index - 1], corners[index], corners[index + 1]);
+        let room = |length: f32, end: bool| {
+            if end {
+                length - ARROW_HEAD_SIZE
+            } else {
+                length / 2.0
+            }
+        };
+        let radius = CORNER_RADIUS
+            .min(room(length(&(a, b)), index == 1))
+            .min(room(length(&(b, c)), index + 1 == last))
+            .max(0.0);
+        let (into, out) = (direction(a, b), direction(b, c));
+        let _ = write!(
+            path,
+            " L{},{} Q{},{} {},{}",
+            b.0 - into.0 * radius,
+            b.1 - into.1 * radius,
+            b.0,
+            b.1,
+            b.0 + out.0 * radius,
+            b.1 + out.1 * radius
+        );
+    }
+    if last > 0 {
+        let _ = write!(path, " L{},{}", corners[last].0, corners[last].1);
+    }
+    path
+}
+
+/// The unit step from `a` towards `b` along a level or upright line: each part -1, 0 or 1.
+fn direction(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    let sign = |value: f32| {
+        if value > 0.0 {
+            1.0
+        } else if value < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    };
+    (sign(b.0 - a.0), sign(b.1 - a.1))
 }
 
 fn segment_distance(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {

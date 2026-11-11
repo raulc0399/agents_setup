@@ -138,6 +138,7 @@ impl Fixture {
             }],
             relationships: vec![],
             groups: vec![],
+            lanes: None,
         }));
         let document = Id::parse_str(result["data"]["document_id"].as_str().unwrap()).unwrap();
         (document, element)
@@ -245,6 +246,7 @@ impl Fixture {
                     elements,
                     relationships: vec![],
                     groups: vec![],
+                    lanes: None,
                 },
             )
             .unwrap();
@@ -884,6 +886,7 @@ fn closing_from_the_app_or_the_tools_crosses_as_the_closed_set() {
         }],
         relationships: vec![],
         groups: vec![],
+        lanes: None,
     }));
     let (documents, _, closed) = update_with_closed(&mut socket);
     assert_eq!(documents[0].title, "Closing, revised");

@@ -1,6 +1,8 @@
 use prism::actions::*;
 use prism::model::*;
 use prism::store::Store;
+use prism_core::graph::GraphLayout;
+use std::collections::BTreeSet;
 
 fn key(conversation: &str) -> WorkspaceKey {
     WorkspaceKey {
@@ -47,6 +49,7 @@ fn publication() -> PublishRequest {
             title: "Both".into(),
             members: [a, b].into_iter().collect(),
         }],
+        lanes: None,
     }
 }
 
@@ -1108,4 +1111,172 @@ fn closed_column_is_added_to_an_older_store_and_kept_by_older_writes() {
     drop(connection);
     let store = Store::open(&path).unwrap();
     assert!(store.is_closed(workspace, published.document_id).unwrap());
+}
+
+#[test]
+fn the_lane_orientation_is_chosen_at_the_first_publication_with_two_lanes_and_kept() {
+    let mut store = Store::open(":memory:").unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let request = publication();
+    let result = store.publish(workspace, &request).unwrap();
+    let stored = |store: &Store| store.document(workspace, result.document_id).unwrap();
+    assert_eq!(
+        stored(&store).lanes,
+        None,
+        "one lane: nothing to choose yet"
+    );
+
+    // The second lane brings the automatic choice, stored with the document.
+    let mut split = edit(&request, &result, 1);
+    let (a, b) = (request.elements[0].id, request.elements[1].id);
+    split.groups[0].members = [a].into_iter().collect();
+    split.groups.push(GroupInput {
+        id: Id::new_v4(),
+        title: "Sink side".into(),
+        members: [b].into_iter().collect(),
+    });
+    store.publish(workspace, &split).unwrap();
+    let chosen = stored(&store).lanes;
+    assert!(chosen.is_some());
+    let mut document = stored(&store);
+    document.lanes = None;
+    assert_eq!(GraphLayout::automatic_lanes(&document), chosen);
+
+    // Omitted (or null) keeps it, whatever the content does; `auto` chooses again; rows and
+    // columns set it.
+    let other = match chosen.unwrap() {
+        Lanes::Rows => Lanes::Columns,
+        Lanes::Columns => Lanes::Rows,
+    };
+    let mut set = edit(&split, &result, 2);
+    set.lanes = Some(match other {
+        Lanes::Rows => LaneChoice::Rows,
+        Lanes::Columns => LaneChoice::Columns,
+    });
+    store.publish(workspace, &set).unwrap();
+    assert_eq!(stored(&store).lanes, Some(other));
+    let mut kept = edit(&split, &result, 3);
+    kept.elements[0].body = "Changed".into();
+    store.publish(workspace, &kept).unwrap();
+    assert_eq!(stored(&store).lanes, Some(other));
+    let mut null = serde_json::to_value(edit(&split, &result, 4)).unwrap();
+    null["lanes"] = serde_json::Value::Null;
+    let null: PublishRequest = serde_json::from_value(null).unwrap();
+    assert_eq!(null.lanes, None);
+    store.publish(workspace, &null).unwrap();
+    assert_eq!(stored(&store).lanes, Some(other));
+    let mut auto = edit(&split, &result, 5);
+    auto.lanes = Some(LaneChoice::Auto);
+    store.publish(workspace, &auto).unwrap();
+    assert_eq!(stored(&store).lanes, chosen);
+    assert_eq!(
+        serde_json::to_value(LaneChoice::Auto).unwrap(),
+        serde_json::json!("auto")
+    );
+
+    // Absent, it is not written: documents and requests from before it read and hash the same.
+    let request_json = serde_json::to_value(&request).unwrap();
+    assert!(request_json.get("lanes").is_none());
+    let (store, workspace, _, result) = setup();
+    let document = store.document(workspace, result.document_id).unwrap();
+    let json = serde_json::to_value(&document).unwrap();
+    assert!(json.get("lanes").is_none());
+    assert_eq!(serde_json::from_value::<Document>(json).unwrap(), document);
+    let mut columns = serde_json::to_value(&document).unwrap();
+    columns["lanes"] = "columns".into();
+    let read: Document = serde_json::from_value(columns).unwrap();
+    assert_eq!(read.lanes, Some(Lanes::Columns));
+}
+
+#[test]
+fn a_diagram_built_arrow_by_arrow_keeps_its_lane_orientation() {
+    let mut store = Store::open(":memory:").unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let mut seed: u64 = 7;
+    let mut pick = |below: usize| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as usize % below
+    };
+    for _ in 0..25 {
+        // Three lanes of one to three steps, then up to nine arrows, one publication each.
+        let sizes: Vec<usize> = (0..3).map(|_| 1 + pick(3)).collect();
+        let elements: Vec<ElementInput> = (0..sizes.iter().sum::<usize>())
+            .map(|index| ElementInput {
+                id: Id::new_v4(),
+                title: format!("Step {index}"),
+                body: "Does a thing".into(),
+                kind: ElementKind::Step,
+                source: None,
+            })
+            .collect();
+        let mut start = 0;
+        let groups = sizes
+            .iter()
+            .map(|size| {
+                let members = elements[start..start + size]
+                    .iter()
+                    .map(|item| item.id)
+                    .collect();
+                start += size;
+                GroupInput {
+                    id: Id::new_v4(),
+                    title: format!("Lane {start}"),
+                    members,
+                }
+            })
+            .collect();
+        let mut request = PublishRequest {
+            request_id: Id::new_v4(),
+            document_id: None,
+            expected_revision: None,
+            title: "Built".into(),
+            elements: elements.clone(),
+            relationships: vec![],
+            groups,
+            lanes: None,
+        };
+        let result = store.publish(workspace, &request).unwrap();
+        let first = store.document(workspace, result.document_id).unwrap().lanes;
+        assert!(first.is_some(), "three lanes: chosen at once");
+        let mut ends = BTreeSet::new();
+        for revision in 1..=9 {
+            let (from, to) = (pick(elements.len()), pick(elements.len()));
+            if from == to || !ends.insert((from, to)) {
+                continue;
+            }
+            request.request_id = Id::new_v4();
+            request.document_id = Some(result.document_id);
+            request.expected_revision = Some(
+                store
+                    .document(workspace, result.document_id)
+                    .unwrap()
+                    .revision,
+            );
+            request.relationships.push(RelationshipInput {
+                id: Id::new_v4(),
+                from: elements[from].id,
+                to: elements[to].id,
+                label: "next".into(),
+                direction: Direction::Directed,
+                manual: false,
+            });
+            store.publish(workspace, &request).unwrap();
+            let document = store.document(workspace, result.document_id).unwrap();
+            assert_eq!(document.lanes, first, "revision {revision}");
+            // Shown with items hidden, the diagram keeps it too.
+            let visible: BTreeSet<Id> = document
+                .elements
+                .keys()
+                .chain(document.relationships.keys())
+                .chain(document.groups.keys())
+                .copied()
+                .filter(|_| pick(10) > 2)
+                .collect();
+            let layout =
+                GraphLayout::new(&document, &visible, prism_core::graph::Detail::Subtitles);
+            assert_eq!(Some(layout.orientation), first);
+        }
+    }
 }

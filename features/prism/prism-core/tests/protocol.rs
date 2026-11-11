@@ -29,6 +29,7 @@ fn document() -> Document {
         elements: BTreeMap::from([(element.id, element)]),
         relationships: BTreeMap::new(),
         groups: BTreeMap::new(),
+        lanes: None,
     }
 }
 

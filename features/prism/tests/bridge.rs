@@ -115,6 +115,7 @@ fn operations_preserve_replay_and_expose_only_explicit_shares() {
         }],
         relationships: vec![],
         groups: vec![],
+        lanes: None,
     };
     let first = apply_operation(
         &mut store,
@@ -358,6 +359,7 @@ fn claude_session_end_retires_the_binding_and_preserves_shared_questions() {
                     }],
                     relationships: vec![],
                     groups: vec![],
+                    lanes: None,
                 },
             )
             .unwrap();
@@ -454,6 +456,7 @@ fn listing_all_documents_and_shared_questions_supports_pagination() {
                     }],
                     relationships: vec![],
                     groups: vec![],
+                    lanes: None,
                 },
             )
             .unwrap();
@@ -558,6 +561,7 @@ fn tools_close_and_reopen_documents_with_the_revision_check() {
         elements: vec![],
         relationships: vec![],
         groups: vec![],
+        lanes: None,
     };
     let published = apply_operation(
         &mut store,
@@ -622,4 +626,71 @@ fn tools_close_and_reopen_documents_with_the_revision_check() {
     let listed = apply_operation(&mut store, &fixture.binding, inspect(None)).unwrap();
     assert_eq!(listed["documents"][0]["closed"], false);
     assert_eq!(listed["documents"][0]["revision"], 5);
+}
+
+#[test]
+fn the_publish_tool_sets_or_keeps_the_lane_orientation_and_inspect_returns_it() {
+    use prism::bridge::apply_operation;
+    use serde_json::json;
+    let mut fixture = Fixture::new();
+    fixture
+        .binding
+        .bind_conversation(&Uuid::new_v4().to_string())
+        .unwrap();
+    let mut store = prism::store::Store::open(":memory:").unwrap();
+    let publish = |document_id: Option<Uuid>, revision: Option<u64>, lanes: Option<&str>| {
+        let mut arguments = json!({"request_id": Uuid::new_v4(), "document_id": document_id, "expected_revision": revision, "title": "Flow", "elements": [], "relationships": [], "groups": []});
+        if let Some(lanes) = lanes {
+            arguments["lanes"] = lanes.into();
+        }
+        prism::mcp::operation("prism_publish", arguments).unwrap()
+    };
+    assert!(
+        prism::mcp::operation(
+            "prism_publish",
+            json!({"request_id": Uuid::new_v4(), "document_id": null, "expected_revision": null, "title": "Flow", "elements": [], "relationships": [], "groups": [], "lanes": "diagonal"}),
+        )
+        .is_err(),
+        "only rows or columns"
+    );
+    let published = apply_operation(
+        &mut store,
+        &fixture.binding,
+        publish(None, None, Some("columns")),
+    )
+    .unwrap();
+    let document = Uuid::parse_str(published["document_id"].as_str().unwrap()).unwrap();
+    let inspect = || {
+        Operation::Inspect(InspectParams {
+            document_id: Some(document),
+            cursor: None,
+        })
+    };
+    let shown = apply_operation(&mut store, &fixture.binding, inspect()).unwrap();
+    assert_eq!(shown["lanes"], "columns", "{shown}");
+    // Omitted or null keeps it; `auto` chooses again (one lane: nothing to choose).
+    apply_operation(
+        &mut store,
+        &fixture.binding,
+        publish(Some(document), Some(1), None),
+    )
+    .unwrap();
+    let shown = apply_operation(&mut store, &fixture.binding, inspect()).unwrap();
+    assert_eq!(shown["lanes"], "columns", "{shown}");
+    let with_null = prism::mcp::operation(
+        "prism_publish",
+        json!({"request_id": Uuid::new_v4(), "document_id": document, "expected_revision": 2, "title": "Flow", "elements": [], "relationships": [], "groups": [], "lanes": null}),
+    )
+    .unwrap();
+    apply_operation(&mut store, &fixture.binding, with_null).unwrap();
+    let shown = apply_operation(&mut store, &fixture.binding, inspect()).unwrap();
+    assert_eq!(shown["lanes"], "columns", "{shown}");
+    apply_operation(
+        &mut store,
+        &fixture.binding,
+        publish(Some(document), Some(3), Some("auto")),
+    )
+    .unwrap();
+    let shown = apply_operation(&mut store, &fixture.binding, inspect()).unwrap();
+    assert!(shown.get("lanes").is_none(), "{shown}");
 }

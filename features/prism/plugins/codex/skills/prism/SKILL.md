@@ -31,7 +31,10 @@ automatically extract conversation content or open another agent conversation.
   open points; these show as badges on the box they point at.
 - Relationships accept `manual: true` for manual or review steps; diagrams
   draw them dashed. Groups become lanes in diagrams, so group by where things
-  run (for example Container, Host app), with at most 3 lanes.
+  run (for example Container, Host app), with at most 3 lanes. Lanes are laid
+  out as rows or columns, chosen automatically at the first publish with two
+  lanes and kept; omitting `lanes` keeps it, `auto` chooses again, and set
+  `rows` or `columns` only when the automatic choice reads badly.
 - Treat acceptance as content feedback, never permission to implement changes.
 - All Prism content and document state is shared through the bridge store: a
   close, drop, accept, question or answer is seen by you and every app view;

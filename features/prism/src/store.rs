@@ -195,6 +195,7 @@ impl Store {
                     elements: BTreeMap::new(),
                     relationships: BTreeMap::new(),
                     groups: BTreeMap::new(),
+                    lanes: None,
                 },
                 _ => return Err(Error::Invalid(
                     "existing document requires expected_revision; new document requires neither"

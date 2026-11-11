@@ -43,6 +43,17 @@ pub struct Layout {
 /// What the tab lists, sized at every detail and laid out at `detail`: `visible` leaves out
 /// hidden and filtered-out items; dropped (archived) ones stay in their place, drawn faded.
 pub fn diagram(document: &Document, visible: &BTreeSet<Id>, detail: Option<Detail>) -> Diagram {
+    // A document stored before the bridge kept its lane orientation chooses it once here, not
+    // in each layout below.
+    let resolved;
+    let document = if document.lanes.is_some() {
+        document
+    } else {
+        let mut copy = document.clone();
+        copy.lanes = Some(GraphLayout::orientation(document));
+        resolved = copy;
+        &resolved
+    };
     // The same at every detail: any placement gives them.
     let mut steps = BTreeMap::new();
     let sizes = Detail::ALL

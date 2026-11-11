@@ -4,7 +4,7 @@ mod common;
 use common::document;
 use prism_app_host::diagram::{Diagram, Layout, Size, diagram, export_file_name};
 use prism_core::graph::{Detail, GraphLayout};
-use prism_core::model::{Direction, Document, Id, Relationship};
+use prism_core::model::{Direction, Document, Group, Id, Lanes, Relationship};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The layout of `diagram` at `detail`.
@@ -119,6 +119,58 @@ fn the_arrows_steps_come_with_the_sizes_alone_and_at_every_detail() {
     );
     let without_arrow = BTreeSet::from([Id::from_u128(100), Id::from_u128(101)]);
     assert!(diagram(&document, &without_arrow, None).steps.is_empty());
+}
+
+#[test]
+fn lanes_as_rows_or_columns_keep_the_sizes_of_their_layouts() {
+    let mut document = document(1, 1, &["Collect", "Upload", "Store"]);
+    for (index, members) in [&[100, 101][..], &[102]].into_iter().enumerate() {
+        let group = Group {
+            id: Id::from_u128(160 + index as u128),
+            title: format!("Lane {index}"),
+            members: members.iter().copied().map(Id::from_u128).collect(),
+            order: None,
+            semantic_revision: 1,
+            accepted_revision: None,
+            archived: false,
+        };
+        document.groups.insert(group.id, group);
+    }
+    let visible: BTreeSet<Id> = [100, 101, 102, 160, 161]
+        .into_iter()
+        .map(Id::from_u128)
+        .collect();
+    let mut shapes = Vec::new();
+    for lanes in [Lanes::Rows, Lanes::Columns] {
+        document.lanes = Some(lanes);
+        for detail in Detail::ALL {
+            let (diagram, layout) = laid_out(&document, &visible, detail);
+            let bounds = GraphLayout::new(&document, &visible, detail).bounds;
+            let size = diagram.sizes[&detail];
+            assert_eq!(
+                (size.width, size.height),
+                (bounds.width, bounds.height),
+                "{lanes:?} {detail:?}"
+            );
+            assert_eq!(layout.order.len(), 3);
+            if detail == Detail::Subtitles {
+                shapes.push(size.width / size.height);
+            }
+        }
+    }
+    assert!(
+        shapes[1] > shapes[0],
+        "columns stand side by side: {shapes:?}"
+    );
+
+    // A document stored before the bridge kept the orientation gets the automatic one.
+    document.lanes = None;
+    let mut stored = document.clone();
+    stored.lanes = Some(GraphLayout::orientation(&document));
+    assert_eq!(
+        diagram(&document, &visible, Some(Detail::Subtitles)),
+        diagram(&stored, &visible, Some(Detail::Subtitles))
+    );
 }
 
 #[test]
