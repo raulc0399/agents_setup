@@ -1,6 +1,6 @@
-# Codex handover (desktop app, batches 3-7)
+# Codex handover (desktop app)
 
-Written 2026-11-10 for the Codex agent. The Claude side is done; these points are
+Written 2026-11-10, updated 2026-11-11, for the Codex agent. The Claude side is done; these points are
 Codex-only or need the Codex container.
 
 ## Changed for Codex in batches 3-7
@@ -21,6 +21,38 @@ Codex-only or need the Codex container.
 - Retired runtime directories under `.prism/run` are pruned on attach.
 - `tests/attachment.rs` covers the Codex MCP path with the real binary.
 
+## Changed after batch 7 (2026-11-10 and 2026-11-11)
+
+All of this is in the shared bridge and `prism-core`, so Codex gets it with the new
+`prism` binary; the Codex-facing parts are the tool descriptions in `src/mcp.rs` and
+`plugins/codex/skills/prism/SKILL.md`, both already updated.
+
+- **Shared state only** (Decision 8 in `docs/app-plan.md`): every change to documents and
+  content goes through the bridge store; the app keeps only presentation.
+- **Close and reopen documents**: `prism_action` takes `{"action":"close"}` and
+  `{"action":"reopen"}` without `ids` (unknown fields are refused). `prism_inspect` marks
+  each document with `closed`. Publishing to a closed document reopens it. Store column
+  `documents.closed`, schema version unchanged; app protocol is 2.
+- **Numbers never change**: every element, relationship and group keeps the position of
+  its first publish (`order` on all three); a publish never reorders, new records go to the
+  end. Diagram arrows are numbered (steps) in that order, and Prism always numbers them
+  itself, also when a label starts with a digit.
+- **Dropped items stay**: an archived item stays in place, greyed with a "dropped" badge;
+  ask, accept and drop refuse it; undo restores it.
+- **Ask goes straight to the conversation**: the app sends the item reference and the
+  quoted text without a typed question (`prism-core/src/ask.rs`); the user types the
+  question in the CLI.
+- **Answers are not recorded**: `prism_answer` stays but is not to be called; answers stay
+  in the conversation and go to md files when relevant; Prism changes only when the agent
+  publishes the revised item.
+- **Diagram rules for agents** (skill and `prism_publish` description): at most 7 boxes,
+  9 arrows and 3 lanes per document; relationships listed in data-flow order; labels of at
+  most 3 words without numbers; kind `text` for actors and stores (their box shows only
+  number and title); a changed flow is published as a new document.
+- **App**: diagram zoom is continuous with an explicit detail level, boxes look like the
+  list cards, the app remembers ended and last-seen sessions across its restarts. Nothing
+  Codex-specific.
+
 ## Open for the Codex agent
 
 1. `CodexAdapter` (`src/adapters/codex.rs`, about 1,000 lines, 13 tests) is unused by the
@@ -33,4 +65,13 @@ Codex-only or need the Codex container.
    the MCP process.
 5. Gate 1.3, Codex half: in the `d_codex` container, `cat ~/.codex/prism/app.json` must
    show the file the app wrote on the host (mode 0600).
-6. The real Codex loop against the app: publish, ask from the app, answer, drop, undo.
+6. The real Codex loop against the app: publish, ask from the app, drop, undo, close and
+   reopen a document.
+7. Ask without a typed question: for Claude the mod puts the reference into the prompt box
+   and the user types there. Codex gets shared questions only through `prism_questions`
+   (`src/adapters/codex.rs` never fills a prompt). Decide how a reference-only ask reaches
+   the Codex user: for example the skill tells Codex to call `prism_questions` when the
+   user says they asked from Prism, or a Codex-side way to place the reference in the
+   prompt.
+8. Restart Codex after installing the new binary so it loads the new tool schema
+   (`prism_action` close/reopen) and skill text.
