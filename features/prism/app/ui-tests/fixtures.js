@@ -218,7 +218,7 @@ function status(overrides = {}) {
 
 function session(key, project, host, link, loaded = true) {
   const [agent, conversation] = key.split(':');
-  return { key, host, project, agent, conversation, link, loaded };
+  return { key, host, project, agent, conversation, link, loaded, restored: false };
 }
 
 const SESSIONS = [
@@ -243,6 +243,10 @@ const CONTENTS = {
   [CLOSED]: { documents: [], questions: [] },
 };
 
+/** When the ended conversation ended, and when the others were last seen, in milliseconds since the Unix epoch. */
+const ENDED_AT_MS = Date.UTC(2026, 10, 10, 17, 42);
+export const SEEN_AT_MS = Date.UTC(2026, 10, 10, 18, 5);
+
 function arrangement(active, views = {}) {
   const labels = Object.fromEntries(
     SESSIONS.map(({ key, host, project, agent, conversation }) => [key, { host, project, agent, conversation }]),
@@ -256,6 +260,8 @@ function arrangement(active, views = {}) {
     closed: [CLOSED],
     labels,
     views,
+    ended: { [ENDED]: { reason: 'conversation cleared', ended_at_ms: ENDED_AT_MS } },
+    seen: {},
     focused: 'w1',
     next_window: 2,
   };
@@ -377,11 +383,24 @@ const CLOSED_SCENARIOS = ['documents', 'closed-menu'];
 /** Scenarios whose live tab has no saved view state: each document opens as its content says. */
 const FRESH_VIEWS = ['view-checks'];
 
+/** After a restart, before any bridge connected: the tab shown per scenario. */
+const RESTORED_SCENARIOS = { 'restored-ended': ENDED, 'restored-waiting': LIVE, 'restart-checks': ENDED };
+
+/** Every session known only from the saved arrangement: the ended one stays ended, the others wait. */
+function restoredSessions() {
+  return SESSIONS.map((session) => ({
+    ...session,
+    link: session.key === ENDED ? session.link : { state: 'waiting' },
+    loaded: false,
+    restored: true,
+  }));
+}
+
 /** Fixture per scenario: `state` (AppState) and `contents` per session key. */
 export function fixture(scenario) {
   if (scenario === 'empty') {
     return {
-      state: { status: status(), sessions: [], arrangement: { windows: [{ id: 'w1', tabs: [], active: null }], project_windows: {}, closed: [], labels: {}, views: {}, focused: 'w1', next_window: 1 } },
+      state: { status: status(), sessions: [], arrangement: { windows: [{ id: 'w1', tabs: [], active: null }], project_windows: {}, closed: [], labels: {}, views: {}, ended: {}, seen: {}, focused: 'w1', next_window: 1 } },
       contents: {},
     };
   }
@@ -405,6 +424,11 @@ export function fixture(scenario) {
     state.arrangement.windows[1].tabs = [LIVE];
     state.arrangement.windows[1].active = LIVE;
     return { state, contents: CONTENTS };
+  }
+  if (RESTORED_SCENARIOS[scenario]) {
+    const restored = arrangement(RESTORED_SCENARIOS[scenario]);
+    restored.seen = { [LIVE]: SEEN_AT_MS, [CODEX]: SEEN_AT_MS, [CLOSED]: SEEN_AT_MS };
+    return { state: { status: status(), sessions: restoredSessions(), arrangement: restored }, contents: {} };
   }
   if (CLOSED_SCENARIOS.includes(scenario)) {
     const contents = { ...CONTENTS, [LIVE]: { ...CONTENTS[LIVE], closed: [NOTES, REVIEW] } };

@@ -3,10 +3,11 @@ mod common;
 
 use common::*;
 use prism_app_host::arrangement::{
-    Arrangement, CORRUPT_ARRANGEMENT_FILE, CloseWindow, SessionLabel, project_name,
+    Arrangement, CORRUPT_ARRANGEMENT_FILE, CloseWindow, Ending, SessionLabel, project_name,
 };
 use prism_app_host::registry::Link;
 use prism_core::model::AgentKind;
+use prism_core::protocol::{AppMessage, BridgeMessage, Refusal};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -140,6 +141,71 @@ fn views_belong_to_known_tabs_and_are_forgotten_with_them() {
     assert!(!arrangement.labels.contains_key("a1"));
 }
 
+fn ending(reason: &str) -> Ending {
+    Ending {
+        reason: reason.into(),
+        ended_at_ms: 1_700_000_000_000,
+    }
+}
+
+#[test]
+fn ended_marks_belong_to_known_tabs_and_are_forgotten_with_them() {
+    let mut arrangement = arrangement();
+    arrangement.end("a1", ending("exit"));
+    assert!(arrangement.ended.is_empty());
+
+    arrangement.place("a1", label("/p/a"));
+    arrangement.end("a1", ending("exit"));
+    arrangement.close_tab("a1");
+    assert_eq!(arrangement.ended["a1"], ending("exit"));
+    arrangement.resume("a1");
+    assert!(arrangement.ended.is_empty());
+
+    arrangement.end("a1", ending("exit"));
+    for index in 0..60 {
+        let key = format!("k{index}");
+        arrangement.place(&key, label("/p/k"));
+        arrangement.close_tab(&key);
+    }
+    assert!(!arrangement.ended.contains_key("a1"));
+}
+
+#[test]
+fn last_seen_times_belong_to_known_tabs_and_are_forgotten_with_them() {
+    let mut arrangement = arrangement();
+    arrangement.see("a1", 5);
+    assert!(arrangement.seen.is_empty());
+
+    arrangement.place("a1", label("/p/a"));
+    arrangement.see("a1", 5);
+    arrangement.close_tab("a1");
+    assert_eq!(arrangement.seen["a1"], 5);
+    arrangement.resume("a1");
+    assert!(arrangement.seen.is_empty());
+
+    arrangement.see("a1", 5);
+    for index in 0..60 {
+        let key = format!("k{index}");
+        arrangement.place(&key, label("/p/k"));
+        arrangement.close_tab(&key);
+    }
+    assert!(!arrangement.seen.contains_key("a1"));
+}
+
+#[test]
+fn an_arrangement_saved_without_ended_marks_still_loads() {
+    let data = TempDir::new().unwrap();
+    let path = Arrangement::path(data.path());
+    let mut arrangement = arrangement();
+    arrangement.place("a1", label("/p/a"));
+    let mut older = serde_json::to_value(&arrangement).unwrap();
+    let fields = older.as_object_mut().unwrap();
+    fields.remove("ended").unwrap();
+    fields.remove("seen").unwrap();
+    std::fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+    assert_eq!(Arrangement::load(&path), (arrangement, None));
+}
+
 #[test]
 fn saves_and_restores_and_starts_empty_from_a_broken_file() {
     let data = TempDir::new().unwrap();
@@ -147,6 +213,7 @@ fn saves_and_restores_and_starts_empty_from_a_broken_file() {
     let mut arrangement = arrangement();
     arrangement.place("a1", label("/p/a"));
     arrangement.set_view("a1", json!({"document": "d"}));
+    arrangement.end("a1", ending("exit"));
     arrangement.save(&path).unwrap();
     assert_eq!(Arrangement::load(&path), (arrangement, None));
 
@@ -241,7 +308,143 @@ fn the_host_restores_tabs_whose_bridges_have_not_connected_yet() {
     assert_eq!(state.arrangement.views[&key()], json!({"focus": "x"}));
     assert_eq!(state.sessions.len(), 1);
     assert_eq!(state.sessions[0].link, Link::Waiting);
+    assert!(state.sessions[0].restored);
     assert_eq!(state.sessions[0].project, PROJECT);
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn saved_seen(app: &TestApp) -> Option<u64> {
+    let saved = Arrangement::load(&Arrangement::path(app.data.path())).0;
+    saved.seen.get(&key()).copied()
+}
+
+#[test]
+fn a_disconnect_and_quitting_remember_when_the_bridge_was_last_seen() {
+    let app = start_app();
+    let bridge = app.connect(session(1, 1));
+    app.wait_for("the tab", |state| {
+        !state.arrangement.windows[0].tabs.is_empty()
+    });
+    assert_eq!(saved_seen(&app), None);
+    let before = now_ms();
+    drop(bridge);
+    app.wait_for("seen", |state| state.arrangement.seen.contains_key(&key()));
+    assert!(saved_seen(&app).unwrap() >= before, "saved at once");
+
+    // Connected again: not waiting, so no time; quitting writes it.
+    let _bridge = app.connect(session(1, 1));
+    app.wait_for("live", |state| {
+        state.sessions[0].link == Link::Live && state.arrangement.seen.is_empty()
+    });
+    assert_eq!(saved_seen(&app), None);
+    let before = now_ms();
+    app.host.shutdown();
+    assert!(saved_seen(&app).unwrap() >= before);
+    let TestApp { home, data, .. } = app;
+
+    let restarted = start(home, data, |_| {});
+    let state = restarted.host.state();
+    assert_eq!(state.sessions[0].link, Link::Waiting);
+    assert!(state.arrangement.seen[&key()] >= before);
+}
+
+fn ended_mark(app: &TestApp) -> Option<Ending> {
+    let saved = Arrangement::load(&Arrangement::path(app.data.path())).0;
+    assert_eq!(
+        saved.ended,
+        app.host.state().arrangement.ended,
+        "saved at once"
+    );
+    saved.ended.get(&key()).cloned()
+}
+
+#[test]
+fn a_conversation_that_ended_shows_as_ended_after_a_restart_until_it_resumes() {
+    let app = start_app();
+    let mut bridge = app.connect(session(1, 1));
+    app.wait_for("the tab", |state| {
+        !state.arrangement.windows[0].tabs.is_empty()
+    });
+    assert_eq!(ended_mark(&app), None);
+    let before = now_ms();
+    bridge.send(&BridgeMessage::Closed {
+        reason: "conversation cleared".into(),
+    });
+    app.wait_for("the mark", |state| {
+        state.arrangement.ended.contains_key(&key())
+    });
+    let mark = ended_mark(&app).unwrap();
+    assert_eq!(mark.reason, "conversation cleared");
+    assert!(mark.ended_at_ms >= before);
+    drop(bridge);
+    let TestApp { home, data, .. } = app;
+
+    let restarted = start(home, data, |_| {});
+    let state = restarted.host.state();
+    assert_eq!(state.arrangement.windows[0].tabs, vec![key()]);
+    assert_eq!(state.sessions.len(), 1);
+    assert_eq!(
+        state.sessions[0].link,
+        Link::Ended {
+            reason: "conversation cleared".into()
+        }
+    );
+    assert!(state.sessions[0].restored);
+    assert!(!state.sessions[0].loaded);
+    assert_eq!(state.sessions[0].project, PROJECT);
+
+    // Resumed: live again, the mark is gone.
+    let _resumed = restarted.connect(session(2, 1));
+    let state = restarted.wait_for("live", |state| state.sessions[0].link == Link::Live);
+    assert!(!state.sessions[0].restored);
+    assert_eq!(ended_mark(&restarted), None);
+}
+
+#[test]
+fn superseding_ends_no_tab_and_an_older_binding_leaves_the_mark() {
+    let app = start_app();
+    let mut older = app.connect(session(1, 1));
+    app.wait_for("live", |state| {
+        state
+            .sessions
+            .first()
+            .is_some_and(|session| session.link == Link::Live)
+    });
+    let mut newer = app.connect(session(2, 1));
+    assert!(matches!(
+        older.receive(),
+        AppMessage::Refused {
+            reason: Refusal::Superseded,
+            ..
+        }
+    ));
+    // The newer binding holds the tab: nothing ended.
+    assert_eq!(app.host.state().sessions[0].link, Link::Live);
+    assert_eq!(ended_mark(&app), None);
+
+    newer.send(&BridgeMessage::Closed {
+        reason: "exit".into(),
+    });
+    app.wait_for("the mark", |state| {
+        state.arrangement.ended.contains_key(&key())
+    });
+    let mark = ended_mark(&app);
+    let mut again = app.connect(session(1, 1));
+    assert!(matches!(
+        again.receive(),
+        AppMessage::Refused {
+            reason: Refusal::Superseded,
+            ..
+        }
+    ));
+    assert!(again.closed());
+    assert_eq!(ended_mark(&app), mark);
 }
 
 #[test]

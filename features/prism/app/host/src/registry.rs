@@ -68,6 +68,9 @@ pub struct SessionSummary {
     pub link: Link,
     /// A complete snapshot arrived; before that the tab has nothing to show.
     pub loaded: bool,
+    /// Known only from the saved arrangement: its bridge has not connected since the app
+    /// started, so there is no content.
+    pub restored: bool,
 }
 
 /// Documents and shared questions of one session, in ID order, and the IDs of the closed
@@ -324,15 +327,13 @@ impl Registry {
         Attach::Accepted
     }
 
-    /// The connection ended without `closed`: its session waits for a reconnect.
-    pub fn detach(&mut self, connection: u64) {
-        let Some(entry) = self
+    /// The connection ended without `closed`: its session waits for a reconnect. Returns the
+    /// session's key.
+    pub fn detach(&mut self, connection: u64) -> Option<SessionKey> {
+        let (key, entry) = self
             .entries
-            .values_mut()
-            .find(|entry| connection_is(entry, connection))
-        else {
-            return;
-        };
+            .iter_mut()
+            .find(|(_, entry)| connection_is(entry, connection))?;
         entry.connection = None;
         entry.snapshot = None;
         entry.disconnected_at = Some(Instant::now());
@@ -340,6 +341,7 @@ impl Registry {
             entry.link = Link::Disconnected;
         }
         self.events.push(HostEvent::State);
+        Some(key.clone())
     }
 
     /// Fails the commands of sessions that stayed disconnected for `grace`, and every command
@@ -360,14 +362,17 @@ impl Registry {
         }
     }
 
-    pub fn receive(&mut self, connection: u64, message: BridgeMessage) {
+    /// Returns the key and reason of a session that `closed` ended, for the arrangement to
+    /// remember.
+    pub fn receive(
+        &mut self,
+        connection: u64,
+        message: BridgeMessage,
+    ) -> Option<(SessionKey, String)> {
         let Registry { entries, events } = self;
-        let Some((key, entry)) = entries
+        let (key, entry) = entries
             .iter_mut()
-            .find(|(_, entry)| connection_is(entry, connection))
-        else {
-            return;
-        };
+            .find(|(_, entry)| connection_is(entry, connection))?;
         match message {
             BridgeMessage::Snapshot {
                 documents,
@@ -382,7 +387,7 @@ impl Registry {
                     .extend(questions.into_iter().map(question_by_id));
                 frames.closed.extend(closed);
                 if more {
-                    return;
+                    return None;
                 }
                 // The last frame completes the snapshot: whatever it lacks is gone.
                 let frames = entry.snapshot.take().unwrap_or_default();
@@ -409,18 +414,18 @@ impl Registry {
                 events.push(HostEvent::Content { key: key.clone() });
             }
             BridgeMessage::Closed { reason } => {
-                entry.link = Link::Ended { reason };
+                entry.link = Link::Ended {
+                    reason: reason.clone(),
+                };
                 entry.fail_pending(key, ENDED_MESSAGE, events);
                 events.push(HostEvent::State);
+                return Some((key.clone(), reason));
             }
             BridgeMessage::Reply { id, error } => {
-                let Some(position) = entry
+                let position = entry
                     .pending
                     .iter()
-                    .position(|pending| command_id(&pending.message) == Some(id))
-                else {
-                    return;
-                };
+                    .position(|pending| command_id(&pending.message) == Some(id))?;
                 let command = entry.pending.remove(position).message;
                 // The content moved on (or a resent command had committed): show it as it is.
                 let stale = matches!(error, Some(CommandError::StaleRevision { .. }));
@@ -438,6 +443,7 @@ impl Registry {
             | BridgeMessage::Auth { .. }
             | BridgeMessage::Refused { .. } => {}
         }
+        None
     }
 
     pub fn send_command(&mut self, key: &str, command: Command) -> Result<Id, CommandRejected> {
@@ -477,6 +483,7 @@ impl Registry {
                 conversation: entry.session.conversation.clone(),
                 link: entry.link.clone(),
                 loaded: entry.loaded,
+                restored: false,
             })
             .collect()
     }

@@ -3,19 +3,21 @@
 // `?scenario=view-checks` and `?scenario=action-checks` run the behaviour checks of the list,
 // the diagram, the view per document with its side pane, and the item actions,
 // `?scenario=status-checks` those of the connection status, `?scenario=document-checks`
-// closing and reopening documents; each writes PASS or the failures into #result.
+// closing and reopening documents, `?scenario=restart-checks` tabs restored after a restart;
+// each writes PASS or the failures into #result.
 import { start } from '../ui/js/app.js';
 import { DROPPED_NOTE } from '../ui/js/list.js';
 import { questionBlock } from '../ui/js/panel.js';
 import { fakeBackend } from './fake-backend.js';
-import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, VERSION_PROBLEM, fixture } from './fixtures.js';
+import { formatTime } from '../ui/js/format.js';
+import { CONTENTS_FOR_TESTS, KEYS, RELEASE_IDS, SEEN_AT_MS, VERSION_PROBLEM, fixture } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 // Under a virtual time budget headless Chromium hardly runs animation frames: timers stand in.
 const FRAME_MS = 16;
 window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), FRAME_MS);
 window.cancelAnimationFrame = (frame) => clearTimeout(frame);
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 const key = (name, options = {}) =>
   document.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, ...options }));
@@ -1611,6 +1613,117 @@ async function statusChecks(backend) {
   await settle();
   expect(!document.querySelector('.popover .fact.bad') && !document.querySelector('.empty .fact.bad'), 'the problem is gone');
   expect(!document.querySelector('.strip-actions .button .dot'), 'and so is the mark');
+
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/** After a restart: a tab whose conversation ended says so; one that had not ended waits for its bridge. */
+async function restartChecks(backend, app) {
+  // Installed before the first render: a restored tab has no content to fetch.
+  const fetched = [];
+  const content = backend.content;
+  backend.content = (key) => {
+    fetched.push(key);
+    return content(key);
+  };
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const text = (selector) => document.querySelector(selector)?.textContent ?? '';
+  const activeTab = () => document.querySelector('.tab[aria-selected="true"]');
+  const sessionsButton = () => document.querySelector('.strip-actions .button');
+  const rowsUnder = (heading) => {
+    const rows = [];
+    let node = [...document.querySelectorAll('.popover .session-picker h3')].find((title) => title.textContent === heading)?.nextElementSibling;
+    for (; node?.classList.contains('session-row'); node = node.nextElementSibling) {
+      rows.push(node);
+    }
+    return rows;
+  };
+  const endedShown = (when) => {
+    expect(activeTab()?.dataset.key === KEYS.ENDED && activeTab().querySelector('.dot.ended'), `${when}: the ended tab with its grey dot`);
+    expect(text('.chip.state') === 'Ended', `${when}: the header says Ended, got ${text('.chip.state')}`);
+    expect(!document.querySelector('.banner'), `${when}: no banner about readable content`);
+    expect(text('.empty h2') === 'This conversation ended before Prism restarted', `${when}: the ended body, got ${text('.empty h2')}`);
+    const detail = text('.empty p');
+    expect(detail.includes('(conversation cleared)') && detail.endsWith('Its content is no longer available.'), `${when}: reason and no content, got ${detail}`);
+    expect(document.querySelector('.statusbar .keys').hidden, `${when}: the footer offers no keys`);
+  };
+  // Every command key is refused with the read-only reason and sends nothing.
+  const commandsRefused = (reason) => {
+    for (const name of ['Enter', 'a', 'x', 'u', 'w']) {
+      app.setMessage('');
+      key(name);
+      expect(backend.sent.length === 0 && text('.statusbar .message') === reason, `${name} is refused: ${text('.statusbar .message')}`);
+    }
+  };
+  await settle();
+
+  endedShown('restored');
+  expect(text('.empty p').startsWith('It ended on ') && !text('.empty p').includes('1970'), 'with the time it ended');
+  commandsRefused('Read-only: this conversation ended');
+  backend.change((state) => {
+    state.arrangement.ended[KEYS.ENDED].ended_at_ms = 0;
+  });
+  await settle();
+  expect(text('.empty p') === 'It ended (conversation cleared). Its content is no longer available.', `no time when it is not known: ${text('.empty p')}`);
+  expect(document.querySelector(`.tab[data-key="${KEYS.LIVE}"] .dot.waiting`), 'a tab that had not ended waits');
+
+  // The sessions panel lists it as ended, the others as waiting.
+  sessionsButton().click();
+  await settle();
+  const ended = rowsUnder('Ended');
+  expect(ended.length === 1 && ended[0].textContent.includes('b3e8d4f2') && ended[0].querySelector('.dot.ended'), 'the panel lists it as ended');
+  expect(rowsUnder('Disconnected').length === 3, `the waiting ones under Disconnected, got ${rowsUnder('Disconnected').length}`);
+  sessionsButton().click();
+  await settle();
+
+  // Close tab closes it; the neighbour shown waits for its bridge.
+  const close = [...document.querySelectorAll('.empty .button')].find((button) => button.textContent === 'Close tab');
+  expect(close, 'a Close tab button');
+  close?.click();
+  await settle();
+  expect(document.querySelectorAll('.tab').length === 2 && !document.querySelector(`.tab[data-key="${KEYS.ENDED}"]`), 'the tab closed');
+  expect(activeTab()?.dataset.key === KEYS.CODEX, 'its neighbour is shown');
+  const waiting = 'It shows its content again when the conversation’s bridge connects; if the conversation is over, close the tab.';
+  expect(text('.empty h2') === 'Waiting for this conversation to reconnect', `the waiting heading, got ${text('.empty h2')}`);
+  expect(text('.empty p') === `Not seen since ${formatTime(SEEN_AT_MS)}. ${waiting}`, `the waiting body, got ${text('.empty p')}`);
+  expect([...document.querySelectorAll('.empty .button')].some((button) => button.textContent === 'Close tab'), 'a waiting tab can be closed');
+  expect(text('.chip.state') === 'Waiting for bridge' && activeTab()?.querySelector('.dot.waiting'), 'the waiting tab and header');
+  expect(document.querySelector('.statusbar .keys').hidden, 'the waiting footer offers no keys');
+  commandsRefused('Read-only until the bridge connects');
+  backend.change((state) => {
+    delete state.arrangement.seen[KEYS.CODEX];
+  });
+  await settle();
+  expect(text('.empty p') === waiting, `without a time when it was not seen: ${text('.empty p')}`);
+
+  // Reopened from the sessions panel it is still ended.
+  sessionsButton().click();
+  await settle();
+  const reopen = rowsUnder('Ended')[0];
+  expect(reopen?.textContent.includes('Open'), 'a closed ended session offers Open');
+  reopen?.click();
+  await settle();
+  endedShown('reopened');
+
+  expect(fetched.length === 0, `restored tabs fetch no content: ${fetched}`);
+
+  // The conversation resumes: its bridge connects and the tab is live with its content.
+  backend.change((state) => {
+    const session = state.sessions.find((candidate) => candidate.key === KEYS.ENDED);
+    Object.assign(session, { link: { state: 'live' }, loaded: true, restored: false });
+    delete state.arrangement.ended[KEYS.ENDED];
+  });
+  backend.update(KEYS.ENDED, CONTENTS_FOR_TESTS[KEYS.ENDED]);
+  await waitFor(() => document.querySelector('.card'));
+  expect(text('.chip.state') === 'Live' && activeTab()?.querySelector('.dot.live'), 'live again');
+  expect(!document.querySelector('.empty') && document.querySelector('.card .title')?.textContent === 'Summary of the cleared conversation', 'with its content');
+  expect(fetched.length > 0 && fetched.every((fetchedKey) => fetchedKey === KEYS.ENDED), `only the resumed tab fetched: ${fetched}`);
+  expect(!document.querySelector('.statusbar .keys').hidden, 'and the footer offers its keys');
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }

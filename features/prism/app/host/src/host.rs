@@ -1,5 +1,5 @@
 //! The app without its windows: what the shell calls and the events it forwards.
-use crate::arrangement::{Arrangement, CloseWindow, SessionLabel, WindowId};
+use crate::arrangement::{Arrangement, CloseWindow, Ending, SessionLabel, WindowId};
 use crate::listener;
 use crate::pairing::{PairingFile, remove_pairing, write_pairing};
 use crate::registry::{
@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
@@ -130,6 +130,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Milliseconds since the Unix epoch; 0 for a clock set before it.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
 fn truncate(text: String, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text;
@@ -193,17 +200,33 @@ impl Shared {
         let attach = self.with_registry(|registry| registry.attach(session, connection));
         if attach == Attach::Accepted {
             // A window always exists, so placing never needs a new native window.
-            let _opened_in = self.with_arrangement(|arrangement| arrangement.place(&key, label));
+            let _opened_in = self.with_arrangement(|arrangement| {
+                arrangement.resume(&key);
+                arrangement.place(&key, label)
+            });
         }
         attach
     }
 
     pub(crate) fn detach(&self, connection: u64) {
-        self.with_registry(|registry| registry.detach(connection));
+        let detached = self.with_registry(|registry| registry.detach(connection));
+        if let Some(key) = detached {
+            self.with_arrangement(|arrangement| arrangement.see(&key, now_ms()));
+        }
     }
 
     pub(crate) fn receive(&self, connection: u64, message: BridgeMessage) {
-        self.with_registry(|registry| registry.receive(connection, message));
+        // Marked under the registry lock: a reconnect, which clears the mark after it changed
+        // the registry, cannot come between the end and its mark.
+        self.with_registry(|registry| {
+            if let Some((key, reason)) = registry.receive(connection, message) {
+                let ending = Ending {
+                    reason,
+                    ended_at_ms: now_ms(),
+                };
+                self.with_arrangement(|arrangement| arrangement.end(&key, ending));
+            }
+        });
     }
 
     /// Shows a problem with a bridge; repeats and bursts (a misconfigured bridge retrying)
@@ -297,14 +320,21 @@ impl Host {
         let arrangement = lock(&self.shared.arrangement).clone();
         for (key, label) in &arrangement.labels {
             if sessions.iter().all(|session| &session.key != key) {
+                let link = match arrangement.ended.get(key) {
+                    Some(ending) => Link::Ended {
+                        reason: ending.reason.clone(),
+                    },
+                    None => Link::Waiting,
+                };
                 sessions.push(SessionSummary {
                     key: key.clone(),
                     host: label.host.clone(),
                     project: label.project.clone(),
                     agent: label.agent.clone(),
                     conversation: label.conversation.clone(),
-                    link: Link::Waiting,
+                    link,
                     loaded: false,
+                    restored: true,
                 });
             }
         }
@@ -375,13 +405,27 @@ impl Host {
         lock(&self.shared.arrangement).window_title(window)
     }
 
-    /// Closes the bridge connections, saves a pending arrangement change and removes the
-    /// pairing files this app wrote, so bridges wait quietly for the next start.
+    /// Closes the bridge connections, saves the arrangement with when each session was last
+    /// seen and removes the pairing files this app wrote, so bridges wait quietly for the next
+    /// start.
     pub fn shutdown(&self) {
-        lock(&self.shared.registry).close_all();
-        if self.shared.save_scheduled.load(Ordering::SeqCst) {
-            self.shared.save_arrangement();
+        let keys: Vec<_> = {
+            let mut registry = lock(&self.shared.registry);
+            registry.close_all();
+            registry
+                .summaries()
+                .into_iter()
+                .map(|session| session.key)
+                .collect()
+        };
+        let now = now_ms();
+        {
+            let mut arrangement = lock(&self.shared.arrangement);
+            for key in &keys {
+                arrangement.see(key, now);
+            }
         }
+        self.shared.save_arrangement();
         remove_pairing(&lock(&self.shared.status).pairing, &self.shared.token);
     }
 

@@ -1,6 +1,6 @@
 //! Windows, their tabs (one per conversation), which window each project opens in, the
-//! closed tabs that can be reopened, and each tab's view state. Persisted as JSON in the
-//! app's data directory and restored at start; content never is.
+//! closed tabs that can be reopened, each tab's view state and which conversations ended.
+//! Persisted as JSON in the app's data directory and restored at start; content never is.
 use crate::files::write_atomic;
 use crate::registry::SessionKey;
 use prism_core::model::AgentKind;
@@ -42,6 +42,15 @@ impl From<&Session> for SessionLabel {
     }
 }
 
+/// How a conversation ended (its bridge sent `closed`), so that after a restart its tab says
+/// so instead of waiting for a bridge that never comes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ending {
+    pub reason: String,
+    /// Milliseconds since the Unix epoch.
+    pub ended_at_ms: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     pub id: WindowId,
@@ -68,6 +77,11 @@ pub struct Arrangement {
     pub labels: BTreeMap<SessionKey, SessionLabel>,
     /// Per tab, owned by the UI (document, focus, hidden items, view mode).
     pub views: BTreeMap<SessionKey, serde_json::Value>,
+    /// Tabs whose conversation ended; a bridge connecting again clears the mark.
+    pub ended: BTreeMap<SessionKey, Ending>,
+    /// When each tab's bridge was last connected, in milliseconds since the Unix epoch:
+    /// written when it disconnects and when the app quits, cleared when one connects.
+    pub seen: BTreeMap<SessionKey, u64>,
     /// The window the user focused last; new projects open there.
     pub focused: Option<WindowId>,
     next_window: u64,
@@ -232,6 +246,27 @@ impl Arrangement {
         }
     }
 
+    /// Remembers that a known tab's conversation ended.
+    pub fn end(&mut self, key: &str, ending: Ending) {
+        if self.labels.contains_key(key) {
+            self.ended.insert(key.to_owned(), ending);
+        }
+    }
+
+    /// Remembers when a known tab's bridge was last connected.
+    pub fn see(&mut self, key: &str, at_ms: u64) {
+        if self.labels.contains_key(key) {
+            self.seen.insert(key.to_owned(), at_ms);
+        }
+    }
+
+    /// A bridge connected for the conversation (for example on resume): it no longer ended
+    /// and is connected now.
+    pub fn resume(&mut self, key: &str) {
+        self.ended.remove(key);
+        self.seen.remove(key);
+    }
+
     /// `Prism · <project names of its tabs>`, for the native window title.
     pub fn window_title(&self, id: &str) -> String {
         let mut projects: Vec<&str> = Vec::new();
@@ -306,7 +341,8 @@ impl Arrangement {
         true
     }
 
-    /// Labels and views of tabs neither open nor remembered as closed are dropped.
+    /// Labels, views, ended marks and last-seen times of tabs neither open nor remembered as
+    /// closed are dropped.
     fn forget_beyond_closed_limit(&mut self) {
         self.closed.truncate(MAX_CLOSED_TABS);
         let kept = |key: &SessionKey, windows: &[Window], closed: &[SessionKey]| {
@@ -315,6 +351,8 @@ impl Arrangement {
         let (windows, closed) = (&self.windows, &self.closed);
         self.labels.retain(|key, _| kept(key, windows, closed));
         self.views.retain(|key, _| kept(key, windows, closed));
+        self.ended.retain(|key, _| kept(key, windows, closed));
+        self.seen.retain(|key, _| kept(key, windows, closed));
     }
 }
 

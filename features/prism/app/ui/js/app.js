@@ -1,6 +1,6 @@
 import { DiagramView, LEVELS, layoutKey } from './diagram.js';
 import { MOD_KEY, h } from './dom.js';
-import { agentLabel, projectName, shortConversation } from './format.js';
+import { agentLabel, formatTime, projectName, shortConversation } from './format.js';
 import { ACCEPT_NOTE, DROPPED_NOTE, ListView } from './list.js';
 import { DetailPanel } from './panel.js';
 import { documentsOf, hasDiagram, itemCount, itemIds, rows as buildRows } from './rows.js';
@@ -588,7 +588,7 @@ class App {
     this.pane.hidden = !current;
     if (!current) {
       this.showBody(null);
-      this.patch('body', this.content, ['no-content', key, state, session?.loaded, this.contents.has(key), closed.length], () => [
+      this.patch('body', this.content, ['no-content', key, state, session?.loaded, session?.restored, this.contents.has(key), closed.length], () => [
         this.emptyTab(key, session, state, closed),
       ]);
       return;
@@ -851,7 +851,8 @@ class App {
           : 'Connection lost before the content arrived; the bridge reconnects on its own.',
       );
     }
-    if (state === 'ended') {
+    // A tab restored ended has no content; its body says so.
+    if (state === 'ended' && !session.restored) {
       return h(
         'div',
         { class: 'banner ended' },
@@ -864,9 +865,20 @@ class App {
 
   emptyTab(key, session, state, closed) {
     if (state === 'waiting') {
+      // 0 or none: not known when, for example from an arrangement saved before it was kept.
+      const seen = this.state.arrangement.seen?.[key];
       return empty(
-        'Waiting for this conversation',
-        'The tab was open when Prism last quit. Its content appears when the conversation’s bridge connects.',
+        'Waiting for this conversation to reconnect',
+        `${seen ? `Not seen since ${formatTime(seen)}. ` : ''}It shows its content again when the conversation’s bridge connects; if the conversation is over, close the tab.`,
+        this.closeTabButton(key),
+      );
+    }
+    if (state === 'ended' && session.restored) {
+      const endedAt = this.state.arrangement.ended?.[key]?.ended_at_ms;
+      return empty(
+        'This conversation ended before Prism restarted',
+        `It ended${endedAt ? ` on ${formatTime(endedAt)}` : ''} (${session.link.reason}). Its content is no longer available.`,
+        this.closeTabButton(key),
       );
     }
     if (!session.loaded) {
@@ -880,6 +892,10 @@ class App {
       return empty('All documents are closed', `They are closed for everyone. Closed (${closed.length}) above reopens one.`);
     }
     return empty('Nothing published yet', 'Content appears here when the agent publishes to Prism.');
+  }
+
+  closeTabButton(key) {
+    return h('button', { class: 'button', text: 'Close tab', onclick: () => this.backend.closeTab(key) });
   }
 
   emptyWindow() {
@@ -988,9 +1004,10 @@ class App {
 
   renderStatus() {
     const key = this.activeKey();
-    this.keys.hidden = !key;
     const mode = key ? this.mode(key) : 'list';
     const document = key ? this.current(key)?.document : null;
+    // Without content the keys have nothing to act on.
+    this.keys.hidden = !document;
     this.statusMessage.textContent = this.message?.text ?? '';
     this.statusMessage.title = this.message?.text ?? '';
     this.statusMessage.className = `message ${this.message?.tone ?? ''}`;
@@ -1361,8 +1378,7 @@ class App {
    * quote; every other item is quoted in full.
    */
   async ask(key) {
-    if (!this.isLive(key)) {
-      this.setMessage('Not connected: asking needs a live conversation.', 'error');
+    if (!this.requireLive(key)) {
       return;
     }
     if (this.asking.has(key)) {
@@ -1427,7 +1443,7 @@ class App {
   /** One `action` for all targets at the document's revision; once it committed, they leave the selection. */
   async applyAction(key, action, targets, { sending, done }) {
     const current = this.current(key);
-    if (!current || !this.requireLive(key) || targets.length === 0) {
+    if (!this.requireLive(key) || !current || targets.length === 0) {
       return;
     }
     const ids = targets.map((row) => row.id);
@@ -1445,7 +1461,7 @@ class App {
 
   /** W or ×: closes the document in every window and for the agent; right after, U reopens it. */
   async closeDocument(key, document) {
-    if (!document || !this.requireLive(key)) {
+    if (!this.requireLive(key) || !document) {
       return;
     }
     // `send` counts this command first; another one after it ends the moment for U.
@@ -1509,7 +1525,7 @@ class App {
       return;
     }
     const current = this.current(key);
-    if (!current || !this.requireLive(key)) {
+    if (!this.requireLive(key) || !current) {
       return;
     }
     await this.send(
