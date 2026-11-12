@@ -1,16 +1,21 @@
 import { MOD_KEY, h } from './dom.js';
-import { ACCEPT_NOTE, DROPPED_NOTE, kindText, stateBadges, questionState } from './list.js';
-import { EXPLANATION_STATES, askedQuestions, explanationOf, questionsFor, quotedText, typedQuestion } from './rows.js';
+import { ACCEPT_NOTE, BOOKMARK_NOTE, DROPPED_NOTE, bookmarkIcon, kindText, stateBadges, questionState } from './list.js';
+import { EXPLANATION_STATES, askedQuestions, explanationOf, itemBookmarks, itemMark, questionsFor, quoteFound, quotedText, typedQuestion } from './rows.js';
 
 /** The pane's section with an item's explanation. */
 const EXPLANATION_TITLE = 'Explanation';
+/** The pane's section with an item's bookmarks, and what a bookmark of the whole item says there. */
+const BOOKMARKS_TITLE = 'Bookmarks';
+const WHOLE_ITEM = 'The whole item';
+/** A bookmark's quote the item's text no longer contains. */
+const TEXT_CHANGED = 'text changed';
 
 /**
  * The detail area of one tab's side pane, in the list and in the diagram: the focused item
  * with its text, actions and questions. Without a focused item (only in the diagram, where
  * the user picks one) it shows an overview of the diagram.
  *
- * `actions`: onAsk(), onExplain(), onAccept(), onDrop().
+ * `actions`: onAsk(), onExplain(), onBookmark(), onAccept(), onDrop(), onRemoveBookmark(id).
  */
 export class DetailPanel {
   constructor(actions) {
@@ -34,14 +39,19 @@ export class DetailPanel {
     const selected = model.rows.filter((candidate) => model.selected.has(candidate.id));
     const questions = row ? questionsFor(model.questions, model.document.id, row.id) : [];
     const explanation = explanationOf(questions, model);
-    const signature = JSON.stringify([row, questions, explanation?.status, selected.map((item) => [item.number, item.title, item.dropped]), readOnly, explainBlocked, row ? null : [model.document.title, counts]]);
+    const bookmarks = row ? itemBookmarks(model.document, row.id) : [];
+    // Bookmark is pressed when every item it acts on is bookmarked as a whole.
+    const marked = (selected.length > 0 ? selected : [row]).every((item) => item && itemMark(model.document, item.id));
+    const signature = JSON.stringify([row, questions, explanation?.status, bookmarks, marked, selected.map((item) => [item.number, item.title, item.dropped]), readOnly, explainBlocked, row ? null : [model.document.title, counts]]);
     if (signature === this.signature) {
       return;
     }
     this.signature = signature;
-    const actions = row || selected.length > 0 ? this.panelActions(row, selected, readOnly, explainBlocked) : null;
+    const actions = row || selected.length > 0 ? this.panelActions(row, selected, readOnly, explainBlocked, marked) : null;
     this.element.replaceChildren(
-      ...(row ? itemPanel(row, questions, explanation, actions) : overviewPanel(model.document.title, counts, selected, actions)),
+      ...(row
+        ? itemPanel(row, questions, explanation, actions, bookmarks.length > 0 ? bookmarksSection(row, bookmarks, readOnly, this.actions.onRemoveBookmark) : null)
+        : overviewPanel(model.document.title, counts, selected, actions)),
     );
   }
 
@@ -50,12 +60,22 @@ export class DetailPanel {
     return id === this.model?.focus ? selectionInside(this.element.querySelector('.panel-body')) : '';
   }
 
+  /** Whether a selection reaches into the focused item's text from beyond it, so it is no quote of it. */
+  selectionBeyond(id) {
+    const body = this.element.querySelector('.panel-body');
+    const selection = window.getSelection();
+    if (id !== this.model?.focus || !body || !selection || selection.isCollapsed || selection.rangeCount === 0) {
+      return false;
+    }
+    return selection.getRangeAt(0).intersectsNode(body) && !selectionInside(body);
+  }
+
   /**
    * The buttons for the selected items, else the focused one. Dropped items take no part:
    * with only dropped ones the buttons are disabled and say why; `explainBlocked` disables
-   * Explain alone.
+   * Explain alone. Bookmark takes dropped items too and is pressed when all are `marked`.
    */
-  panelActions(row, selected, readOnly, explainBlocked) {
+  panelActions(row, selected, readOnly, explainBlocked, marked) {
     const actionable = selected.filter((item) => !item.dropped).length;
     const onlyDropped = selected.length > 0 ? actionable === 0 : Boolean(row?.dropped);
     const unavailable = readOnly ?? (onlyDropped ? DROPPED_NOTE : null);
@@ -64,14 +84,14 @@ export class DetailPanel {
     return h(
       'div',
       { class: 'panel-actions' },
-      itemActions(selected.length > 0 ? actionable : 0, unavailable, explainBlocked, this.actions),
+      itemActions(selected.length > 0 ? actionable : 0, unavailable, explainBlocked, { count: selected.length, marked, readOnly }, this.actions),
       hint ? h('span', { class: 'hint', text: hint }) : null,
     );
   }
 }
 
-/** The focused item; its `actions` come before its `explanation` and its questions. */
-function itemPanel(row, questions, explanation, actions) {
+/** The focused item; its `actions` come before its `bookmarks`, its `explanation` and its questions. */
+function itemPanel(row, questions, explanation, actions, bookmarks) {
   const badges = stateBadges(row);
   return [
     h('div', { class: `panel-tag kind-${row.kind}` }, h('span', { class: 'kind', text: kindText(row) }), h('span', { class: 'number', text: row.step !== null ? `· link ${row.number}` : String(row.number) })),
@@ -80,6 +100,7 @@ function itemPanel(row, questions, explanation, actions) {
     row.body ? h('div', { class: 'panel-body', text: row.body }) : null,
     row.source ? h('div', { class: 'card-source', text: row.source }) : null,
     actions,
+    bookmarks,
     explanation ? explanationSection(row, explanation) : null,
     ...askedQuestions(questions).map(questionBlock),
   ].filter(Boolean);
@@ -101,6 +122,41 @@ function explanationSection(row, { status, reason, answered }) {
     state ? h('p', { class: `explanation-state state-${status}`, text: state }) : null,
     quote ? h('blockquote', { class: 'explanation-quote', text: quote }) : null,
     answered ? h('div', { class: 'explanation-text' }, paragraphs(answered.answer)) : null,
+  );
+}
+
+/**
+ * An item's bookmarks: the whole item, and each quoted selection as written, marked when the
+ * item's text no longer contains it; each with its remove control, unavailable while `readOnly`.
+ */
+function bookmarksSection(row, bookmarks, readOnly, onRemove) {
+  return h(
+    'section',
+    { class: 'panel-bookmarks', 'aria-label': BOOKMARKS_TITLE },
+    h('h3', {}, bookmarkIcon(), `${BOOKMARKS_TITLE} (${bookmarks.length})`),
+    h(
+      'ul',
+      {},
+      bookmarks.map((bookmark) =>
+        h(
+          'li',
+          { class: 'panel-bookmark', 'data-id': bookmark.id },
+          bookmark.quote ? h('blockquote', { class: 'bookmark-quote', text: bookmark.quote }) : h('span', { class: 'bookmark-whole', text: WHOLE_ITEM }),
+          quoteFound(row, bookmark) ? null : h('span', { class: 'chip text-changed', title: 'The item’s text no longer contains this quote', text: TEXT_CHANGED }),
+          h('button', {
+            class: 'close',
+            disabled: Boolean(readOnly),
+            title: readOnly ?? 'Remove this bookmark for everyone; U undoes',
+            'aria-label': `Remove the bookmark${bookmark.quote ? ` of “${bookmark.quote}”` : ' of the whole item'}`,
+            text: '×',
+            onclick: (event) => {
+              event.stopPropagation();
+              onRemove(bookmark.id);
+            },
+          }),
+        ),
+      ),
+    ),
   );
 }
 
@@ -156,11 +212,12 @@ function selectionInside(container) {
 }
 
 /**
- * Ask, Explain, Accept and Drop for the focused item or, when `selection` items are selected,
- * for those; the labels say which. `unavailable`: why the buttons are disabled, or null;
- * `explainBlocked`: why Explain is, or null.
+ * Ask, Explain, Bookmark, Accept and Drop for the focused item or, when `selection` items are
+ * selected, for those; the labels say which. `unavailable`: why the buttons are disabled, or
+ * null; `explainBlocked`: why Explain is, or null. `bookmark`: {count of the selected items,
+ * dropped ones included, whether all are `marked`, `readOnly`}, as Bookmark acts on them all.
  */
-function itemActions(selection, unavailable, explainBlocked, actions) {
+function itemActions(selection, unavailable, explainBlocked, bookmark, actions) {
   const many = selection > 0;
   const what = many ? `the ${selection} selected ${selection === 1 ? 'item' : 'items'}` : 'this item';
   // The count shows only for several items; one selected item reads like the focused one.
@@ -178,16 +235,38 @@ function itemActions(selection, unavailable, explainBlocked, actions) {
     });
   const ask = button('primary', `Ask${count}`, `Ask about ${what} (Enter)`, actions.onAsk);
   const explain = button('', `Explain${count}`, `Explain ${what}; the explanation shows here (E)`, actions.onExplain, explainBlocked);
+  const marking = bookmarkButton(bookmark, actions.onBookmark);
   // Keeps a text selection inside the item, which becomes the quote.
-  for (const quoting of [ask, explain]) {
+  for (const quoting of [ask, explain, marking]) {
     quoting.addEventListener('mousedown', (event) => event.preventDefault());
   }
   return [
     ask,
     explain,
+    marking,
     button('', `Accept${count}`, `Accept ${what}. ${ACCEPT_NOTE} (A)`, actions.onAccept),
     button('danger', `Drop${count}`, `Drop ${what} for everyone; U undoes (X)`, actions.onDrop),
   ];
+}
+
+/**
+ * Bookmark: a toggle for the items it acts on, available for dropped ones too, not while
+ * `readOnly`. It shows the ribbon and the count, its name stays for assistive technology, so
+ * the five actions keep to one line in the narrowest pane.
+ */
+function bookmarkButton({ count, marked, readOnly }, onBookmark) {
+  const what = count > 0 ? `the ${count} selected ${count === 1 ? 'item' : 'items'}` : 'this item';
+  const title = `${marked ? 'Remove the bookmark of' : 'Bookmark'} ${what}; with text selected in the item, bookmark that text (B). ${BOOKMARK_NOTE}`;
+  return h('button', {
+    class: 'button bookmark',
+    'aria-pressed': String(marked),
+    disabled: Boolean(readOnly),
+    title: readOnly ?? title,
+    onclick: (event) => {
+      event.stopPropagation();
+      onBookmark();
+    },
+  }, bookmarkIcon(), h('span', { class: 'visually-hidden', text: 'Bookmark' }), count > 1 ? ` (${count})` : null);
 }
 
 /** A shared question with its delivery state and answer, as the detail panel shows it. */

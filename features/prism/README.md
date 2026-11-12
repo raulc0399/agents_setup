@@ -135,12 +135,19 @@ so numbers never shift; it cannot be asked about or accepted, and `U` undoes it.
 **hide** and the filter only affect that tab. **Close** (× on a document or `W`)
 is shared too: the document leaves the strip in every window and the agent's
 `inspect` marks it; `Closed (N)` reopens it, `U` right after the close undoes it,
-and the agent publishing to it reopens it. The diagram draws groups as lanes,
-elements as boxes, relationships as arrows with numbered pills, `manual: true`
-relationships dashed and gate findings as amber badges; it pans, zooms and
-exports SVG. The app's status bar lists the keys of the current view. Hidden
-items, filters, zoom and selection live in the app's own data directory and are
-excluded from the Prism tools.
+and the agent publishing to it reopens it. **Bookmark** (`B`) marks the focused
+item, the selected ones (dropped ones too) or the text selected in the item, and
+removes the mark again. Bookmarks are shared like the rest: a change makes a new
+revision like accept, and they survive revisions (a quote the text lost says
+"text changed"), closing and restarts. The agent's `inspect` returns them; its
+action tool bookmarks whole items only. `Bookmarks (N)` or `Shift+B` lists every
+bookmark of the conversation; `J`/`K` and `Enter` go to one (a closed document
+asks for Reopen first), `Delete` removes one, and `U` right after a change undoes
+it. The diagram draws groups as lanes, elements as boxes, relationships as arrows
+with numbered pills, `manual: true` relationships dashed and gate findings as
+amber badges; it pans, zooms and exports SVG. The app's status bar lists the keys
+of the current view. Hidden items, filters, zoom and selection live in the app's
+own data directory and are excluded from the Prism tools.
 
 ## Storage, upgrades and recovery
 

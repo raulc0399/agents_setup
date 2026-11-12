@@ -140,6 +140,11 @@ pub(crate) fn validate_document(document: &Document) -> Result<()> {
     {
         return Err(Error::Invalid("document record limit exceeded".into()));
     }
+    if document.bookmarks.len() > MAX_BOOKMARKS {
+        return Err(Error::Invalid(format!(
+            "a document holds at most {MAX_BOOKMARKS} bookmarks"
+        )));
+    }
     let mut ids = BTreeSet::new();
     for item in document.elements.values() {
         if !ids.insert(item.id) || item.id.is_nil() {
@@ -329,6 +334,18 @@ pub(crate) fn validate_selection(document: &Document, selection: &Selection) -> 
 }
 
 fn validate_ids(document: &Document, ids: &[Id]) -> Result<()> {
+    validate_unique(ids)?;
+    for id in ids {
+        if active(document, id) != Some(true) {
+            return Err(Error::Invalid(
+                "selection contains missing or archived content".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique(ids: &[Id]) -> Result<()> {
     if ids.is_empty() || ids.len() > MAX_SELECTION {
         return Err(Error::Invalid(
             "selection must contain bounded content IDs".into(),
@@ -339,19 +356,18 @@ fn validate_ids(document: &Document, ids: &[Id]) -> Result<()> {
         if !unique.insert(id) {
             return Err(Error::Invalid("duplicate selection ID".into()));
         }
-        let active = document
-            .elements
-            .get(id)
-            .map(|v| !v.archived)
-            .or_else(|| document.relationships.get(id).map(|v| !v.archived))
-            .or_else(|| document.groups.get(id).map(|v| !v.archived));
-        if active != Some(true) {
-            return Err(Error::Invalid(
-                "selection contains missing or archived content".into(),
-            ));
-        }
     }
     Ok(())
+}
+
+/// Whether the element, relationship or group `id` is not archived; `None` when there is none.
+fn active(document: &Document, id: &Id) -> Option<bool> {
+    document
+        .elements
+        .get(id)
+        .map(|v| !v.archived)
+        .or_else(|| document.relationships.get(id).map(|v| !v.archived))
+        .or_else(|| document.groups.get(id).map(|v| !v.archived))
 }
 
 /// The closed state a document action sets; `None` for the item actions.
@@ -359,11 +375,19 @@ pub(crate) fn closed_by(action: &ContentAction) -> Option<bool> {
     match action {
         ContentAction::Close {} => Some(true),
         ContentAction::Reopen {} => Some(false),
-        ContentAction::Accept { .. } | ContentAction::Archive { .. } => None,
+        ContentAction::Accept { .. }
+        | ContentAction::Archive { .. }
+        | ContentAction::Bookmark { .. }
+        | ContentAction::Unbookmark { .. } => None,
     }
 }
 
-pub(crate) fn apply_action(document: &mut Document, action: &ContentAction) -> Result<()> {
+/// Applies `action` to `document`; bookmarks it adds take their positions from `bookmarks`.
+pub(crate) fn apply_action(
+    document: &mut Document,
+    action: &ContentAction,
+    bookmarks: Sequence,
+) -> Result<()> {
     let (ids, archive) = match action {
         ContentAction::Accept { ids } => (ids, false),
         ContentAction::Archive { ids } => (ids, true),
@@ -371,6 +395,17 @@ pub(crate) fn apply_action(document: &mut Document, action: &ContentAction) -> R
         ContentAction::Close {} | ContentAction::Reopen {} => {
             document.revision += 1;
             return Ok(());
+        }
+        // Content state like acceptance: a new revision, so every view and the agent see it.
+        ContentAction::Bookmark { ids, quote } => {
+            add_bookmarks(document, ids, quote.as_deref(), bookmarks)?;
+            document.revision += 1;
+            return validate_document(document);
+        }
+        ContentAction::Unbookmark { ids } => {
+            remove_bookmarks(document, ids)?;
+            document.revision += 1;
+            return validate_document(document);
         }
     };
     validate_ids(document, ids)?;
@@ -406,6 +441,72 @@ pub(crate) fn apply_action(document: &mut Document, action: &ContentAction) -> R
     }
     document.revision += 1;
     validate_document(document)
+}
+
+/// Bookmarks each item of `ids` as a whole or, with `quote`, the text selected in the one item
+/// of `ids`. Dropped items can be bookmarked; a bookmark that exists already is refused.
+fn add_bookmarks(
+    document: &mut Document,
+    ids: &[Id],
+    quote: Option<&str>,
+    mut sequence: Sequence,
+) -> Result<()> {
+    validate_unique(ids)?;
+    if let Some(quote) = quote {
+        bounded(quote, MAX_QUOTE_BYTES, "bookmark quote")?;
+        if ids.len() != 1 || quote.trim().is_empty() {
+            return Err(Error::Invalid(
+                "a bookmark with a quote marks one item and needs the selected text".into(),
+            ));
+        }
+    }
+    for id in ids {
+        if active(document, id).is_none() {
+            return Err(Error::Invalid("bookmark of missing content".into()));
+        }
+        // The same text, however its whitespace was selected.
+        let taken = document.bookmarks.values().any(|bookmark| {
+            bookmark.item == *id && bookmark.quote.as_deref().map(collapsed) == quote.map(collapsed)
+        });
+        if taken {
+            let what = if quote.is_some() { "text" } else { "item" };
+            return Err(Error::Invalid(format!("{what} is already bookmarked")));
+        }
+        let bookmark = Bookmark {
+            id: Id::new_v4(),
+            item: *id,
+            quote: quote.map(str::to_owned),
+            order: sequence.take(),
+        };
+        document.bookmarks.insert(bookmark.id, bookmark);
+    }
+    Ok(())
+}
+
+/// Text with every run of whitespace as one space, trimmed; the app compares quotes so too.
+fn collapsed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Removes the bookmark of each ID of `ids`, or the bookmark on the whole item of that ID.
+fn remove_bookmarks(document: &mut Document, ids: &[Id]) -> Result<()> {
+    validate_unique(ids)?;
+    for id in ids {
+        let bookmark = if document.bookmarks.contains_key(id) {
+            Some(*id)
+        } else {
+            document
+                .bookmarks
+                .values()
+                .find(|bookmark| bookmark.item == *id && bookmark.quote.is_none())
+                .map(|bookmark| bookmark.id)
+        };
+        let bookmark = bookmark.ok_or_else(|| {
+            Error::Invalid("no bookmark with this ID, nor on the whole item".into())
+        })?;
+        document.bookmarks.remove(&bookmark);
+    }
+    Ok(())
 }
 
 pub(crate) fn snapshot(document: &Document, selection: &Selection) -> Result<SelectionSnapshot> {

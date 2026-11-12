@@ -327,3 +327,57 @@ export function documentsOf(content, closed) {
   const closedIds = new Set(content?.closed ?? []);
   return sortedDocuments((content?.documents ?? []).filter((document) => closedIds.has(document.id) === closed));
 }
+
+/**
+ * A document's bookmarks (`Document::bookmarks` in prism-core) in the order they were made:
+ * by `order`, which the conversation's bookmarks share, then by ID.
+ */
+export function bookmarksOf(document) {
+  return Object.values(document.bookmarks ?? {}).sort((left, right) => left.order - right.order || byId(left, right));
+}
+
+/** An item's bookmarks: its mark on the whole item first, then its quoted selections in the order they were made. */
+export function itemBookmarks(document, itemId) {
+  const marks = bookmarksOf(document).filter((bookmark) => bookmark.item === itemId);
+  return [...marks.filter((bookmark) => !bookmark.quote), ...marks.filter((bookmark) => bookmark.quote)];
+}
+
+/** The bookmark on the whole item, or null. */
+export function itemMark(document, itemId) {
+  return bookmarksOf(document).find((bookmark) => bookmark.item === itemId && !bookmark.quote) ?? null;
+}
+
+/** Text with every run of whitespace as one space, trimmed, as the store compares quotes. */
+export function collapsed(text) {
+  return text.split(/\s+/).filter(Boolean).join(' ');
+}
+
+/**
+ * Whether a bookmark's quote is still in the item's text, which the side pane shows and the
+ * selection is made in, whatever whitespace either has; a bookmark of the whole item always is.
+ */
+export function quoteFound(row, bookmark) {
+  return !bookmark.quote || collapsed(row.body).includes(collapsed(bookmark.quote));
+}
+
+/** How many bookmarks a tab's content holds, in open and closed documents. */
+export function bookmarkCount(content) {
+  return (content?.documents ?? []).reduce((count, document) => count + Object.keys(document.bookmarks ?? {}).length, 0);
+}
+
+/**
+ * Every bookmark of a tab's content, open and closed documents alike, in the order they were
+ * made, each with `document`, whether it is `closed` and its item's `row` as the list numbers
+ * it with nothing hidden or filtered (null for an item the document no longer has).
+ */
+export function sessionBookmarks(content) {
+  const closed = new Set(content?.closed ?? []);
+  const entries = [];
+  for (const document of content?.documents ?? []) {
+    const all = rows(document, new Set());
+    for (const bookmark of bookmarksOf(document)) {
+      entries.push({ bookmark, document, closed: closed.has(document.id), row: all.find((row) => row.id === bookmark.item) ?? null });
+    }
+  }
+  return entries.sort((left, right) => left.bookmark.order - right.bookmark.order || byId(left.document, right.document) || byId(left.bookmark, right.bookmark));
+}

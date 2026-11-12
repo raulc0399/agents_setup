@@ -3,7 +3,7 @@ use crate::model::*;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -91,6 +91,25 @@ impl Store {
                 "ALTER TABLE documents ADD COLUMN closed INTEGER NOT NULL DEFAULT 0;",
             )?;
         }
+        // Added within schema 2 as `closed`: a document's bookmarks (`Document::bookmarks`) as
+        // JSON, kept out of `content`, so an older binary's write keeps them.
+        let has_bookmarks: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('documents') WHERE name='bookmarks')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_bookmarks {
+            transaction.execute_batch(
+                "ALTER TABLE documents ADD COLUMN bookmarks TEXT NOT NULL DEFAULT '{}';",
+            )?;
+        }
+        // The next bookmark position per conversation (`Bookmark::order`), so none is given out
+        // twice; a table an older binary never reads.
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS bookmark_orders (
+                workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
+                next INTEGER NOT NULL);",
+        )?;
         transaction.commit()?;
         Ok(Self { connection })
     }
@@ -136,11 +155,17 @@ impl Store {
     /// Agent-safe inspection: excludes local layouts, selections, and drafts.
     pub fn documents(&self, workspace: Id) -> Result<Vec<Document>> {
         require_workspace(&self.connection, workspace)?;
-        let mut statement = self
-            .connection
-            .prepare("SELECT content FROM documents WHERE workspace_id=?1 ORDER BY id")?;
-        let rows = statement.query_map([workspace.to_string()], |row| row.get::<_, String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        let mut statement = self.connection.prepare(
+            "SELECT content, bookmarks FROM documents WHERE workspace_id=?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([workspace.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (content, bookmarks) = row?;
+            stored_document(&content, &bookmarks)
+        })
+        .collect()
     }
 
     /// IDs of the closed documents, in ID order.
@@ -196,6 +221,7 @@ impl Store {
                     relationships: BTreeMap::new(),
                     groups: BTreeMap::new(),
                     lanes: None,
+                    bookmarks: BTreeMap::new(),
                 },
                 _ => return Err(Error::Invalid(
                     "existing document requires expected_revision; new document requires neither"
@@ -247,9 +273,14 @@ impl Store {
             return Err(Error::Invalid(format!("document is already {state}")));
         }
         let mut after = before.clone();
-        apply_action(&mut after, action)?;
+        apply_action(
+            &mut after,
+            action,
+            bookmark_sequence(&transaction, workspace)?,
+        )?;
         let undo_id = Id::new_v4();
         write_document(&transaction, workspace, &after)?;
+        keep_bookmark_orders(&transaction, workspace, &after)?;
         write_closed(&transaction, workspace, document, after_closed)?;
         let record = serde_json::to_string(&UndoRecord {
             before,
@@ -334,6 +365,13 @@ impl Store {
                 &mut current.groups,
                 &record.before.groups,
                 &record.after.groups,
+            )
+        })
+        .and_then(|()| {
+            restore_changed(
+                &mut current.bookmarks,
+                &record.before.bookmarks,
+                &record.after.bookmarks,
             )
         })
         .and_then(|()| restore_closed(&mut closed, &record));
@@ -549,25 +587,89 @@ fn require_workspace(connection: &Connection, workspace: Id) -> Result<()> {
 }
 
 fn read_document(connection: &Connection, workspace: Id, document: Id) -> Result<Document> {
-    let content: Option<String> = connection
+    let stored: Option<(String, String)> = connection
         .query_row(
-            "SELECT content FROM documents WHERE workspace_id=?1 AND id=?2",
+            "SELECT content, bookmarks FROM documents WHERE workspace_id=?1 AND id=?2",
             params![workspace.to_string(), document.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (content, bookmarks) = stored.ok_or_else(|| Error::NotFound("document".into()))?;
+    stored_document(&content, &bookmarks)
+}
+
+/// A document from its `content` and its `bookmarks` column.
+fn stored_document(content: &str, bookmarks: &str) -> Result<Document> {
+    let mut document: Document = serde_json::from_str(content)?;
+    document.bookmarks = serde_json::from_str(bookmarks)?;
+    Ok(document)
+}
+
+/// Writes the bookmarks to their column and the rest of the document to `content`. The whole
+/// document, bookmarks included, is bounded: it crosses to the app as one snapshot record.
+fn write_document(connection: &Connection, workspace: Id, document: &Document) -> Result<()> {
+    serialized(document)?;
+    let revision =
+        i64::try_from(document.revision).map_err(|_| Error::Invalid("revision overflow".into()))?;
+    let content = Document {
+        bookmarks: BTreeMap::new(),
+        ..document.clone()
+    };
+    connection.execute(
+        "INSERT INTO documents(workspace_id, id, revision, content, bookmarks) VALUES(?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(workspace_id, id) DO UPDATE SET revision=excluded.revision, content=excluded.content, bookmarks=excluded.bookmarks",
+        params![
+            workspace.to_string(),
+            document.id.to_string(),
+            revision,
+            serialized(&content)?,
+            serde_json::to_string(&document.bookmarks)?
+        ],
+    )?;
+    Ok(())
+}
+
+/// The positions new bookmarks take: after the conversation's counter, and after every bookmark
+/// its documents hold (they may come from a store before the counter).
+fn bookmark_sequence(connection: &Connection, workspace: Id) -> Result<Sequence> {
+    let mut statement =
+        connection.prepare("SELECT bookmarks FROM documents WHERE workspace_id=?1")?;
+    let rows = statement.query_map([workspace.to_string()], |row| row.get::<_, String>(0))?;
+    let mut highest = None;
+    for row in rows {
+        let bookmarks: BTreeMap<Id, Bookmark> = serde_json::from_str(&row?)?;
+        highest = highest.max(bookmarks.values().map(|bookmark| bookmark.order).max());
+    }
+    let next: Option<i64> = connection
+        .query_row(
+            "SELECT next FROM bookmark_orders WHERE workspace_id=?1",
+            [workspace.to_string()],
             |row| row.get(0),
         )
         .optional()?;
-    Ok(serde_json::from_str(
-        &content.ok_or_else(|| Error::NotFound("document".into()))?,
-    )?)
+    let counted = next
+        .and_then(|next| u64::try_from(next).ok())
+        .and_then(|next| next.checked_sub(1));
+    Ok(Sequence::after(highest.max(counted)))
 }
 
-fn write_document(connection: &Connection, workspace: Id, document: &Document) -> Result<()> {
-    let revision =
-        i64::try_from(document.revision).map_err(|_| Error::Invalid("revision overflow".into()))?;
+/// Moves the conversation's counter past every bookmark `document` holds, so a position stays
+/// given out after its bookmark was removed.
+fn keep_bookmark_orders(connection: &Connection, workspace: Id, document: &Document) -> Result<()> {
+    let Some(highest) = document
+        .bookmarks
+        .values()
+        .map(|bookmark| bookmark.order)
+        .max()
+    else {
+        return Ok(());
+    };
+    let next =
+        i64::try_from(highest + 1).map_err(|_| Error::Invalid("bookmark order overflow".into()))?;
     connection.execute(
-        "INSERT INTO documents(workspace_id, id, revision, content) VALUES(?1, ?2, ?3, ?4)
-         ON CONFLICT(workspace_id, id) DO UPDATE SET revision=excluded.revision, content=excluded.content",
-        params![workspace.to_string(), document.id.to_string(), revision, serialized(document)?],
+        "INSERT INTO bookmark_orders(workspace_id, next) VALUES(?1, ?2)
+         ON CONFLICT(workspace_id) DO UPDATE SET next=MAX(next, excluded.next)",
+        params![workspace.to_string(), next],
     )?;
     Ok(())
 }
@@ -642,19 +744,26 @@ fn restore_closed(closed: &mut bool, record: &UndoRecord) -> Result<()> {
     Ok(())
 }
 
+/// Undoes what an action changed in `current`, unless something since changed it again: a
+/// record it changed gets its `before` back, and one it added (a bookmark) goes.
 fn restore_changed<T: Clone + PartialEq>(
     current: &mut BTreeMap<Id, T>,
     before: &BTreeMap<Id, T>,
     after: &BTreeMap<Id, T>,
 ) -> Result<()> {
-    for (id, previous) in before {
-        if after.get(id) == Some(previous) {
+    let ids: BTreeSet<Id> = before.keys().chain(after.keys()).copied().collect();
+    for id in ids {
+        let previous = before.get(&id);
+        if after.get(&id) == previous {
             continue;
         }
-        if current.get(id) != after.get(id) {
+        if current.get(&id) != after.get(&id) {
             return Err(Error::UndoConflict);
         }
-        current.insert(*id, previous.clone());
+        match previous {
+            Some(previous) => current.insert(id, previous.clone()),
+            None => current.remove(&id),
+        };
     }
     Ok(())
 }

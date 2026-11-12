@@ -10,6 +10,10 @@ pub const MAX_ELEMENTS: usize = 2_000;
 pub const MAX_RELATIONSHIPS: usize = 4_000;
 pub const MAX_GROUPS: usize = 500;
 pub const MAX_SELECTION: usize = MAX_ELEMENTS + MAX_RELATIONSHIPS + MAX_GROUPS;
+/// Bookmarks one document holds; a quote holds at most `MAX_QUOTE_BYTES`. The whole document,
+/// bookmarks included, stays within `MAX_PAYLOAD_BYTES` as every other record.
+pub const MAX_BOOKMARKS: usize = 1_000;
+pub const MAX_QUOTE_BYTES: usize = MAX_TEXT_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +129,24 @@ pub struct Group {
     pub archived: bool,
 }
 
+/// The user's mark on an item of the document, to come back to: on the whole item, or with
+/// `quote` on the text the user selected in it. Only a mark, without a note. Added and removed
+/// through `ContentAction::Bookmark` and `ContentAction::Unbookmark`; never changed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: Id,
+    /// The element, relationship or group it marks; dropped ones too.
+    pub item: Id,
+    /// The selected text as it was when bookmarked, kept when the item's text changes later;
+    /// `None` marks the whole item, which has at most one such bookmark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    /// Position among all bookmarks of the conversation, in the order they were made: from a
+    /// counter of the conversation that never gives a position out twice, and never changed
+    /// (an undone removal brings the bookmark back with its own).
+    pub order: u64,
+}
+
 /// How a diagram lays out its lanes: as rows stacked top to bottom, or as columns side by side.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +171,12 @@ pub struct Document {
     /// it on publish, and an older store loses it when it rewrites the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lanes: Option<Lanes>,
+    /// The user's bookmarks by ID (see `Bookmark`); content state, shared like the rest.
+    /// Optional and left out when empty, so documents stored before them load and older
+    /// peers read documents. The store keeps them in a column of their own, which an older
+    /// binary neither reads nor clears.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bookmarks: BTreeMap<Id, Bookmark>,
 }
 
 impl Document {
@@ -241,6 +269,18 @@ pub enum ContentAction {
     Close {},
     /// Brings a closed document back.
     Reopen {},
+    /// Bookmarks each item of `ids` (dropped ones too) that has no bookmark on the whole item;
+    /// with `quote`, the one item of `ids` for that text selected in it. Left out when `None`.
+    Bookmark {
+        ids: Vec<Id>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quote: Option<String>,
+    },
+    /// Removes bookmarks: a bookmark's ID removes that bookmark, an item's ID the bookmark on
+    /// the whole item.
+    Unbookmark {
+        ids: Vec<Id>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

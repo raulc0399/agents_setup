@@ -5,21 +5,21 @@
 // `?scenario=status-checks` those of the connection status, `?scenario=document-checks`
 // closing and reopening documents, `?scenario=restart-checks` tabs restored after a restart,
 // `?scenario=pane-checks` resizing the side pane, `?scenario=split-checks` two documents side by
-// side; each writes PASS or the failures into #result.
+// side, `?scenario=bookmark-checks` bookmarks; each writes PASS or the failures into #result.
 import { start } from '../ui/js/app.js';
 import { DROPPED_NOTE } from '../ui/js/list.js';
 import { questionBlock } from '../ui/js/panel.js';
-import { EXPLAIN_TIMEOUT_MS } from '../ui/js/rows.js';
+import { EXPLAIN_TIMEOUT_MS, sessionBookmarks } from '../ui/js/rows.js';
 import { fakeBackend } from './fake-backend.js';
 import { formatTime } from '../ui/js/format.js';
-import { CONTENTS_FOR_TESTS, KEYS, RELEASE_BACK, RELEASE_IDS, SEEN_AT_MS, VERSION_PROBLEM, explainRequest, fixture, withHandovers } from './fixtures.js';
+import { BOOKMARKS, CONTENTS_FOR_TESTS, KEYS, RELEASE_BACK, RELEASE_IDS, SEEN_AT_MS, VERSION_PROBLEM, explainRequest, fixture, withHandovers } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 // Under a virtual time budget headless Chromium hardly runs animation frames: timers stand in.
 const FRAME_MS = 16;
 window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), FRAME_MS);
 window.cancelAnimationFrame = (frame) => clearTimeout(frame);
-const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks, 'pane-checks': paneChecks, 'split-checks': splitChecks };
+const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks, 'pane-checks': paneChecks, 'split-checks': splitChecks, 'bookmark-checks': bookmarkChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 /** Sizes prism-core's graph.rs draws at: a pill's height and an arrowhead's (`PILL_HEIGHT`, `ARROW_HEAD_SIZE`). */
 const PILL_HEIGHT = 18;
@@ -159,6 +159,10 @@ async function replay(backend) {
     backend.reply(session, id, { code: 'stale_revision', current: 4 });
   } else if (scenario === 'closed-menu') {
     document.querySelector('.closed-documents').click();
+  } else if (scenario === 'bookmarks-list') {
+    document.querySelector('.bookmarks-control').click();
+    await settle();
+    key('j');
   } else if (scenario.startsWith('diagram')) {
     await waitFor(() => document.querySelector('.diagram-svg [data-id]'));
   } else if (scenario.startsWith('split-')) {
@@ -820,7 +824,11 @@ async function diagramChecks(backend, app) {
   expect(shape('arrow', link(5))?.classList.contains('prism-dropped') && shape('arrow', link(5)).querySelector('.prism-line').getAttribute('stroke-dasharray') === '2 4' && shape('pill', link(5)), 'its arrow stays with its pill, dashed lightly');
   click(droppedBox);
   await settle();
-  expect(root.querySelector('.detail-panel .badge.dropped') && [...root.querySelectorAll('.detail-panel .panel-actions .button')].every((button) => button.disabled), 'the panel marks it and disables its actions');
+  // Bookmark alone stays: a bookmark is only a mark.
+  expect(
+    root.querySelector('.detail-panel .badge.dropped') && [...root.querySelectorAll('.detail-panel .panel-actions .button')].every((button) => button.disabled === !button.classList.contains('bookmark')),
+    'the panel marks it and disables its actions but Bookmark',
+  );
   backend.update(KEYS.LIVE, structuredClone(original));
   expect(await waitFor(() => shape('box', item(6)) && !shape('box', item(6)).classList.contains('prism-dropped')), 'restored, it is drawn as before');
 
@@ -1051,7 +1059,7 @@ async function actionChecks(backend, app) {
   key('Tab', { ctrlKey: true });
   await settle();
   const offline = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].map((node) => `${node.textContent}:${node.disabled}`);
-  expect(offline().join('|') === 'Ask:true|Explain:true|Accept:true|Drop:true', `shared actions are disabled: ${offline()}`);
+  expect(offline().join('|') === 'Ask:true|Explain:true|Bookmark:true|Accept:true|Drop:true', `shared actions are disabled: ${offline()}`);
   for (const name of ['e', 'a', 'x', 'u']) {
     key(name);
     await settle();
@@ -1068,7 +1076,7 @@ async function actionChecks(backend, app) {
   key(' ');
   await settle();
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `Space selects, got ${selectedCards()}`);
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask (2)|Explain (2)|Accept (2)|Drop (2)', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask (2)|Explain (2)|Bookmark (2)|Accept (2)|Drop (2)', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
   expect(document.querySelector('.pane-controls .selection')?.textContent === '2 selected · clear', 'the pane counts the selection');
   ctrlClick(card(plan(6)));
   await settle();
@@ -1160,7 +1168,7 @@ async function actionChecks(backend, app) {
   expect(card(plan(2))?.classList.contains('dropped') && card(plan(2)).querySelector('.badge.dropped')?.textContent === 'dropped', 'the dropped card is marked');
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `and stays selected: ${selectedCards()}`);
   const hint = () => document.querySelector('.detail-panel .panel-actions .hint')?.textContent;
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Explain|Accept|Drop' && hint() === '1 dropped item takes no part', `the buttons leave it out: ${buttons('.detail-panel .panel-actions')} ${hint()}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Explain|Bookmark (2)|Accept|Drop' && hint() === '1 dropped item takes no part', `the buttons leave it out: ${buttons('.detail-panel .panel-actions')} ${hint()}`);
   key('Enter');
   await settle();
   const partial = backend.sent.at(-1);
@@ -1173,7 +1181,7 @@ async function actionChecks(backend, app) {
   for (const view of [{ selected: [plan(2)], focus: plan(4) }, { selected: [], focus: plan(2) }]) {
     app.updateView(KEYS.LIVE, view);
     await settle();
-    expect(disabled() === 'Ask:true|Explain:true|Accept:true|Drop:true' && hint() === DROPPED_NOTE, `${JSON.stringify(view)}: disabled with the reason: ${disabled()} ${hint()}`);
+    expect(disabled() === 'Ask:true|Explain:true|Bookmark:false|Accept:true|Drop:true' && hint() === DROPPED_NOTE, `${JSON.stringify(view)}: disabled with the reason: ${disabled()} ${hint()}`);
     const sentBefore = backend.sent.length;
     for (const name of ['Enter', 'e', 'a', 'x']) {
       app.setMessage('');
@@ -1220,7 +1228,7 @@ async function actionChecks(backend, app) {
   await settle();
 
   // 6.4 Accept: one `action` on the selection; the note says acceptance is no tool permission.
-  expect(document.querySelector('.detail-panel .panel-actions .button:nth-child(3)').title.includes('never permission to run tools'), 'the Accept button says what acceptance is');
+  expect(document.querySelector('.detail-panel .panel-actions .button:nth-child(4)').title.includes('never permission to run tools'), 'the Accept button says what acceptance is');
   key('a');
   await settle();
   const accept = backend.sent.at(-1);
@@ -1443,7 +1451,7 @@ async function actionChecks(backend, app) {
   expect(document.querySelector('.detail-panel .badge.stale')?.textContent === 'changed since accepted', 'the panel shows changed since accepted');
   shape(item(4)).dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await settle();
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Explain|Accept|Drop', `the panel has the item actions: ${buttons('.detail-panel .panel-actions')}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Explain|Bookmark|Accept|Drop', `the panel has the item actions: ${buttons('.detail-panel .panel-actions')}`);
   const panelQuote = selectText(document.querySelector('.detail-panel .panel-body'), 3, 40);
   key('Enter');
   await settle();
@@ -1553,7 +1561,7 @@ async function explainChecks(backend, app, expect) {
   await settle();
   expect(explanationShown() === null && badge(plan(3)) === null, 'no explanation before one is asked for');
   expect(document.querySelector('.statusbar .keys').textContent.includes('explain'), 'the status bar offers E');
-  expect(JSON.stringify(buttons()) === JSON.stringify(['Ask', 'Explain', 'Accept', 'Drop']) && explainButton().title === 'Explain this item; the explanation shows here (E)', `Explain sits next to Ask: ${buttons()}`);
+  expect(JSON.stringify(buttons()) === JSON.stringify(['Ask', 'Explain', 'Bookmark', 'Accept', 'Drop']) && explainButton().title === 'Explain this item; the explanation shows here (E)', `Explain sits next to Ask: ${buttons()}`);
   const sentBefore = backend.sent.length;
   key('e');
   await settle();
@@ -1761,7 +1769,7 @@ async function explainChecks(backend, app, expect) {
   app.updateView(KEYS.CODEX, { focus: 'a2000000-0000-4000-8000-000000000001' });
   await settle();
   const states2 = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].map((node) => `${node.textContent}:${node.disabled}`).join('|');
-  expect(states2() === 'Ask:false|Explain:true|Accept:false|Drop:false' && explainButton().title === 'Explain needs the Claude mod; ask in Codex instead', `Explain is disabled for Codex: ${states2()} ${explainButton()?.title}`);
+  expect(states2() === 'Ask:false|Explain:true|Bookmark:false|Accept:false|Drop:false' && explainButton().title === 'Explain needs the Claude mod; ask in Codex instead', `Explain is disabled for Codex: ${states2()} ${explainButton()?.title}`);
   const sentCodex = backend.sent.length;
   key('e');
   await settle();
@@ -1959,7 +1967,7 @@ async function statusChecks(backend) {
 
   expect(text('.empty h2') === 'No conversations connected yet', `the empty state: ${text('.empty h2')}`);
   expect(problemShown('.empty'), 'the empty state names both protocols and the older side');
-  expect(text('.empty .facts .about') === 'Prism 0.1.0 · app protocol 2', `the version line: ${text('.empty .facts .about')}`);
+  expect(text('.empty .facts .about') === 'Prism 0.1.0 · app protocol 3', `the version line: ${text('.empty .facts .about')}`);
   expect(document.querySelector('.strip-actions .button .dot.disconnected')?.title === VERSION_PROBLEM, 'the sessions button is marked');
 
   // Another conversation is connected, but not in this window.
@@ -1975,7 +1983,7 @@ async function statusChecks(backend) {
   document.querySelector('.strip-actions .button').click();
   await settle();
   expect(problemShown('.popover .status'), 'the sessions panel shows the problem');
-  expect(text('.popover .status .about') === 'Prism 0.1.0 · app protocol 2', 'and the version line');
+  expect(text('.popover .status .about') === 'Prism 0.1.0 · app protocol 3', 'and the version line');
 
   // A bridge connected: the host cleared the problem.
   backend.change((state) => {
@@ -2311,6 +2319,21 @@ async function narrowChecks(backend, app) {
   const separator = document.querySelector('.pane-separator');
   expect(getComputedStyle(separator).display === 'none', 'the pane edge cannot be dragged');
   expect(app.paneWidth === 480 && backend.paneWidths.length === 0, `the saved width is kept: ${app.paneWidth}, saved ${backend.paneWidths}`);
+
+  // The toolbar with Closed (N) and Bookmarks (N) fits, and so does the bookmarks list.
+  const marked = await backend.content(KEYS.LIVE);
+  marked.documents.find((candidate) => candidate.id === KEYS.PLAN).bookmarks = { [BOOKMARKS.tabs.id]: BOOKMARKS.tabs };
+  marked.closed = [KEYS.REVIEW];
+  backend.update(KEYS.LIVE, marked);
+  expect(await waitFor(() => document.querySelector('.toolbar .bookmarks-control')), 'the toolbar has Bookmarks (N)');
+  const control = document.querySelector('.toolbar .bookmarks-control').getBoundingClientRect();
+  const closedControl = document.querySelector('.toolbar .closed-documents').getBoundingClientRect();
+  expect(control.right <= window.innerWidth && closedControl.right <= control.left && page.scrollWidth <= window.innerWidth, `beside Closed (N), inside the window: ${control.right} of ${window.innerWidth}`);
+  document.querySelector('.toolbar .bookmarks-control').click();
+  await settle();
+  const shown = document.querySelector('.menu.bookmarks-menu').getBoundingClientRect();
+  expect(shown.left >= 0 && shown.right <= window.innerWidth, `the list fits the window: ${shown.left}..${shown.right}`);
+  key('Escape');
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
 
@@ -2891,7 +2914,10 @@ async function splitChecks(backend, app) {
   menu('Release flow');
   pick('Open on the right');
   await waitFor(() => diagramIn('right'));
+  // The diagram's layout settles first, so its saves do not race the ratio's.
+  await settled();
   press('Home');
+  await waitFor(() => backend.views[KEYS.LIVE]?.ratio === app.view(KEYS.LIVE).ratio);
   const kept = structuredClone(await saved());
   expect(kept?.split?.document === KEYS.RELEASE && kept.activePane === 'right' && kept.ratio > 0, `the split is saved: ${JSON.stringify(kept?.split)}`);
   const restored = fixture('split-checks');
@@ -2920,6 +2946,391 @@ async function splitChecks(backend, app) {
     await waitFor(() => disposed && !app.diagramViews.has(RIGHT) && !app.listViews.has(RIGHT) && !app.panels.has(RIGHT)),
     `the right pane's views are disposed with the tab: ${disposed}, ${[...app.diagramViews.keys()]}`,
   );
+
+  document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/**
+ * Bookmarks: B and the Bookmark button toggle the mark of the focused item or the selected
+ * ones, or bookmark the text selected in the focused one; dropped items take part, read-only
+ * tabs refuse. Marks on cards, boxes and in the pane, with remove controls there and in the
+ * list. Shift+B lists every bookmark of the conversation and goes to one in the list, the
+ * diagram or a split pane; a closed document's entry asks for Reopen first. U undoes.
+ */
+async function bookmarkChecks(backend, app) {
+  const failures = [];
+  const expect = (condition, message) => {
+    if (!condition) {
+      failures.push(message);
+    }
+  };
+  const plan = (number) => `a0000000-0000-4000-8000-00000000000${number}`;
+  const { item } = RELEASE_IDS;
+  const card = (id) => document.querySelector(`.card[data-id="${id}"]`);
+  const mark = (id) => card(id)?.querySelector('.badge.bookmark') ?? null;
+  const message = () => document.querySelector('.statusbar .message').textContent;
+  const bookmarkButton = () => document.querySelector('.detail-panel .panel-actions .button.bookmark');
+  const paneMarks = () => [...document.querySelectorAll('.detail-panel .panel-bookmark')].map((node) => [node.querySelector('.bookmark-quote, .bookmark-whole').textContent, Boolean(node.querySelector('.text-changed'))]);
+  const last = () => backend.sent.at(-1);
+  const sentAction = () => JSON.stringify(last().command);
+  const command = (document_id, expected_revision, action) => JSON.stringify({ type: 'action', document_id, expected_revision, action });
+  const documentOf = (next, id) => next.documents.find((candidate) => candidate.id === id);
+  const revision = async (id) => documentOf(await backend.content(KEYS.LIVE), id).revision;
+  const publish = async (change) => {
+    const next = await backend.content(KEYS.LIVE);
+    change(next);
+    backend.update(KEYS.LIVE, next);
+    await settle();
+  };
+  const reply = async () => {
+    const { key: session, id } = last();
+    backend.reply(session, id);
+    await settle();
+  };
+  // The bridge commits the last bookmark action as the store does: a new revision with the bookmarks changed.
+  let made = 100;
+  const commit = async () => {
+    const { document_id, action } = last().command;
+    await publish((next) => {
+      const changed = documentOf(next, document_id);
+      changed.revision += 1;
+      changed.bookmarks ??= {};
+      for (const id of action.ids) {
+        if (action.action === 'bookmark') {
+          made += 1;
+          const added = { id: `f1000000-0000-4000-8000-000000000${made}`, item: id, order: made, ...(action.quote ? { quote: action.quote } : {}) };
+          changed.bookmarks[added.id] = added;
+        } else {
+          const removed = changed.bookmarks[id] ? id : Object.values(changed.bookmarks).find((bookmark) => bookmark.item === id && !bookmark.quote).id;
+          delete changed.bookmarks[removed];
+        }
+      }
+    });
+    await reply();
+  };
+  const setLink = async (state) => {
+    backend.change((next) => {
+      next.sessions.find((session) => session.key === KEYS.LIVE).link = { state };
+    });
+    await settle();
+  };
+  const listOpen = () => Boolean(document.querySelector('.menu.bookmarks-menu:not([hidden])'));
+  const entries = () => [...document.querySelectorAll('.menu.bookmarks-menu .bookmark-entry')];
+  const entryOf = (bookmark) => entries().find((entry) => entry.dataset.id === bookmark.id);
+  const listed = () =>
+    entries().map((entry) => [
+      entry.querySelector('.bookmark-document').textContent,
+      entry.querySelector('.bookmark-item .number').textContent,
+      entry.querySelector('.bookmark-item .title').textContent,
+      entry.querySelector('.bookmark-jump .bookmark-quote')?.textContent ?? null,
+      entry.classList.contains('closed') ? 'closed' : '',
+      entry.querySelector('.text-changed') ? 'text changed' : '',
+    ]);
+  const control = () => document.querySelector('.toolbar .bookmarks-control');
+  const view = () => app.view(KEYS.LIVE);
+  const slots = () => [...document.querySelectorAll('.content > .pane-slot')];
+  const activeSide = () => (slots()[1]?.classList.contains('active') ? 'right' : 'left');
+  const stopFocused = (id) => document.activeElement?.closest?.('.diagram-svg [data-id]')?.dataset.id === id;
+  const box = (id) => [...document.querySelectorAll('.diagram-svg [data-kind="box"]')].find((node) => node.dataset.id === id);
+  await settle();
+
+  // Marks: on the cards with an accessible name, the control with the count, the key hints.
+  expect(mark(KEYS.TABS_ITEM)?.getAttribute('aria-label') === 'Bookmarked 2 times' && mark(plan(2))?.getAttribute('aria-label') === 'Bookmarked' && !mark(plan(1)), 'the cards of bookmarked items carry the mark');
+  expect(card(KEYS.TABS_ITEM).getAttribute('aria-label').endsWith(', bookmarked') && !card(plan(1)).getAttribute('aria-label').includes('bookmarked'), `and say so: ${card(KEYS.TABS_ITEM).getAttribute('aria-label')}`);
+  expect(control()?.textContent === 'Bookmarks (6)', `the toolbar counts the conversation's bookmarks: ${control()?.textContent}`);
+  expect(document.querySelector('.statusbar .keys').textContent.includes('bookmark'), 'the status bar offers B');
+
+  // The pane lists the focused item's bookmarks as written, a quote no longer in the text marked.
+  app.updateView(KEYS.LIVE, { focus: KEYS.TABS_ITEM });
+  await settle();
+  expect(JSON.stringify(paneMarks()) === JSON.stringify([['The whole item', false], ['tabs move between windows by drag', false]]), `the pane lists the item's bookmarks: ${JSON.stringify(paneMarks())}`);
+  expect(bookmarkButton()?.getAttribute('aria-pressed') === 'true' && bookmarkButton().textContent === 'Bookmark' && !bookmarkButton().disabled, 'Bookmark is pressed for a bookmarked item');
+  app.updateView(KEYS.LIVE, { focus: plan(2) });
+  await settle();
+  expect(JSON.stringify(paneMarks()) === JSON.stringify([['The pairing file is written once at install', true]]) && bookmarkButton().getAttribute('aria-pressed') === 'false', `a quote the text lost says so: ${JSON.stringify(paneMarks())}`);
+
+  // B on an item toggles its mark at the document's revision.
+  app.updateView(KEYS.LIVE, { focus: plan(1) });
+  await settle();
+  key('b');
+  await settle();
+  expect(sentAction() === command(KEYS.PLAN, 3, { action: 'bookmark', ids: [plan(1)] }), `B bookmarks the focused item: ${sentAction()}`);
+  await commit();
+  expect(mark(plan(1)) && JSON.stringify(paneMarks()) === JSON.stringify([['The whole item', false]]) && bookmarkButton().getAttribute('aria-pressed') === 'true', 'the card and the pane show it');
+  expect(message() === 'Bookmarked “Goal”. U undoes.', `and the status says so: ${message()}`);
+  bookmarkButton().click();
+  await settle();
+  expect(sentAction() === command(KEYS.PLAN, 4, { action: 'unbookmark', ids: [plan(1)] }), `the button removes it again: ${sentAction()}`);
+  await commit();
+  expect(!mark(plan(1)) && paneMarks().length === 0, 'the mark is gone');
+  key('u');
+  await settle();
+  expect(JSON.stringify(last().command) === JSON.stringify({ type: 'undo', document_id: KEYS.PLAN, expected_revision: 5 }), `U undoes it like any action: ${JSON.stringify(last().command)}`);
+  await reply();
+
+  // Text selected in the item: B bookmarks that text, several per item; the same text again removes it.
+  app.updateView(KEYS.LIVE, { focus: KEYS.TABS_ITEM });
+  await settle();
+  const quote = selectText(document.querySelector('.detail-panel .panel-body'), 0, 24);
+  key('b');
+  await settle();
+  expect(quote === 'One tab per conversation' && sentAction() === command(KEYS.PLAN, 5, { action: 'bookmark', ids: [KEYS.TABS_ITEM], quote }), `B bookmarks the selected text: ${sentAction()}`);
+  await commit();
+  expect(JSON.stringify(paneMarks()) === JSON.stringify([['The whole item', false], ['tabs move between windows by drag', false], [quote, false]]) && mark(KEYS.TABS_ITEM).getAttribute('aria-label') === 'Bookmarked 3 times', `the pane lists it after the others: ${JSON.stringify(paneMarks())}`);
+  selectText(document.querySelector('.detail-panel .panel-body'), 0, 24);
+  bookmarkButton().click();
+  await settle();
+  const added = `f1000000-0000-4000-8000-000000000${made}`;
+  expect(sentAction() === command(KEYS.PLAN, 6, { action: 'unbookmark', ids: [added] }), `the same text again removes its bookmark: ${sentAction()}`);
+  await commit();
+  window.getSelection().removeAllRanges();
+
+  // A revised text keeps the quote as bookmarked and marks it.
+  await publish((next) => {
+    documentOf(next, KEYS.PLAN).revision += 1;
+    documentOf(next, KEYS.PLAN).elements[KEYS.TABS_ITEM].body = 'Tabs move by drag.';
+  });
+  expect(JSON.stringify(paneMarks()) === JSON.stringify([['The whole item', false], ['tabs move between windows by drag', true]]), `text changed after a revision: ${JSON.stringify(paneMarks())}`);
+  await publish((next) => {
+    documentOf(next, KEYS.PLAN).revision += 1;
+    documentOf(next, KEYS.PLAN).elements[KEYS.TABS_ITEM].body = CONTENTS_FOR_TESTS[KEYS.LIVE].documents[0].elements[KEYS.TABS_ITEM].body;
+  });
+
+  // Several selected: those without a mark get one; when all have one, B removes them all.
+  app.updateView(KEYS.LIVE, { focus: plan(1), selected: [plan(1), KEYS.TABS_ITEM] });
+  await settle();
+  expect(bookmarkButton().textContent === 'Bookmark (2)' && bookmarkButton().getAttribute('aria-pressed') === 'false', `the button counts the selection: ${bookmarkButton().textContent}`);
+  key('b');
+  await settle();
+  expect(sentAction() === command(KEYS.PLAN, 9, { action: 'bookmark', ids: [plan(1)] }), `B bookmarks the selected items without a mark: ${sentAction()}`);
+  await commit();
+  expect(bookmarkButton().getAttribute('aria-pressed') === 'true', 'then all are marked');
+  key('b');
+  await settle();
+  expect(sentAction() === command(KEYS.PLAN, 10, { action: 'unbookmark', ids: [plan(1), KEYS.TABS_ITEM] }), `and B removes each: ${sentAction()}`);
+  expect(message() === 'Removing the bookmark…', `while it goes: ${message()}`);
+  await commit();
+  expect(message() === 'Removed the bookmark of 2 items. U undoes.', `then: ${message()}`);
+  key('Escape');
+  await settle();
+
+  // A dropped item can be bookmarked: it is only a mark.
+  await publish((next) => {
+    documentOf(next, KEYS.PLAN).revision += 1;
+    documentOf(next, KEYS.PLAN).elements[plan(6)].archived = true;
+  });
+  app.updateView(KEYS.LIVE, { focus: plan(6) });
+  await settle();
+  key('b');
+  await settle();
+  expect(sentAction() === command(KEYS.PLAN, 12, { action: 'bookmark', ids: [plan(6)] }) && !bookmarkButton().disabled, `a dropped item is bookmarked: ${sentAction()}`);
+  await commit();
+  expect(card(plan(6)).classList.contains('dropped') && mark(plan(6)), 'its card keeps the mark');
+
+  // The pane's × removes that bookmark.
+  app.updateView(KEYS.LIVE, { focus: plan(2) });
+  await settle();
+  document.querySelector('.detail-panel .panel-bookmark .close').click();
+  await settle();
+  expect(sentAction() === command(KEYS.PLAN, 13, { action: 'unbookmark', ids: [BOOKMARKS.stale.id] }), `the pane removes a bookmark by its ID: ${sentAction()}`);
+  await commit();
+  expect(!mark(plan(2)) && paneMarks().length === 0, 'and it is gone');
+
+  // Shift+B: every bookmark of the conversation in the order made; a closed document's greyed.
+  const sixth = `f1000000-0000-4000-8000-000000000${made}`;
+  key('B');
+  await settle();
+  expect(listOpen() && document.activeElement === entries()[0]?.querySelector('.bookmark-jump'), 'Shift+B opens the list with the keyboard on its first entry');
+  const expected = [
+    ['App plan', '3', 'Windows and tabs', 'tabs move between windows by drag', '', ''],
+    ['Release flow', '4', 'Review anomalies', null, '', ''],
+    ['Review findings', '1', 'Pairing token printed in debug logs', null, 'closed', ''],
+    ['Release flow', '1', 'Capture readings', null, '', ''],
+    ['App plan', '6', 'List view', null, '', ''],
+  ];
+  expect(JSON.stringify(listed()) === JSON.stringify(expected), `the list across documents: ${JSON.stringify(listed())}`);
+  expect(entryOf(BOOKMARKS.finding)?.querySelector('.reopen')?.textContent === 'Reopen' && !entryOf(BOOKMARKS.review).querySelector('.reopen'), 'only the closed entry has Reopen');
+  expect(entryOf({ id: sixth }) !== undefined && document.querySelector('.bookmarks-heading h3').textContent === 'Bookmarks (5)', 'the list counts them');
+  key('j');
+  key('j');
+  key('k');
+  await settle();
+  expect(document.activeElement === entryOf(BOOKMARKS.review).querySelector('.bookmark-jump'), 'J and K move between entries');
+
+  // Enter goes to the item: the release flow in the diagram, its box focused and in view.
+  key('Enter');
+  expect(await waitFor(() => !listOpen() && view().document === KEYS.RELEASE && stopFocused(item(4))), `Enter opens the document and focuses the box: ${view().document} ${document.activeElement?.dataset?.id}`);
+  expect(view().focus === item(4) && box(item(4))?.querySelector('.prism-bookmarked') && box(item(4)).getAttribute('aria-label').endsWith(', bookmarked'), `the box carries the mark and says so: ${box(item(4))?.getAttribute('aria-label')}`);
+  expect(box(item(1))?.querySelector('.prism-bookmarked') && !box(item(2))?.querySelector('.prism-bookmarked'), 'only bookmarked boxes carry it');
+
+  // Back to the list: a hidden item comes back and a filter that leaves it out is cleared.
+  app.updateView(KEYS.LIVE, { modes: { ...view().modes, [KEYS.PLAN]: 'list' }, hidden: [KEYS.TABS_ITEM] });
+  key('B');
+  await settle();
+  key('Enter');
+  await settle();
+  expect(view().document === KEYS.PLAN && view().focus === KEYS.TABS_ITEM && !view().hidden.includes(KEYS.TABS_ITEM), `the list shows the item again: ${JSON.stringify([view().document, view().focus, view().hidden])}`);
+  expect(card(KEYS.TABS_ITEM)?.getAttribute('aria-current') === 'true' && document.activeElement === document.querySelector('.pane-slot .view'), 'focused, with the keyboard in the list');
+  app.updatePane(KEYS.LIVE, { filter: 'pairing', focus: plan(1) });
+  key('B');
+  await settle();
+  key('Enter');
+  await settle();
+  expect(view().filter === '' && view().focus === KEYS.TABS_ITEM && card(KEYS.TABS_ITEM)?.classList.contains('focused'), `a filter that left it out is cleared: “${view().filter}”`);
+
+  // Split: a document shown in the other pane takes the jump there; another one goes to the active pane.
+  key('\\');
+  await settle();
+  expect(slots().length === 2 && activeSide() === 'right' && view().split?.document === KEYS.NOTES, `split beside the notes: ${JSON.stringify(view().split)}`);
+  key('B');
+  await settle();
+  entryOf(BOOKMARKS.review).querySelector('.bookmark-jump').click();
+  expect(await waitFor(() => view().split?.document === KEYS.RELEASE && activeSide() === 'right' && stopFocused(item(4))), `the release flow in the active right pane: ${JSON.stringify(view().split)}`);
+  key('B');
+  await settle();
+  entryOf(BOOKMARKS.tabsQuote).querySelector('.bookmark-jump').click();
+  await settle();
+  expect(activeSide() === 'left' && view().document === KEYS.PLAN && view().split?.document === KEYS.RELEASE && view().focus === KEYS.TABS_ITEM && slots()[0].contains(document.activeElement), `the app plan's pane takes it: ${activeSide()}`);
+  key('\\');
+  await settle();
+
+  // A closed document's entry: Enter goes to its Reopen; Reopen reopens it for everyone, then goes to the item.
+  key('B');
+  await settle();
+  const sentBefore = backend.sent.length;
+  entryOf(BOOKMARKS.finding).querySelector('.bookmark-jump').focus();
+  key('Enter');
+  await settle();
+  expect(backend.sent.length === sentBefore && document.activeElement === entryOf(BOOKMARKS.finding).querySelector('.reopen') && message().startsWith('“Review findings” is closed for everyone'), `a closed entry asks for Reopen: ${message()}`);
+  key('Enter');
+  await settle();
+  expect(sentAction() === command(KEYS.REVIEW, 1, { action: 'reopen' }) && !listOpen(), `Reopen sends the shared reopen: ${sentAction()}`);
+  await reply();
+  await publish((next) => {
+    documentOf(next, KEYS.REVIEW).revision = 2;
+    next.closed = [];
+  });
+  expect(await waitFor(() => view().document === KEYS.REVIEW && card(BOOKMARKS.finding.item)?.classList.contains('focused')), `then the item is focused in it: ${view().document} ${view().focus}`);
+
+  // The list's × removes a bookmark of another document and stays open; U right after undoes it there.
+  key('B');
+  await settle();
+  entryOf(BOOKMARKS.capture).querySelector('.bookmark-jump').focus();
+  key('Delete');
+  await settle();
+  const releaseRevision = await revision(KEYS.RELEASE);
+  expect(sentAction() === command(KEYS.RELEASE, releaseRevision, { action: 'unbookmark', ids: [BOOKMARKS.capture.id] }) && listOpen(), `Delete removes the entry's bookmark: ${sentAction()}`);
+  await commit();
+  expect(listOpen() && !entryOf(BOOKMARKS.capture) && entries().length === 4 && document.activeElement?.closest('.bookmark-entry'), `the list stays, without it, with the keyboard: ${entries().length}`);
+  key('Escape');
+  await settle();
+  key('u');
+  await settle();
+  expect(JSON.stringify(last().command) === JSON.stringify({ type: 'undo', document_id: KEYS.RELEASE, expected_revision: releaseRevision + 1 }), `U undoes the removal in its document: ${JSON.stringify(last().command)}`);
+  await reply();
+
+  // A bookmark the agent adds appears on its card and in the count.
+  await publish((next) => {
+    const changed = documentOf(next, KEYS.REVIEW);
+    changed.revision += 1;
+    changed.bookmarks['f2000000-0000-4000-8000-000000000001'] = { id: 'f2000000-0000-4000-8000-000000000001', item: 'a1000000-0000-4000-8000-000000000002', order: 300 };
+  });
+  expect(mark('a1000000-0000-4000-8000-000000000002')?.getAttribute('aria-label') === 'Bookmarked' && control()?.textContent === 'Bookmarks (5)', `the agent's bookmark shows: ${control()?.textContent}`);
+
+  // The list is a dialog of its control: Esc gives the keyboard back to it; holding Shift+B does not close it.
+  expect(control().getAttribute('aria-expanded') === 'false' && control().getAttribute('aria-haspopup') === 'dialog', 'the control says the list is closed');
+  key('B');
+  await settle();
+  key('B', { repeat: true });
+  await settle();
+  const list = document.querySelector('.menu.bookmarks-menu');
+  expect(listOpen() && control().getAttribute('aria-expanded') === 'true' && list.getAttribute('role') === 'dialog' && list.getAttribute('aria-label') === 'Bookmarks', 'open, as a dialog, and a held Shift+B keeps it');
+  expect(!list.querySelector('[role="menuitem"]'), 'its entries are no menu items');
+  key('Escape');
+  await settle();
+  expect(!listOpen() && document.activeElement === control() && control().getAttribute('aria-expanded') === 'false', `Esc closes it and the control has the keyboard: ${document.activeElement?.className}`);
+
+  // A selection reaching beyond the item's text says so and changes nothing.
+  app.updateView(KEYS.LIVE, { document: KEYS.PLAN, focus: KEYS.TABS_ITEM, selected: [] });
+  await settle();
+  const across = document.createRange();
+  across.setStart(document.querySelector('.detail-panel .panel-title').firstChild, 2);
+  across.setEnd(document.querySelector('.detail-panel .panel-body').firstChild, 5);
+  window.getSelection().removeAllRanges();
+  window.getSelection().addRange(across);
+  const beyond = backend.sent.length;
+  key('b');
+  await settle();
+  expect(backend.sent.length === beyond && message().startsWith('The selection reaches beyond the item’s text'), `a selection beyond the text is refused: ${message()}`);
+  window.getSelection().removeAllRanges();
+
+  // A quote over paragraphs is kept as written; other whitespace in the text still finds it.
+  await publish((next) => {
+    documentOf(next, KEYS.PLAN).revision += 1;
+    documentOf(next, KEYS.PLAN).elements[KEYS.TABS_ITEM].body = 'First paragraph.\n\nSecond  paragraph here.';
+  });
+  const paragraphs = selectText(document.querySelector('.detail-panel .panel-body'), 6, 30);
+  key('b');
+  await settle();
+  expect(paragraphs === 'paragraph.\n\nSecond  para' && last().command.action.quote === paragraphs, `the quote spans the paragraphs: ${JSON.stringify(last().command.action)}`);
+  await commit();
+  const kept = [...document.querySelectorAll('.detail-panel .panel-bookmark .bookmark-quote')].map((node) => node.textContent);
+  expect(kept.includes(paragraphs) && JSON.stringify(paneMarks().at(-1)) === JSON.stringify([paragraphs, false]), `shown as written: ${JSON.stringify(paneMarks())}`);
+  await publish((next) => {
+    documentOf(next, KEYS.PLAN).revision += 1;
+    documentOf(next, KEYS.PLAN).elements[KEYS.TABS_ITEM].body = 'First paragraph.\nSecond paragraph here.';
+  });
+  expect(JSON.stringify(paneMarks().at(-1)) === JSON.stringify([paragraphs, false]), `other whitespace is no text change: ${JSON.stringify(paneMarks())}`);
+  window.getSelection().removeAllRanges();
+
+  // Bookmarks with one position (a store before the counter) list by document, then by ID.
+  const tied = sessionBookmarks({
+    documents: [
+      { id: 'd2', title: 'Two', elements: {}, relationships: {}, groups: {}, bookmarks: { b1: { id: 'b1', item: 'x', order: 7 } } },
+      { id: 'd1', title: 'One', elements: {}, relationships: {}, groups: {}, bookmarks: { b3: { id: 'b3', item: 'x', order: 7 }, b2: { id: 'b2', item: 'x', order: 7 }, b0: { id: 'b0', item: 'x', order: 1 } } },
+    ],
+  }).map((entry) => entry.bookmark.id);
+  expect(JSON.stringify(tied) === JSON.stringify(['b0', 'b2', 'b3', 'b1']), `ties go by document and ID: ${tied}`);
+
+  // Arrows and lanes carry the mark too; an export leaves the marks and their names out.
+  await publish((next) => {
+    const release = documentOf(next, KEYS.RELEASE);
+    release.revision += 1;
+    release.bookmarks['f3000000-0000-4000-8000-000000000001'] = { id: 'f3000000-0000-4000-8000-000000000001', item: RELEASE_IDS.link(2), order: 400 };
+    release.bookmarks['f3000000-0000-4000-8000-000000000002'] = { id: 'f3000000-0000-4000-8000-000000000002', item: RELEASE_IDS.group(1), order: 401 };
+  });
+  app.updateView(KEYS.LIVE, { document: KEYS.RELEASE, focus: null });
+  const shapeOf = (kind, id) => [...document.querySelectorAll(`.diagram-svg [data-kind="${kind}"]`)].find((node) => node.dataset.id === id);
+  expect(await waitFor(() => shapeOf('pill', RELEASE_IDS.link(2))?.querySelector('.prism-bookmarked')), 'the arrow\'s pill carries the mark');
+  expect(shapeOf('lane', RELEASE_IDS.group(1))?.querySelector('.prism-bookmarked') && shapeOf('lane', RELEASE_IDS.group(1)).getAttribute('aria-label').endsWith(', bookmarked'), 'the lane carries it after its title');
+  expect(!shapeOf('pill', RELEASE_IDS.link(1))?.querySelector('.prism-bookmarked'), 'only bookmarked arrows');
+  const exported = app.diagramViews.get(KEYS.LIVE).exportSvg();
+  const leftIn = ['prism-bookmarked', 'data-bookmarked', ', bookmarked', 'data-explanation'].filter((text) => !exported || exported.includes(text));
+  expect(leftIn.length === 0, `an export leaves them out: ${leftIn} ${exported?.match(/.{60}(prism-bookmarked|data-bookmarked|, bookmarked|data-explanation).{60}/)?.[0]}`);
+
+  // A jump still waiting for a reopened document ends with a tab switch.
+  app.pendingJump = { key: KEYS.LIVE, documentId: KEYS.REVIEW, id: BOOKMARKS.finding.item };
+  key('Tab', { ctrlKey: true });
+  await settle();
+  expect(app.pendingJump === null, 'a tab switch ends a waiting jump');
+  key('Tab', { ctrlKey: true, shiftKey: true });
+  await settle();
+
+  // Read-only: B and the removes refuse, the list still opens.
+  app.updateView(KEYS.LIVE, { document: KEYS.REVIEW, focus: 'a1000000-0000-4000-8000-000000000002' });
+  await setLink('disconnected');
+  const offline = backend.sent.length;
+  key('b');
+  await settle();
+  expect(backend.sent.length === offline && message() === 'Read-only until the bridge reconnects' && bookmarkButton()?.disabled, `B refuses while read-only: ${message()}`);
+  expect(document.querySelector('.detail-panel .panel-bookmark .close')?.disabled, 'the pane cannot remove');
+  key('B');
+  await settle();
+  key('Delete');
+  await settle();
+  expect(listOpen() && entries().every((entry) => entry.querySelector('.close').disabled) && backend.sent.length === offline, 'the list opens, its removes unavailable');
+  key('Escape');
+  await setLink('live');
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }

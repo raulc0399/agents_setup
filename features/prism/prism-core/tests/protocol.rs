@@ -31,6 +31,7 @@ fn document() -> Document {
         relationships: BTreeMap::new(),
         groups: BTreeMap::new(),
         lanes: None,
+        bookmarks: BTreeMap::new(),
     }
 }
 
@@ -203,7 +204,7 @@ fn app_messages_round_trip() {
 fn hello_has_a_fixed_wire_format() {
     fixed(
         &hello(),
-        r#"{"type":"hello","protocol":2,"nonce":"bridge-nonce"}"#,
+        r#"{"type":"hello","protocol":3,"nonce":"bridge-nonce"}"#,
     );
 }
 
@@ -223,13 +224,13 @@ fn welcome_has_a_fixed_wire_format() {
             nonce: "app-nonce".into(),
             proof: "00ff".into(),
         },
-        r#"{"type":"welcome","protocol":2,"nonce":"app-nonce","proof":"00ff"}"#,
+        r#"{"type":"welcome","protocol":3,"nonce":"app-nonce","proof":"00ff"}"#,
     );
 }
 
 #[test]
 fn refused_has_a_fixed_wire_format_in_both_directions() {
-    let literal = r#"{"type":"refused","protocol":2,"reason":"superseded"}"#;
+    let literal = r#"{"type":"refused","protocol":3,"reason":"superseded"}"#;
     fixed(
         &AppMessage::Refused {
             protocol: APP_PROTOCOL,
@@ -322,6 +323,70 @@ fn action_carries_the_content_action_and_expected_revision() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("unknown field `ids`"), "{error}");
+}
+
+/// Bookmark actions, which protocol 3 added: an item mark leaves `quote` out.
+#[test]
+fn bookmark_actions_have_a_fixed_wire_format() {
+    fixed(
+        &ContentAction::Bookmark {
+            ids: vec![Id::from_u128(ELEMENT)],
+            quote: None,
+        },
+        r#"{"action":"bookmark","ids":["00000000-0000-0000-0000-000000000002"]}"#,
+    );
+    fixed(
+        &ContentAction::Bookmark {
+            ids: vec![Id::from_u128(ELEMENT)],
+            quote: Some("the device".into()),
+        },
+        r#"{"action":"bookmark","ids":["00000000-0000-0000-0000-000000000002"],"quote":"the device"}"#,
+    );
+    fixed(
+        &ContentAction::Unbookmark {
+            ids: vec![Id::from_u128(ELEMENT)],
+        },
+        r#"{"action":"unbookmark","ids":["00000000-0000-0000-0000-000000000002"]}"#,
+    );
+    let error = serde_json::from_str::<ContentAction>(
+        r#"{"action":"unbookmark","ids":["00000000-0000-0000-0000-000000000002"],"quote":"x"}"#,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field `quote`"),
+        "{error}"
+    );
+}
+
+/// Bookmarks cross with their document; a document without them serializes as before, and
+/// one stored before them loads without them.
+#[test]
+fn bookmarks_are_optional_records_of_the_document() {
+    let plain = document();
+    assert!(
+        serde_json::to_value(&plain)
+            .unwrap()
+            .get("bookmarks")
+            .is_none()
+    );
+    let mut older = serde_json::to_value(&plain).unwrap();
+    older.as_object_mut().unwrap().remove("bookmarks");
+    assert_eq!(serde_json::from_value::<Document>(older).unwrap(), plain);
+
+    let mut marked = document();
+    let bookmark = Bookmark {
+        id: Id::from_u128(9),
+        item: Id::from_u128(ELEMENT),
+        quote: Some("the device".into()),
+        order: 4,
+    };
+    marked.bookmarks.insert(bookmark.id, bookmark);
+    let value = serde_json::to_value(&marked).unwrap();
+    assert_eq!(
+        value["bookmarks"],
+        json!({"00000000-0000-0000-0000-000000000009":{"id":"00000000-0000-0000-0000-000000000009","item":"00000000-0000-0000-0000-000000000002","quote":"the device","order":4}})
+    );
+    assert_eq!(serde_json::from_value::<Document>(value).unwrap(), marked);
 }
 
 /// The intent and the quoted item are optional fields: an ordinary ask leaves them out, so its

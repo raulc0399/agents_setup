@@ -188,3 +188,19 @@ binary and a Claude restart):
   prompt box; the item says "In the CLI prompt box: press Enter there".
 - `/clear` or exit before the answer: the item says "No explanation arrived; E asks again".
 - A Codex tab: Explain is disabled with "Explain needs the Claude mod; ask in Codex instead".
+
+## Bookmarks (2026-11-12)
+
+Automated: the store side (item and selection bookmarks, revision checks, undo, survival of
+publish, close, reopen and restart, the `bookmarks` column added to an older store and kept
+by an older binary's write, undo records written before bookmarks) is in `tests/core.rs`;
+the tools and `inspect` in `tests/bridge.rs`; the app link in `tests/applink.rs`; the wire
+format (protocol 3) in `prism-core/tests/protocol.rs`; the app in `app/ui-tests`
+(`bookmark-checks`; screenshots `bookmarked`, `bookmarks-list`, `diagram-bookmarked`).
+
+Manual, in the real run on the Mac (not done here; needs the new app and the new bridge
+binary, protocol 3 on both sides):
+
+- `B` on an item, on selected text and on several items; the marks on card, box and pane.
+- `Shift+B`, then a bookmark in another document, in the diagram and in split view.
+- Ask the agent to "revise the bookmarked items": it reads them with `inspect`.

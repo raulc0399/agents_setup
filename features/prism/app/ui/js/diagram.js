@@ -1,5 +1,6 @@
 import { h } from './dom.js';
-import { EXPLANATION_STATES, explanationOf, questionsFor } from './rows.js';
+import { BOOKMARKED, BOOKMARK_PATH } from './list.js';
+import { EXPLANATION_STATES, bookmarksOf, explanationOf, questionsFor } from './rows.js';
 
 /**
  * Detail levels of the layout, least first (`Detail` in prism-core's graph.rs): titles only,
@@ -95,6 +96,16 @@ const BASELINE_SHIFT = 0.35;
 const EXPLAINED_CHAR_WIDTH = 7.4;
 const EXPLAINED_PADDING = 14;
 const SVG_NS = 'http://www.w3.org/2000/svg';
+/**
+ * The mark of a box whose item is bookmarked: a ribbon in a badge as high as the explained one,
+ * left of it on its line, else where that badge would go; the ribbon is the card's
+ * (BOOKMARK_PATH in list.js, in a 12 by 12 box), BOOKMARK_ICON wide. Left out of an export.
+ */
+const BOOKMARKED_CLASS = 'prism-bookmarked';
+const BOOKMARKED_WIDTH = 22;
+const BOOKMARK_ICON = 10;
+/** Room between an arrow's pill and its bookmark badge above it. */
+const PILL_BADGE_GAP = 2;
 /** Attributes that reference an arrowhead marker, as `url(#id)`. */
 const HEAD_REFERENCES = ['marker-start', 'marker-end'];
 const HEAD_REFERENCE = /^url\(#(.+)\)$/;
@@ -161,8 +172,10 @@ export class DiagramView {
     this.gesture = null;
     this.shownFocus = null;
     this.shownSelection = null;
-    // The explained boxes marked on the SVG shown, as `explainedBoxes` gives them.
-    this.shownExplained = null;
+    // The explained and bookmarked items marked on the SVG shown, as `explainedBoxes` and `bookmarkedItems` give them.
+    this.shownMarks = null;
+    // An item to bring into view with the keyboard once its layout is shown: {document, id}.
+    this.pendingReveal = null;
 
     this.message = h('div', { class: 'diagram-message', hidden: true });
     this.zoomLabel = h('span', { class: 'zoom', title: 'Zoom' });
@@ -252,7 +265,8 @@ export class DiagramView {
     this.showLevels();
     this.showLevel();
     this.showFocus(model.focus !== previousFocus);
-    this.showExplained();
+    this.showMarks();
+    this.showPendingReveal();
   }
 
   /** Shows the layout of the level picked, once it arrived; until then the one shown stays. */
@@ -376,7 +390,7 @@ export class DiagramView {
     this.showMessage(this.diagram.order.length === 0 ? 'Nothing to draw: the items shown here have no boxes.' : null);
     this.shownFocus = null;
     this.shownSelection = null;
-    this.shownExplained = null;
+    this.shownMarks = null;
     if (anchor) {
       this.setCamera(this.anchoredCamera(anchor));
     } else if (finish) {
@@ -385,10 +399,38 @@ export class DiagramView {
       this.applyCamera();
     }
     this.showFocus(false);
-    this.showExplained();
+    this.showMarks();
     this.actions.onLayout();
     if (refocus) {
       (this.stop(this.model.focus) ?? this.canvas).focus({ preventScroll: true });
+    }
+    this.showPendingReveal();
+  }
+
+  /**
+   * A jump to a bookmark: item `id` of `document` takes the keyboard and comes into view, now
+   * or once the layout that draws it is shown.
+   */
+  revealItem(document, id) {
+    this.pendingReveal = { document, id };
+    this.showPendingReveal();
+  }
+
+  showPendingReveal() {
+    const pending = this.pendingReveal;
+    if (!pending || !this.model) {
+      return;
+    }
+    // Another document came instead: nothing to reveal any more.
+    if (pending.document !== this.model.document.id) {
+      this.pendingReveal = null;
+      return;
+    }
+    const stop = this.layouts.get(this.level)?.diagram === this.diagram ? this.stop(pending.id) : null;
+    if (stop) {
+      this.pendingReveal = null;
+      // Focusing it brings it into view (`onFocusIn`).
+      stop.focus({ preventScroll: true });
     }
   }
 
@@ -464,18 +506,23 @@ export class DiagramView {
     this.reveal(stop);
   }
 
-  /** Marks the boxes of explained items with their badge, as the list's cards show it. */
-  showExplained() {
+  /**
+   * Marks the boxes of explained items with their badge and the boxes, arrows and lanes of
+   * bookmarked items with theirs, as the list's cards show them; every shape of a bookmarked
+   * item says so in its name too.
+   */
+  showMarks() {
     if (!this.svg) {
       return;
     }
     const explained = explainedBoxes(this.model);
-    const signature = JSON.stringify(explained);
-    if (signature === this.shownExplained) {
+    const bookmarked = bookmarkedItems(this.model);
+    const signature = JSON.stringify([explained, [...bookmarked]]);
+    if (signature === this.shownMarks) {
       return;
     }
-    this.shownExplained = signature;
-    this.svg.querySelectorAll(`.${EXPLAINED_CLASS}`).forEach((node) => node.remove());
+    this.shownMarks = signature;
+    this.svg.querySelectorAll(`.${EXPLAINED_CLASS}, .${BOOKMARKED_CLASS}`).forEach((node) => node.remove());
     for (const box of this.svg.querySelectorAll('[data-kind="box"]')) {
       const outline = this.boxes.get(box.dataset.id);
       const status = explained[box.dataset.id];
@@ -484,8 +531,30 @@ export class DiagramView {
         box.dataset.explanation = EXPLANATION_STATES[status].badge;
         box.append(explainedBadge(box, outline, status));
       }
-      // Its keyboard stop says the state too.
-      nameShape(box);
+      if (outline && bookmarked.has(box.dataset.id)) {
+        box.append(bookmarkedBadge(box, outline));
+      }
+    }
+    // Arrows carry it beside their pill, lanes after their title.
+    for (const pill of this.svg.querySelectorAll('[data-kind="pill"]')) {
+      if (bookmarked.has(pill.dataset.id)) {
+        pill.append(pillBookmarkBadge(pill));
+      }
+    }
+    for (const lane of this.svg.querySelectorAll('[data-kind="lane"]')) {
+      const badge = bookmarked.has(lane.dataset.id) ? laneBookmarkBadge(lane) : null;
+      if (badge) {
+        lane.append(badge);
+      }
+    }
+    for (const node of this.svg.querySelectorAll('[data-id]')) {
+      if (bookmarked.has(node.dataset.id)) {
+        node.dataset.bookmarked = BOOKMARKED;
+      } else {
+        delete node.dataset.bookmarked;
+      }
+      // Its keyboard stop says the states too.
+      nameShape(node);
     }
   }
 
@@ -1003,7 +1072,16 @@ export class DiagramView {
     // The theme is read from a hidden copy without the view's classes and the zoom band, so
     // the SVG shown does not change.
     const staged = this.svg.cloneNode(true);
-    staged.querySelectorAll(`.${EXPLAINED_CLASS}`).forEach((node) => node.remove());
+    staged.querySelectorAll(`.${EXPLAINED_CLASS}, .${BOOKMARKED_CLASS}`).forEach((node) => node.remove());
+    // The names go back to prism-core's, without the view's states (`nameShape`).
+    staged.querySelectorAll('[data-id]').forEach((node) => {
+      if (node.dataset.label) {
+        node.setAttribute('aria-label', node.dataset.label);
+      }
+      for (const name of ['label', 'explanation', 'bookmarked']) {
+        delete node.dataset[name];
+      }
+    });
     VIEW_CLASSES.forEach((name) => staged.querySelectorAll(`.${name}`).forEach((node) => node.classList.remove(name)));
     delete staged.dataset.zoom;
     const stage = h('div', { hidden: true }, staged);
@@ -1183,6 +1261,59 @@ function explainedBadge(box, outline, status) {
   return badge;
 }
 
+/** IDs of the items shown that have a bookmark. */
+function bookmarkedItems({ document, rows }) {
+  const shown = new Set(rows.map((row) => row.id));
+  return new Set(bookmarksOf(document).map((bookmark) => bookmark.item).filter((id) => shown.has(id)));
+}
+
+/** The bookmark badge of `box`, whose shape is at `outline`: left of its explained badge on that line, else on the line that badge takes. */
+function bookmarkedBadge(box, outline) {
+  const width = BOOKMARKED_WIDTH;
+  const explained = box.querySelector(`.${EXPLAINED_CLASS} rect`);
+  let right;
+  let top;
+  if (explained) {
+    right = Number(explained.getAttribute('x')) - EXPLAINED_GAP;
+    top = Number(explained.getAttribute('y'));
+  } else {
+    const dropped = box.querySelector('.prism-dropped-label')?.getBBox();
+    right = dropped?.width ? dropped.x - EXPLAINED_GAP : outline.x + outline.width - EXPLAINED_RIGHT;
+    top = badgeTop(box, outline, { x: right - width, width });
+  }
+  return ribbonBadge(right, top);
+}
+
+/** The bookmark badge of an arrow: above its pill, centered, clear of the arrowhead after a short pill. */
+function pillBookmarkBadge(pill) {
+  const shape = pill.querySelector('.prism-shape');
+  const [x, y, width] = ['x', 'y', 'width'].map((name) => Number(shape.getAttribute(name)));
+  return ribbonBadge(x + width / 2 + BOOKMARKED_WIDTH / 2, y - EXPLAINED_HEIGHT - PILL_BADGE_GAP);
+}
+
+/** The bookmark badge of a lane: after its title, centered on it; null for a lane without one. */
+function laneBookmarkBadge(lane) {
+  const title = lane.querySelector(':scope > .prism-title')?.getBBox();
+  if (!title?.width) {
+    return null;
+  }
+  return ribbonBadge(title.x + title.width + EXPLAINED_GAP + BOOKMARKED_WIDTH, title.y + (title.height - EXPLAINED_HEIGHT) / 2);
+}
+
+/** A bookmark badge whose right edge is at `right` and top at `top`: the ribbon in a rounded frame. */
+function ribbonBadge(right, top) {
+  const width = BOOKMARKED_WIDTH;
+  const badge = svgNode('g', { class: BOOKMARKED_CLASS, 'aria-hidden': 'true' });
+  const scale = BOOKMARK_ICON / 12;
+  const icon = svgNode('path', {
+    class: 'prism-bookmarked-icon',
+    d: BOOKMARK_PATH,
+    transform: `translate(${right - width / 2 - BOOKMARK_ICON / 2} ${top + (EXPLAINED_HEIGHT - BOOKMARK_ICON) / 2}) scale(${scale})`,
+  });
+  badge.append(svgNode('rect', { class: 'prism-bookmarked-shape', x: right - width, y: top, width, height: EXPLAINED_HEIGHT, rx: EXPLAINED_HEIGHT / 2 }), icon);
+  return badge;
+}
+
 /**
  * The top of the badge spanning `x` and `width`: centered on the number's line, else on the
  * first text line below where it covers no text, else on the last line; always inside `outline`.
@@ -1200,14 +1331,15 @@ function badgeTop(box, outline, { x, width }) {
 
 /**
  * A keyboard stop's accessible name: prism-core's label, kept to restore it, with the state
- * of its explanation (`data-explanation`) after it and "Selected: " before it when selected.
+ * of its explanation (`data-explanation`) and its bookmark (`data-bookmarked`) after it and
+ * "Selected: " before it when selected.
  */
 function nameShape(node) {
   if (!node.hasAttribute('aria-label')) {
     return;
   }
   node.dataset.label ??= node.getAttribute('aria-label');
-  const name = node.dataset.explanation ? `${node.dataset.label}, ${node.dataset.explanation}` : node.dataset.label;
+  const name = [node.dataset.label, node.dataset.explanation, node.dataset.bookmarked].filter(Boolean).join(', ');
   node.setAttribute('aria-label', node.classList.contains('selected') ? `Selected: ${name}` : name);
 }
 

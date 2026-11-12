@@ -1,9 +1,9 @@
 import { DiagramView, LEVELS, layoutKey } from './diagram.js';
 import { MOD_KEY, h } from './dom.js';
 import { agentLabel, formatTime, projectName, shortConversation } from './format.js';
-import { ACCEPT_NOTE, DROPPED_NOTE, ListView } from './list.js';
+import { ACCEPT_NOTE, BOOKMARK_NOTE, DROPPED_NOTE, ListView, bookmarkIcon } from './list.js';
 import { DetailPanel } from './panel.js';
-import { EXPLAIN_INTENT, documentsOf, hasDiagram, itemCount, itemIds, nextExplainTimeout, rows as buildRows } from './rows.js';
+import { EXPLAIN_INTENT, bookmarkCount, collapsed, documentsOf, hasDiagram, itemBookmarks, itemCount, itemIds, itemMark, nextExplainTimeout, quoteFound, rows as buildRows, sessionBookmarks } from './rows.js';
 
 /** View state is saved this long after the last change, not on every key press. */
 const VIEW_SAVE_DELAY_MS = 300;
@@ -77,9 +77,11 @@ const KEY_HINTS = {
     [['Shift+A'], 'all', 5],
     [['Enter'], 'ask', 1],
     [['E'], 'explain', 2],
+    [['B'], 'bookmark', 3],
     [['A'], 'accept', 2],
     [['X'], 'drop', 2],
     [['U'], 'undo', 2],
+    [['Shift+B'], 'bookmarks', 5],
     [['H'], 'hide', 3],
     [['/'], 'filter', 3],
     [['Esc'], 'clear', 4],
@@ -92,9 +94,11 @@ const KEY_HINTS = {
     [['Space'], 'select', 2],
     [['Enter'], 'ask', 1],
     [['E'], 'explain', 2],
+    [['B'], 'bookmark', 3],
     [['A'], 'accept', 2],
     [['X'], 'drop', 2],
     [['U'], 'undo', 2],
+    [['Shift+B'], 'bookmarks', 5],
     [['+', '-'], 'zoom', 3],
     [['0'], 'fit', 4],
     [[`${MOD_KEY}+0`], '100%', 5],
@@ -178,6 +182,16 @@ class App {
      * command: U reopens it there.
      */
     this.lastClosed = null;
+    /**
+     * The document of this window's last bookmark change, `{key, id, revision}` with the
+     * revision it produced, until the next command: U undoes it there, also from another
+     * document's pane (a bookmark removed in the list).
+     */
+    this.lastBookmarked = null;
+    /** A jump to a bookmark in a document reopened for it, `{key, documentId, id}`, until its content arrived. */
+    this.pendingJump = null;
+    /** What the bookmarks list shows, so it is rebuilt only when that changed. */
+    this.bookmarksSignature = null;
     /** Commands sent so far; a close only becomes the last one if nothing else went out after it. */
     this.commandCount = 0;
     this.message = null;
@@ -382,6 +396,9 @@ class App {
     this.render();
     if (keyboard && !this.content.contains(document.activeElement)) {
       this.focusPane(this.activePane(key));
+    }
+    if (this.pendingJump?.key === key && key === this.activeKey()) {
+      this.jumpTo(key, this.pendingJump.documentId, this.pendingJump.id);
     }
   }
 
@@ -614,8 +631,15 @@ class App {
     return {
       onAsk: () => this.ask(pane),
       onExplain: () => this.explain(pane),
+      onBookmark: () => this.bookmark(pane),
       onAccept: () => this.accept(pane),
       onDrop: () => this.drop(pane),
+      onRemoveBookmark: (id) => {
+        const document = this.current(pane)?.document;
+        if (document?.bookmarks?.[id]) {
+          this.removeBookmark(paneTab(pane), document, document.bookmarks[id]);
+        }
+      },
     };
   }
 
@@ -874,14 +898,15 @@ class App {
     const view = this.paneView(pane);
     const mode = this.mode(pane);
     const closed = documentsOf(this.contents.get(key), true);
+    const bookmarks = bookmarkCount(this.contents.get(key));
     const panes = this.shownPanes(key);
     // While split, the document strip marks the document of each side.
     const sides = panes.length > 1 ? Object.fromEntries(panes.map((shown) => [this.current(shown).document.id, paneSide(shown)])) : {};
     this.patch(
       'header',
       this.header,
-      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, sides, closed.length],
-      () => this.tabHeader(key, session, state, current, closed, sides),
+      [key, session, current?.documents.map((document) => [document.id, document.title]), current?.document.id, sides, closed.length, bookmarks],
+      () => this.tabHeader(key, session, state, current, closed, sides, bookmarks),
     );
 
     this.pane.hidden = !current;
@@ -1097,7 +1122,7 @@ class App {
     this.shownSplit = false;
   }
 
-  tabHeader(key, session, state, current, closed, sides) {
+  tabHeader(key, session, state, current, closed, sides, bookmarks) {
     const agent = session ? agentLabel(session.agent) : '';
     const parts = [
       h(
@@ -1140,6 +1165,20 @@ class App {
                 text: `Closed (${closed.length})`,
                 onclick: (event) => this.openClosedMenu(key, event.currentTarget),
               })
+            : null,
+          bookmarks > 0
+            ? h(
+                'button',
+                {
+                  class: 'button quiet bookmarks-control',
+                  'aria-haspopup': 'dialog',
+                  'aria-expanded': String(Boolean(this.menu?.bookmarks)),
+                  title: 'The bookmarks of this conversation, in all its documents; pick one to go to it (Shift+B)',
+                  onclick: () => this.openBookmarks(key),
+                },
+                bookmarkIcon(),
+                `Bookmarks (${bookmarks})`,
+              )
             : null,
         ),
       );
@@ -1457,21 +1496,38 @@ class App {
 
   renderMenu() {
     this.menuElement.hidden = !this.menu;
+    this.header.querySelector('.bookmarks-control')?.setAttribute('aria-expanded', String(Boolean(this.menu?.bookmarks)));
     if (!this.menu) {
+      this.bookmarksSignature = null;
       return;
     }
-    const { key, x, y, closed, document: documentId } = this.menu;
+    const { key, x, y, closed, bookmarks, document: documentId } = this.menu;
+    this.menuElement.classList.toggle('closed-menu', Boolean(closed));
+    this.menuElement.classList.toggle('bookmarks-menu', Boolean(bookmarks));
+    // The bookmarks list holds entries with buttons of their own, not menu items.
+    this.menuElement.setAttribute('role', bookmarks ? 'dialog' : 'menu');
+    this.menuElement.removeAttribute('aria-label');
+    if (bookmarks) {
+      this.menuElement.setAttribute('aria-label', 'Bookmarks');
+      this.renderBookmarks(key);
+      this.placeMenu(x, y);
+      return;
+    }
     const items = closed ? this.closedMenuItems(key) : documentId ? this.documentMenuItems(key, documentId) : this.tabMenuItems(key);
     if (items.length === 0) {
       // The last closed document was reopened meanwhile, or the document of the menu closed.
       this.closeMenu();
       return;
     }
-    this.menuElement.classList.toggle('closed-menu', Boolean(closed));
     for (const item of items) {
       item.addEventListener('click', () => this.closeMenu());
     }
     this.menuElement.replaceChildren(...items);
+    this.placeMenu(x, y);
+  }
+
+  /** The menu at `x`, `y`, inside the window. */
+  placeMenu(x, y) {
     const width = this.menuElement.offsetWidth;
     const height = this.menuElement.offsetHeight;
     this.menuElement.style.setProperty('left', `${Math.min(x, window.innerWidth - width - 4)}px`);
@@ -1530,6 +1586,96 @@ class App {
       item.title = `Reopen “${document.title}” for everyone`;
       return item;
     });
+  }
+
+  /**
+   * The bookmarks list, rebuilt only when what it shows changed; the keyboard stays on the
+   * entry it was on, or the one in its place when that entry went.
+   */
+  renderBookmarks(key) {
+    const entries = sessionBookmarks(this.contents.get(key));
+    const signature = JSON.stringify([
+      key,
+      this.isLive(key),
+      entries.map(({ bookmark, document, closed, row }) => [bookmark, document.id, document.title, closed, row?.number, row?.title, row && quoteFound(row, bookmark)]),
+    ]);
+    if (signature === this.bookmarksSignature) {
+      return;
+    }
+    this.bookmarksSignature = signature;
+    const active = this.menuElement.contains(document.activeElement) ? document.activeElement : null;
+    const index = [...this.menuElement.querySelectorAll('.bookmark-entry')].indexOf(active?.closest('.bookmark-entry'));
+    this.menuElement.replaceChildren(...this.bookmarkItems(key, entries));
+    if (!active) {
+      return;
+    }
+    const jumps = [...this.menuElement.querySelectorAll('.bookmark-jump')];
+    (this.menuElement.querySelector(`[data-control="${active.dataset.control}"]`) ?? jumps[Math.min(index, jumps.length - 1)])?.focus();
+  }
+
+  /** Every bookmark of the tab's conversation (`sessionBookmarks`), or how to make one. */
+  bookmarkItems(key, entries) {
+    const readOnly = this.isLive(key) ? null : (READ_ONLY_REASONS[this.session(key)?.link.state ?? 'waiting'] ?? 'Not connected.');
+    const heading = h(
+      'div',
+      { class: 'bookmarks-heading' },
+      h('h3', { text: `Bookmarks (${entries.length})` }),
+      entries.length > 0 ? h('span', { class: 'hint', text: 'J K move · Enter go · Del remove' }) : null,
+    );
+    if (entries.length === 0) {
+      return [heading, h('p', { class: 'hint', text: `No bookmarks in this conversation yet. ${BOOKMARK_NOTE}` })];
+    }
+    return [heading, ...entries.map((entry) => this.bookmarkEntry(key, entry, readOnly))];
+  }
+
+  /**
+   * One bookmark in the list: its document, the item's number and title and the quote, as
+   * written. Choosing it goes to the item; in a closed document, greyed, it first asks for its
+   * Reopen button. Its × removes the bookmark; Reopen and × are unavailable while `readOnly`.
+   */
+  bookmarkEntry(key, { bookmark, document, closed, row }, readOnly) {
+    const item = row ? `${row.number} “${row.title}”` : 'that is gone';
+    const changed = row !== null && !quoteFound(row, bookmark);
+    const jump = h(
+      'button',
+      {
+        class: 'bookmark-jump',
+        'data-control': `jump-${bookmark.id}`,
+        title: closed ? `“${document.title}” is closed for everyone: Reopen opens it and goes to the item` : `Go to item ${item} in “${document.title}”`,
+        'aria-label': `${document.title}${closed ? ', closed' : ''}: item ${item}${bookmark.quote ? `, quote “${bookmark.quote}”` : ''}${changed ? ', text changed' : ''}`,
+        onclick: () => (closed ? this.askReopen(bookmark, document) : this.jumpTo(key, document.id, bookmark.item)),
+      },
+      h('span', { class: 'bookmark-where' }, h('span', { class: 'bookmark-document', text: document.title }), closed ? h('span', { class: 'chip', text: 'closed' }) : null),
+      h('span', { class: 'bookmark-item' }, h('span', { class: 'number', text: row ? String(row.number) : '–' }), h('span', { class: 'title', text: row?.title ?? 'missing item' })),
+      bookmark.quote ? h('span', { class: 'bookmark-quote', text: bookmark.quote }) : null,
+      changed ? h('span', { class: 'chip text-changed', title: 'The item’s text no longer contains this quote', text: 'text changed' }) : null,
+    );
+    const reopen = closed
+      ? h('button', {
+          class: 'button reopen',
+          'data-control': `reopen-${bookmark.id}`,
+          disabled: Boolean(readOnly),
+          title: readOnly ?? `Reopen “${document.title}” for everyone and go to the item`,
+          text: 'Reopen',
+          onclick: () => this.reopenToBookmark(key, document, bookmark.item),
+        })
+      : null;
+    const remove = h('button', {
+      class: 'close',
+      'data-control': `remove-${bookmark.id}`,
+      disabled: Boolean(readOnly),
+      title: readOnly ?? 'Remove this bookmark for everyone; U undoes (Del)',
+      'aria-label': 'Remove this bookmark',
+      text: '×',
+      onclick: () => this.removeBookmark(key, document, bookmark),
+    });
+    return h('div', { class: `bookmark-entry${closed ? ' closed' : ''}`, 'data-id': bookmark.id }, jump, reopen, remove);
+  }
+
+  /** A bookmark of a closed document chosen: its Reopen button takes the keyboard and confirms. */
+  askReopen(bookmark, document) {
+    this.menuElement.querySelector(`[data-control="reopen-${bookmark.id}"]`)?.focus();
+    this.setMessage(`“${document.title}” is closed for everyone: Reopen opens it again and goes to the item.`);
   }
 
   windowProjects(window) {
@@ -1724,6 +1870,8 @@ class App {
   // Tabs and windows
 
   activate(key) {
+    // A jump waiting for a reopened document's content is over once the user goes elsewhere.
+    this.pendingJump = null;
     this.backend.activateTab(key);
   }
 
@@ -1767,9 +1915,34 @@ class App {
     this.menuElement.querySelector('button')?.focus();
   }
 
+  /**
+   * Bookmarks (N) or Shift+B: the bookmarks list below the control, with the keyboard on its
+   * first entry. The control is there while the conversation has bookmarks.
+   */
+  openBookmarks(key) {
+    const control = this.header.querySelector('.bookmarks-control');
+    if (!control) {
+      this.setMessage(`No bookmarks in this conversation yet. ${BOOKMARK_NOTE}`);
+      return;
+    }
+    const rect = control.getBoundingClientRect();
+    this.menu = { key, x: rect.left, y: rect.bottom + 4, bookmarks: true };
+    this.renderMenu();
+    (this.menuElement.querySelector('.bookmark-jump') ?? this.menuElement).focus();
+  }
+
   closeMenu() {
     this.menu = null;
     this.renderMenu();
+  }
+
+  /** Esc or Shift+B in the bookmarks list: it closes, and the keyboard goes back to its control. */
+  closeBookmarks() {
+    const inside = this.menuElement.contains(document.activeElement);
+    this.closeMenu();
+    if (inside || document.activeElement === document.body) {
+      this.header.querySelector('.bookmarks-control')?.focus();
+    }
   }
 
   toggleSessions() {
@@ -2077,6 +2250,133 @@ class App {
     return this.ask(pane, EXPLAIN_INTENT);
   }
 
+  /**
+   * B or Bookmark. With text selected in the focused item's text, bookmarks that text, or
+   * removes the bookmark of the same text. Otherwise toggles the bookmark on the whole of each
+   * target: removes them when every one has it, else adds it to those without. Dropped items
+   * take part: a bookmark is only a mark.
+   */
+  async bookmark(pane) {
+    const key = paneTab(pane);
+    if (!this.requireLive(key)) {
+      return;
+    }
+    const targets = this.pickedTargets(pane);
+    if (targets.length === 0) {
+      return;
+    }
+    const current = this.current(pane);
+    const document = current.document;
+    const focus = this.mode(pane) === 'diagram' ? this.diagramFocus(pane) : current.focus;
+    const panel = this.detailPanel(pane);
+    // A selection reaching beyond the item's text is no quote of it, and no reason to mark the whole item either.
+    if (focus && panel.selectionBeyond(focus.id)) {
+      this.setMessage('The selection reaches beyond the item’s text: select text inside it to bookmark that text.', 'error');
+      return;
+    }
+    const quote = focus ? panel.selectedText(focus.id) : '';
+    const title = this.splitTitle(pane);
+    const where = title ? ` in ${title}` : '';
+    if (quote.trim()) {
+      const same = itemBookmarks(document, focus.id).find((bookmark) => collapsed(bookmark.quote ?? '') === collapsed(quote));
+      const action = same ? { action: 'unbookmark', ids: [same.id] } : { action: 'bookmark', ids: [focus.id], quote };
+      await this.sendBookmark(key, document, action, `${same ? 'Removed the bookmark of' : 'Bookmarked'} the text selected in “${focus.title}”${where}.`);
+      return;
+    }
+    const unmarked = targets.filter((row) => !itemMark(document, row.id));
+    if (unmarked.length > 0) {
+      await this.sendBookmark(key, document, { action: 'bookmark', ids: unmarked.map((row) => row.id) }, `Bookmarked ${described(unmarked)}${where}.`);
+    } else {
+      await this.sendBookmark(key, document, { action: 'unbookmark', ids: targets.map((row) => row.id) }, `Removed the bookmark of ${described(targets)}${where}.`);
+    }
+  }
+
+  /** The × of a bookmark in the side pane or the list: removes it for everyone. */
+  async removeBookmark(key, document, bookmark) {
+    if (!this.requireLive(key)) {
+      return;
+    }
+    await this.sendBookmark(key, document, { action: 'unbookmark', ids: [bookmark.id] }, `Removed a bookmark in “${document.title}”.`);
+  }
+
+  /** Sends a bookmark change of `document`; once it committed and until the next command, U undoes it. */
+  async sendBookmark(key, document, action, done) {
+    // `send` counts this command first; another one after it ends the moment for U.
+    const count = this.commandCount + 1;
+    await this.send(
+      key,
+      { type: 'action', document_id: document.id, expected_revision: document.revision, action },
+      {
+        sending: action.action === 'bookmark' ? 'Bookmarking…' : 'Removing the bookmark…',
+        done: `${done} U undoes.`,
+        onSuccess: () => {
+          if (this.commandCount === count) {
+            this.lastBookmarked = { key, id: document.id, revision: document.revision + 1 };
+          }
+        },
+      },
+    );
+  }
+
+  /** The document of this window's last bookmark change, while nothing changed it and nothing was sent since. */
+  justBookmarked(key) {
+    const last = this.lastBookmarked;
+    if (last?.key !== key) {
+      return null;
+    }
+    return this.contents.get(key)?.documents.find((document) => document.id === last.id && document.revision === last.revision) ?? null;
+  }
+
+  /**
+   * A bookmark chosen in the list: item `id` of the open document `documentId` in the active
+   * pane, or in the other pane while that one shows the document; focused, in view and with
+   * the keyboard, in the list or the diagram. A hidden item is shown again, and a filter that
+   * leaves it out is cleared. A document reopened for it may not be here yet: the jump waits
+   * for its content.
+   */
+  jumpTo(key, documentId, id) {
+    this.closeMenu();
+    const document = documentsOf(this.contents.get(key), false).find((candidate) => candidate.id === documentId);
+    if (!document) {
+      this.pendingJump = { key, documentId, id };
+      return;
+    }
+    this.pendingJump = null;
+    const pane = this.paneShowing(key, documentId) ?? this.activePane(key);
+    if (this.isSplit(key)) {
+      this.storeView(key, { activePane: paneSide(pane) });
+    }
+    if (this.current(pane)?.document.id !== documentId) {
+      this.showDocument(pane, documentId);
+    }
+    const hidden = this.view(key).hidden;
+    if (hidden.includes(id)) {
+      this.storeView(key, { hidden: hidden.filter((other) => other !== id) });
+    }
+    const view = this.paneView(pane);
+    const shown = buildRows(document, new Set(view.hidden), view.filter).some((row) => row.id === id);
+    this.updatePane(pane, { focus: id, ...(shown ? {} : { filter: '' }) });
+    if (this.mode(pane) === 'diagram') {
+      this.diagramView(pane).revealItem(documentId, id);
+    } else {
+      this.listView(pane).reveal(id);
+      this.focusPane(pane);
+    }
+  }
+
+  /** Reopen in the list: reopens the closed document for everyone, then goes to the bookmarked item. */
+  async reopenToBookmark(key, document, id) {
+    this.closeMenu();
+    if (!this.requireLive(key)) {
+      return;
+    }
+    await this.send(
+      key,
+      { type: 'action', document_id: document.id, expected_revision: document.revision, action: { action: 'reopen' } },
+      { sending: 'Reopening…', done: `Reopened “${document.title}”.`, onSuccess: () => this.jumpTo(key, document.id, id) },
+    );
+  }
+
   hide(pane) {
     const targets = this.pickedTargets(pane);
     if (targets.length === 0) {
@@ -2204,6 +2504,18 @@ class App {
       return;
     }
     const current = this.current(pane);
+    const bookmarked = this.justBookmarked(key);
+    if (bookmarked && bookmarked.id !== current?.document.id) {
+      if (!this.requireLive(key)) {
+        return;
+      }
+      await this.send(
+        key,
+        { type: 'undo', document_id: bookmarked.id, expected_revision: bookmarked.revision },
+        { sending: 'Undoing…', done: `Undid the bookmark change in “${bookmarked.title}”.`, errors },
+      );
+      return;
+    }
     if (!this.requireLive(key) || !current) {
       return;
     }
@@ -2219,9 +2531,11 @@ class App {
    * runs `onError` and shows the error, in the words of `errors[code]` when given.
    */
   async send(key, command, { sending, done, errors = {}, onSuccess = null, onError = null }) {
-    // Any command ends the moment right after a close.
+    // Any command ends the moment right after a close or a bookmark change, and a jump still waiting.
     this.commandCount += 1;
     this.lastClosed = null;
+    this.lastBookmarked = null;
+    this.pendingJump = null;
     let id;
     try {
       id = await this.backend.send(key, command);
@@ -2322,8 +2636,8 @@ class App {
     if (!key) {
       return;
     }
-    // Holding Enter or E must not ask again and again.
-    if ((event.key === 'Enter' || event.key === 'e') && event.repeat) {
+    // Holding Enter or E must not ask again and again, nor B toggle the bookmark or Shift+B the list.
+    if ((event.key === 'Enter' || event.key === 'e' || event.key === 'b' || event.key === 'B') && event.repeat) {
       event.preventDefault();
       return;
     }
@@ -2342,6 +2656,8 @@ class App {
       Escape: () => this.clearSelection(pane),
       Enter: () => this.ask(pane),
       e: () => this.explain(pane),
+      b: () => this.bookmark(pane),
+      B: () => this.openBookmarks(key),
       a: () => this.accept(pane),
       h: () => this.hide(pane),
       H: () => this.updateView(key, { hidden: [] }),
@@ -2394,6 +2710,10 @@ class App {
   }
 
   onMenuKey(event) {
+    if (this.menu.bookmarks) {
+      this.onBookmarksKey(event);
+      return;
+    }
     const items = [...this.menuElement.querySelectorAll('button')];
     const index = items.indexOf(document.activeElement);
     if (event.key === 'Escape') {
@@ -2403,6 +2723,36 @@ class App {
       event.preventDefault();
       const step = event.key === 'ArrowDown' ? 1 : -1;
       items[(index + step + items.length) % items.length]?.focus();
+    }
+  }
+
+  /**
+   * Keys in the bookmarks list: J, K and the arrows move between entries, Enter and Space
+   * press the focused button, Delete and Backspace remove the entry's bookmark; Esc or
+   * Shift+B closes the list.
+   */
+  onBookmarksKey(event) {
+    const jumps = [...this.menuElement.querySelectorAll('.bookmark-jump')];
+    const entry = document.activeElement?.closest?.('.bookmark-entry') ?? null;
+    const index = jumps.indexOf(entry?.querySelector('.bookmark-jump'));
+    const step = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 }[event.key];
+    if (event.key === 'Escape' || event.key === 'B') {
+      event.preventDefault();
+      // Holding Shift+B must not open and close the list again and again.
+      if (!event.repeat) {
+        this.closeBookmarks();
+      }
+    } else if (step && jumps.length > 0) {
+      event.preventDefault();
+      const next = index === -1 ? (step > 0 ? 0 : jumps.length - 1) : Math.min(Math.max(index + step, 0), jumps.length - 1);
+      jumps[next].focus();
+    } else if ((event.key === 'Enter' || event.key === ' ') && this.menuElement.contains(document.activeElement)) {
+      // Pressed here, so the button acts once whether or not the browser would click it.
+      event.preventDefault();
+      document.activeElement.click();
+    } else if ((event.key === 'Delete' || event.key === 'Backspace') && entry) {
+      event.preventDefault();
+      entry.querySelector('.close')?.click();
     }
   }
 }

@@ -718,3 +718,118 @@ fn the_publish_tool_sets_or_keeps_the_lane_orientation_and_inspect_returns_it() 
     let shown = apply_operation(&mut store, &fixture.binding, inspect()).unwrap();
     assert!(shown.get("lanes").is_none(), "{shown}");
 }
+
+#[test]
+fn tools_bookmark_items_and_inspect_shows_the_bookmarks_by_document() {
+    use prism::actions::{ContentAction, ElementInput, PublishRequest};
+    use prism::bridge::{ActionParams, apply_operation};
+    use prism::model::{ElementKind, Id};
+    use prism::store::Store;
+    use serde_json::json;
+    let mut fixture = Fixture::new();
+    fixture
+        .binding
+        .bind_conversation(&Uuid::new_v4().to_string())
+        .unwrap();
+    let mut store = Store::open(":memory:").unwrap();
+    let element = Id::new_v4();
+    let request = PublishRequest {
+        request_id: Id::new_v4(),
+        document_id: None,
+        expected_revision: None,
+        title: "Plan".into(),
+        elements: vec![ElementInput {
+            id: element,
+            title: "Node".into(),
+            body: "Body".into(),
+            kind: ElementKind::Text,
+            source: None,
+        }],
+        relationships: vec![],
+        groups: vec![],
+        lanes: None,
+    };
+    let published =
+        apply_operation(&mut store, &fixture.binding, Operation::Publish(request)).unwrap();
+    let document = Id::parse_str(published["document_id"].as_str().unwrap()).unwrap();
+    let action = |revision: u64, action: serde_json::Value| {
+        prism::mcp::operation(
+            "prism_action",
+            json!({"document_id": document, "expected_revision": revision, "action": action}),
+        )
+        .unwrap()
+    };
+    let inspect = |document_id| {
+        Operation::Inspect(InspectParams {
+            document_id,
+            cursor: None,
+        })
+    };
+
+    // The tool's bookmark: an item mark, at the expected revision.
+    let marked = apply_operation(
+        &mut store,
+        &fixture.binding,
+        action(1, json!({"action": "bookmark", "ids": [element]})),
+    )
+    .unwrap();
+    assert_eq!(marked["revision"], 2);
+    // The app's bookmark of selected text, through the same shared action.
+    apply_operation(
+        &mut store,
+        &fixture.binding,
+        Operation::Action(ActionParams {
+            document_id: document,
+            expected_revision: 2,
+            action: ContentAction::Bookmark {
+                ids: vec![element],
+                quote: Some("Bo".into()),
+            },
+        }),
+    )
+    .unwrap();
+
+    // The listing counts them per document; inspecting the document lists them.
+    let listed = apply_operation(&mut store, &fixture.binding, inspect(None)).unwrap();
+    assert_eq!(listed["documents"][0]["bookmarks"], 2);
+    let shown = apply_operation(&mut store, &fixture.binding, inspect(Some(document))).unwrap();
+    let mut marks: Vec<_> = shown["bookmarks"]
+        .as_object()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    marks.sort_by_key(|mark| mark["order"].as_u64());
+    assert_eq!(
+        marks
+            .iter()
+            .map(|mark| (mark["item"].clone(), mark["quote"].clone()))
+            .collect::<Vec<_>>(),
+        vec![(json!(element), json!(null)), (json!(element), json!("Bo"))]
+    );
+
+    // Unbookmark takes an item ID (its mark on the whole item) or a bookmark ID.
+    apply_operation(
+        &mut store,
+        &fixture.binding,
+        action(3, json!({"action": "unbookmark", "ids": [element]})),
+    )
+    .unwrap();
+    apply_operation(
+        &mut store,
+        &fixture.binding,
+        action(4, json!({"action": "unbookmark", "ids": [marks[1]["id"]]})),
+    )
+    .unwrap();
+    let listed = apply_operation(&mut store, &fixture.binding, inspect(None)).unwrap();
+    assert_eq!(listed["documents"][0]["bookmarks"], 0);
+    let shown = apply_operation(&mut store, &fixture.binding, inspect(Some(document))).unwrap();
+    assert!(shown.get("bookmarks").is_none(), "{shown}");
+    let missing = apply_operation(
+        &mut store,
+        &fixture.binding,
+        action(5, json!({"action": "unbookmark", "ids": [element]})),
+    )
+    .unwrap_err();
+    assert!(missing.to_string().contains("no bookmark"), "{missing}");
+}

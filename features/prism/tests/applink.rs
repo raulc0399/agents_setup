@@ -900,6 +900,125 @@ fn closing_from_the_app_or_the_tools_crosses_as_the_closed_set() {
 }
 
 #[test]
+fn bookmarks_from_the_app_and_the_tools_cross_with_their_document() {
+    let fixture = Fixture::new();
+    let bridge = fixture.start_bridge();
+    let (document, element) = fixture.publish("Marked");
+    let (mut socket, ..) = fixture.connect();
+    let action = |id, expected_revision, action| AppMessage::Action {
+        id,
+        document_id: document,
+        expected_revision,
+        action,
+    };
+    let quotes = |documents: &[Document]| {
+        let mut marks: Vec<_> = documents[0].bookmarks.values().cloned().collect();
+        marks.sort_by_key(|mark| mark.order);
+        marks
+            .into_iter()
+            .map(|mark| (mark.item, mark.quote))
+            .collect::<Vec<_>>()
+    };
+
+    // The app bookmarks text selected in the item: the document crosses with it.
+    let selected = Id::new_v4();
+    send(
+        &mut socket,
+        &action(
+            selected,
+            1,
+            ContentAction::Bookmark {
+                ids: vec![element],
+                quote: Some("Bod".into()),
+            },
+        ),
+    );
+    let (documents, _) = update(&mut socket);
+    assert_eq!(documents[0].revision, 2);
+    assert_eq!(quotes(&documents), vec![(element, Some("Bod".into()))]);
+    assert_eq!(reply(&mut socket, selected), None);
+
+    // The agent bookmarks the whole item through its tool; the app sees it.
+    fixture.call(Operation::Action(ActionParams {
+        document_id: document,
+        expected_revision: 2,
+        action: ContentAction::Bookmark {
+            ids: vec![element],
+            quote: None,
+        },
+    }));
+    let (documents, _) = update(&mut socket);
+    assert_eq!(
+        quotes(&documents),
+        vec![(element, Some("Bod".into())), (element, None)]
+    );
+
+    // The tool bookmarks whole items only: a quote is text selected in the app.
+    let quoted = BridgeClient::new(&fixture.binding_path).unwrap().call(
+        &fixture.conversation,
+        Operation::Action(ActionParams {
+            document_id: document,
+            expected_revision: 3,
+            action: ContentAction::Bookmark {
+                ids: vec![element],
+                quote: Some("Body".into()),
+            },
+        }),
+    );
+    assert!(
+        quoted
+            .unwrap_err()
+            .to_string()
+            .contains("bookmarks of selected text are made in the app")
+    );
+
+    // U in the app takes it back; the app removes the selection's bookmark by its ID.
+    let undo = Id::new_v4();
+    send(
+        &mut socket,
+        &AppMessage::Undo {
+            id: undo,
+            document_id: document,
+            expected_revision: 3,
+        },
+    );
+    let (documents, _) = update(&mut socket);
+    assert_eq!(quotes(&documents), vec![(element, Some("Bod".into()))]);
+    assert_eq!(reply(&mut socket, undo), None);
+    let bookmark = *documents[0].bookmarks.keys().next().unwrap();
+    let removed = Id::new_v4();
+    send(
+        &mut socket,
+        &action(
+            removed,
+            4,
+            ContentAction::Unbookmark {
+                ids: vec![bookmark],
+            },
+        ),
+    );
+    let (documents, _) = update(&mut socket);
+    assert!(documents[0].bookmarks.is_empty());
+    assert_eq!(reply(&mut socket, removed), None);
+    let again = Id::new_v4();
+    send(
+        &mut socket,
+        &action(
+            again,
+            5,
+            ContentAction::Unbookmark {
+                ids: vec![bookmark],
+            },
+        ),
+    );
+    assert!(matches!(
+        reply(&mut socket, again),
+        Some(CommandError::Invalid { message }) if message.contains("no bookmark")
+    ));
+    fixture.stop(bridge, socket);
+}
+
+#[test]
 fn ask_resent_after_reconnect_is_shared_once() {
     let fixture = Fixture::new();
     let bridge = fixture.start_bridge();

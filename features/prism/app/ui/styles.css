@@ -512,8 +512,34 @@ button {
   border-color: var(--accent);
 }
 
-.toolbar .closed-documents {
+.toolbar .closed-documents,
+.toolbar .bookmarks-control {
   flex: none;
+}
+
+/* The bookmark ribbon (`bookmarkIcon` in list.js), in the color of the text around it. */
+.bookmark-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+
+/* Read by assistive technology, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Bookmark in the pane's actions: pressed while every item it acts on is bookmarked. */
+.button.bookmark[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--selected-bg);
+  color: var(--accent);
 }
 
 .menu.closed-menu {
@@ -922,6 +948,19 @@ button {
 
 /* The state of an item's latest explain request, as for questions: on its way, in the
    prompt box, explained, not delivered, no explanation arrived. */
+.badge.bookmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.badge.bookmark .bookmark-icon {
+  width: 10px;
+  height: 10px;
+}
+
 .badge.explanation.state-waiting {
   color: var(--muted);
   font-style: italic;
@@ -1286,6 +1325,99 @@ button {
   font-size: 11px;
 }
 
+/* The focused item's bookmarks: the whole item and each quoted selection, with its remove control. */
+.panel-bookmarks {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface-muted);
+}
+
+.panel-bookmarks h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.panel-bookmarks ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.panel-bookmark {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-bookmark .bookmark-quote,
+.panel-bookmark .bookmark-whole {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.bookmark-quote {
+  padding-left: 8px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.bookmark-whole {
+  color: var(--muted);
+}
+
+.chip.text-changed {
+  flex: none;
+  height: 18px;
+  padding: 0 7px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: 11px;
+}
+
+.panel-bookmark .close,
+.bookmark-entry .close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.panel-bookmark .close:hover:not(:disabled),
+.bookmark-entry .close:hover:not(:disabled) {
+  background: var(--chrome-hover);
+  color: var(--text);
+}
+
+.panel-bookmark .close:disabled,
+.bookmark-entry .close:disabled {
+  opacity: 0.45;
+}
+
 /* The latest explanation of the focused item, as plain text; the quote is what it explains. */
 .panel-explanation {
   display: grid;
@@ -1406,7 +1538,8 @@ button {
   .diagram-svg[data-zoom] .prism-kind,
   .diagram-svg[data-zoom] .prism-number,
   .diagram-svg[data-zoom] .prism-dropped-label,
-  .diagram-svg[data-zoom] .prism-explained {
+  .diagram-svg[data-zoom] .prism-explained,
+  .diagram-svg[data-zoom] .prism-bookmarked {
     transition: opacity 150ms ease-out;
   }
 }
@@ -1418,7 +1551,8 @@ button {
 .diagram-svg[data-zoom="far"] .prism-kind,
 .diagram-svg[data-zoom="far"] .prism-number,
 .diagram-svg[data-zoom="far"] .prism-dropped-label,
-.diagram-svg[data-zoom="far"] .prism-explained {
+.diagram-svg[data-zoom="far"] .prism-explained,
+.diagram-svg[data-zoom="far"] .prism-bookmarked {
   opacity: 0;
 }
 
@@ -1617,6 +1751,17 @@ button {
 
 .diagram-svg .prism-explained.prism-state-waiting .prism-explained-label {
   font-style: italic;
+}
+
+/* The bookmark badge diagram.js puts on a box whose item is bookmarked, as the card's. */
+.diagram-svg .prism-bookmarked-shape {
+  fill: var(--surface);
+  stroke: var(--accent);
+  vector-effect: non-scaling-stroke;
+}
+
+.diagram-svg .prism-bookmarked-icon {
+  fill: var(--accent);
 }
 
 /* Selected items: tinted, under the focus highlight. */
@@ -1916,6 +2061,126 @@ button {
   background: var(--accent);
   color: var(--accent-text);
   outline: none;
+}
+
+/* The bookmarks list: an entry per bookmark, its document, item and quote, with Reopen and ×. */
+.menu.bookmarks-menu {
+  display: grid;
+  gap: 2px;
+  width: min(420px, calc(100vw - 16px));
+  max-height: min(520px, calc(100vh - 120px));
+  overflow-y: auto;
+}
+
+.bookmarks-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 10px 6px;
+}
+
+.bookmarks-heading h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.bookmarks-heading .hint,
+.menu.bookmarks-menu > .hint {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.menu.bookmarks-menu > .hint {
+  margin: 0;
+  padding: 0 10px 6px;
+}
+
+.bookmark-entry {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  border-radius: 5px;
+}
+
+.menu .bookmark-jump {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+  white-space: normal;
+}
+
+.bookmark-where,
+.bookmark-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bookmark-document {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmark-where .chip {
+  height: 18px;
+  font-size: 11px;
+}
+
+.bookmark-item .number {
+  flex: none;
+  color: var(--faint);
+}
+
+.bookmark-item .title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Up to two lines of the quote; the side pane shows all of it. */
+.bookmark-jump .bookmark-quote {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.bookmark-jump .chip.text-changed {
+  justify-self: start;
+}
+
+.menu .bookmark-jump:hover *,
+.menu .bookmark-jump:focus-visible * {
+  color: inherit;
+}
+
+.menu .bookmark-jump:hover .bookmark-quote,
+.menu .bookmark-jump:focus-visible .bookmark-quote {
+  border-left-color: currentColor;
+}
+
+/* A closed document's bookmark: greyed until its Reopen brings the document back. */
+.bookmark-entry.closed .bookmark-jump {
+  opacity: 0.6;
+}
+
+.menu .bookmark-entry .reopen {
+  display: inline-flex;
+  flex: none;
+  width: auto;
+  border: 1px solid var(--border-strong);
+}
+
+.menu .bookmark-entry .close {
+  width: 22px;
 }
 
 .menu hr {

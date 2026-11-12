@@ -29,6 +29,10 @@
 //! the whole closed set; an `update` always carries the whole set after its change, which
 //! replaces the previous one. Questions and answers on a closed document cross as before.
 //!
+//! Bookmarks: the user's marks on items are shared state too, records of their document
+//! (`Document::bookmarks`) that cross with it. The `bookmark` and `unbookmark` actions change
+//! them like any other action; protocol 3 added them.
+//!
 //! Commands: the app sends commands with a fresh `id`; the bridge answers each one it
 //! receives with a `reply` carrying that `id`, after the `update` (or, for `fetch`, the
 //! `snapshot`) it caused. A command sent just before a connection dropped may have committed
@@ -47,7 +51,7 @@ use uuid::Uuid;
 /// Versioning rule: a new optional field does not change this number, and an older peer
 /// ignores it. A new message type, a new required field or a changed meaning increases it.
 /// Peers with different numbers refuse each other with `refused`.
-pub const APP_PROTOCOL: u32 = 2;
+pub const APP_PROTOCOL: u32 = 3;
 
 /// Largest WebSocket message either side sends or accepts. Snapshot frames pack records up
 /// to `MAX_PAYLOAD_BYTES`, and the store refuses any single record larger than that, so a

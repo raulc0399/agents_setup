@@ -1510,3 +1510,524 @@ fn questions_stored_before_intents_load_and_explain_requests_keep_theirs() {
         Some(Intent::Explain)
     );
 }
+
+fn bookmark(ids: Vec<Id>, quote: Option<&str>) -> ContentAction {
+    ContentAction::Bookmark {
+        ids,
+        quote: quote.map(str::to_owned),
+    }
+}
+
+/// The document's bookmarks as (item, quote, order), in the order they were made.
+fn bookmarks(store: &Store, workspace: Id, document: Id) -> Vec<(Id, Option<String>, u64)> {
+    let mut marks: Vec<_> = store
+        .document(workspace, document)
+        .unwrap()
+        .bookmarks
+        .into_values()
+        .map(|mark| (mark.item, mark.quote, mark.order))
+        .collect();
+    marks.sort_by_key(|(_, _, order)| *order);
+    marks
+}
+
+#[test]
+fn bookmarks_mark_items_and_selections_at_the_expected_revision() {
+    let (mut store, workspace, request, result) = setup();
+    let document = result.document_id;
+    let [source, sink] = [request.elements[0].id, request.elements[1].id];
+    let link = request.relationships[0].id;
+    store
+        .apply(
+            workspace,
+            document,
+            1,
+            &ContentAction::Archive { ids: vec![sink] },
+        )
+        .unwrap();
+    assert!(matches!(
+        store.apply(workspace, document, 1, &bookmark(vec![source], None)),
+        Err(Error::Conflict { current: 2 })
+    ));
+
+    // A dropped item and an arrow can be bookmarked too; each mark is a new revision.
+    let marked = store
+        .apply(
+            workspace,
+            document,
+            2,
+            &bookmark(vec![source, sink, link], None),
+        )
+        .unwrap();
+    assert_eq!(marked.revision, 3);
+    store
+        .apply(
+            workspace,
+            document,
+            3,
+            &bookmark(vec![source], Some("Orig")),
+        )
+        .unwrap();
+    store
+        .apply(
+            workspace,
+            document,
+            4,
+            &bookmark(vec![source], Some("inal")),
+        )
+        .unwrap();
+    assert_eq!(
+        bookmarks(&store, workspace, document),
+        vec![
+            (source, None, 0),
+            (sink, None, 1),
+            (link, None, 2),
+            (source, Some("Orig".into()), 3),
+            (source, Some("inal".into()), 4),
+        ]
+    );
+
+    // Refused, and nothing changes: a mark made already, a quote for several items or
+    // without text, an unknown item, an ID that is no bookmark.
+    for (action, message) in [
+        (bookmark(vec![source], None), "item is already bookmarked"),
+        (
+            bookmark(vec![source], Some("Orig")),
+            "text is already bookmarked",
+        ),
+        (
+            bookmark(vec![source, sink], Some("Orig")),
+            "a bookmark with a quote marks one item and needs the selected text",
+        ),
+        (
+            bookmark(vec![source], Some("  ")),
+            "a bookmark with a quote marks one item and needs the selected text",
+        ),
+        (
+            bookmark(vec![Id::new_v4()], None),
+            "bookmark of missing content",
+        ),
+        (
+            ContentAction::Unbookmark {
+                ids: vec![Id::new_v4()],
+            },
+            "no bookmark with this ID, nor on the whole item",
+        ),
+    ] {
+        assert!(
+            matches!(store.apply(workspace, document, 5, &action), Err(Error::Invalid(ref text)) if text == message),
+            "{action:?}"
+        );
+    }
+    assert_eq!(store.document(workspace, document).unwrap().revision, 5);
+
+    // An item's ID removes its mark on the whole item; a bookmark's ID that bookmark.
+    let quoted = store
+        .document(workspace, document)
+        .unwrap()
+        .bookmarks
+        .into_values()
+        .find(|mark| mark.quote.as_deref() == Some("Orig"))
+        .unwrap()
+        .id;
+    store
+        .apply(
+            workspace,
+            document,
+            5,
+            &ContentAction::Unbookmark {
+                ids: vec![source, quoted],
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        bookmarks(&store, workspace, document),
+        vec![
+            (sink, None, 1),
+            (link, None, 2),
+            (source, Some("inal".into()), 4)
+        ]
+    );
+    // A new mark goes after the highest position.
+    store
+        .apply(workspace, document, 6, &bookmark(vec![source], None))
+        .unwrap();
+    assert_eq!(bookmarks(&store, workspace, document)[3], (source, None, 5));
+}
+
+#[test]
+fn undo_takes_back_the_latest_bookmark_change_and_leaves_other_ones() {
+    let (mut store, workspace, request, result) = setup();
+    let document = result.document_id;
+    let source = request.elements[0].id;
+    store
+        .apply(
+            workspace,
+            document,
+            1,
+            &ContentAction::Accept { ids: vec![source] },
+        )
+        .unwrap();
+    store
+        .apply(workspace, document, 2, &bookmark(vec![source], None))
+        .unwrap();
+    store
+        .apply(
+            workspace,
+            document,
+            3,
+            &bookmark(vec![source], Some("Original")),
+        )
+        .unwrap();
+    store
+        .apply(
+            workspace,
+            document,
+            4,
+            &ContentAction::Unbookmark { ids: vec![source] },
+        )
+        .unwrap();
+
+    // Undoing the removal brings the mark back with its position; undoing an addition removes it.
+    let undone = store.undo_latest(workspace, document, 5).unwrap();
+    assert_eq!(undone.revision, 6);
+    assert_eq!(
+        bookmarks(&store, workspace, document),
+        vec![(source, None, 0), (source, Some("Original".into()), 1)]
+    );
+    store.undo_latest(workspace, document, 6).unwrap();
+    assert_eq!(
+        bookmarks(&store, workspace, document),
+        vec![(source, None, 0)]
+    );
+    // The acceptance before them is undone without touching the bookmark made after it.
+    store.undo_latest(workspace, document, 7).unwrap();
+    store.undo_latest(workspace, document, 8).unwrap();
+    let document_now = store.document(workspace, document).unwrap();
+    assert!(document_now.bookmarks.is_empty());
+    assert_eq!(document_now.elements[&source].accepted_revision, None);
+
+    // A bookmark removed since cannot be removed by an undo: the undo conflicts.
+    store
+        .apply(workspace, document, 9, &bookmark(vec![source], None))
+        .unwrap();
+    let marked = store.undo_records(workspace, document).unwrap();
+    store
+        .apply(
+            workspace,
+            document,
+            10,
+            &ContentAction::Unbookmark { ids: vec![source] },
+        )
+        .unwrap();
+    assert!(matches!(
+        store.undo(workspace, document, 11, *marked.last().unwrap()),
+        Err(Error::UndoConflict)
+    ));
+}
+
+#[test]
+fn bookmarks_survive_publish_close_reopen_and_restart_and_are_ordered_across_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let request = publication();
+    let first = store.publish(workspace, &request).unwrap();
+    let second = store.publish(workspace, &publication()).unwrap();
+    let source = request.elements[0].id;
+    store
+        .apply(
+            workspace,
+            first.document_id,
+            1,
+            &bookmark(vec![source], Some("Original")),
+        )
+        .unwrap();
+    // The next bookmark of the conversation, in another document, comes after it.
+    let other = store
+        .document(workspace, second.document_id)
+        .unwrap()
+        .elements
+        .into_keys()
+        .next()
+        .unwrap();
+    store
+        .apply(
+            workspace,
+            second.document_id,
+            1,
+            &bookmark(vec![other], None),
+        )
+        .unwrap();
+    assert_eq!(
+        bookmarks(&store, workspace, second.document_id),
+        vec![(other, None, 1)]
+    );
+
+    // The agent revises the text: the quote stays as it was bookmarked.
+    let mut revised = edit(&request, &first, 2);
+    revised.elements[0].body = "Rewritten".into();
+    store.publish(workspace, &revised).unwrap();
+    store
+        .apply(workspace, first.document_id, 3, &ContentAction::Close {})
+        .unwrap();
+    assert_eq!(
+        bookmarks(&store, workspace, first.document_id),
+        vec![(source, Some("Original".into()), 0)]
+    );
+    store
+        .apply(workspace, first.document_id, 4, &ContentAction::Reopen {})
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        bookmarks(&store, workspace, first.document_id),
+        vec![(source, Some("Original".into()), 0)]
+    );
+    let listed = store.documents(workspace).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|document| document.bookmarks.len())
+            .sum::<usize>(),
+        2
+    );
+}
+
+#[test]
+fn bookmarks_column_is_added_to_an_older_store_and_kept_by_older_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let request = publication();
+    let published = store.publish(workspace, &request).unwrap();
+    drop(store);
+    // A store an older binary wrote has no `bookmarks` column; its documents load without them.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE documents DROP COLUMN bookmarks;")
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(&path).unwrap();
+    let loaded = store.document(workspace, published.document_id).unwrap();
+    assert!(loaded.bookmarks.is_empty());
+    assert_eq!(loaded.revision, 1);
+    store
+        .apply(
+            workspace,
+            published.document_id,
+            1,
+            &bookmark(vec![request.elements[0].id], None),
+        )
+        .unwrap();
+    drop(store);
+
+    // `content` keeps only what an older binary knows; its upsert names only those columns,
+    // and an older binary's parse of `content` sees a document as before.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let content: String = connection
+        .query_row("SELECT content FROM documents", [], |row| row.get(0))
+        .unwrap();
+    assert!(!content.contains("bookmarks"), "{content}");
+    connection
+        .execute(
+            "INSERT INTO documents(workspace_id, id, revision, content)
+             SELECT workspace_id, id, revision + 1, content FROM documents WHERE true
+             ON CONFLICT(workspace_id, id) DO UPDATE SET revision=excluded.revision, content=excluded.content",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        bookmarks(&store, workspace, published.document_id),
+        vec![(request.elements[0].id, None, 0)]
+    );
+}
+
+#[test]
+fn undo_records_written_before_bookmarks_still_undo_and_keep_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let request = publication();
+    let result = store.publish(workspace, &request).unwrap();
+    let [source, sink] = [request.elements[0].id, request.elements[1].id];
+    store
+        .apply(
+            workspace,
+            result.document_id,
+            1,
+            &bookmark(vec![source], None),
+        )
+        .unwrap();
+    store
+        .apply(
+            workspace,
+            result.document_id,
+            2,
+            &ContentAction::Archive { ids: vec![sink] },
+        )
+        .unwrap();
+    drop(store);
+    // The archive's record as an older binary wrote it: documents without bookmarks.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE undo_records SET content=json_remove(content, '$.before.bookmarks', '$.after.bookmarks')
+             WHERE rowid=(SELECT MAX(rowid) FROM undo_records)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(&path).unwrap();
+    let undone = store.undo_latest(workspace, result.document_id, 3).unwrap();
+    assert!(!undone.elements[&sink].archived);
+    assert_eq!(
+        bookmarks(&store, workspace, result.document_id),
+        vec![(source, None, 0)]
+    );
+}
+
+#[test]
+fn bookmarks_are_bounded_per_document() {
+    let mut store = Store::open(":memory:").unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let mut request = publication();
+    request.relationships.clear();
+    request.groups.clear();
+    request.elements = (0..MAX_BOOKMARKS)
+        .map(|index| ElementInput {
+            id: Id::new_v4(),
+            title: format!("Item {index}"),
+            body: String::new(),
+            kind: ElementKind::Text,
+            source: None,
+        })
+        .collect();
+    let result = store.publish(workspace, &request).unwrap();
+    let document = result.document_id;
+    let ids: Vec<Id> = request.elements.iter().map(|item| item.id).collect();
+
+    // At the limit, then refused: one more is invalid and nothing changes.
+    store
+        .apply(workspace, document, 1, &bookmark(ids.clone(), None))
+        .unwrap();
+    assert_eq!(
+        store.document(workspace, document).unwrap().bookmarks.len(),
+        MAX_BOOKMARKS
+    );
+    assert!(matches!(
+        store.apply(workspace, document, 2, &bookmark(vec![ids[0]], Some("more"))),
+        Err(Error::Invalid(message)) if message == format!("a document holds at most {MAX_BOOKMARKS} bookmarks")
+    ));
+    assert_eq!(store.document(workspace, document).unwrap().revision, 2);
+}
+
+#[test]
+fn bookmark_quotes_are_bounded_and_the_document_stays_one_snapshot_record() {
+    let (mut store, workspace, request, result) = setup();
+    let document = result.document_id;
+    let source = request.elements[0].id;
+    let over = "q".repeat(MAX_QUOTE_BYTES + 1);
+    assert!(matches!(
+        store.apply(workspace, document, 1, &bookmark(vec![source], Some(&over))),
+        Err(Error::Invalid(message)) if message == format!("bookmark quote exceeds {MAX_QUOTE_BYTES} bytes")
+    ));
+
+    // Quotes at their limit until the document, bookmarks included, would outgrow a record.
+    let mut revision = 1;
+    let refused = loop {
+        let quote = format!("{revision:05}{}", "q".repeat(MAX_QUOTE_BYTES - 5));
+        match store.apply(
+            workspace,
+            document,
+            revision,
+            &bookmark(vec![source], Some(&quote)),
+        ) {
+            Ok(done) => revision = done.revision,
+            Err(error) => break error,
+        }
+    };
+    assert!(
+        matches!(&refused, Error::Invalid(message) if message == &format!("payload exceeds {MAX_PAYLOAD_BYTES} bytes")),
+        "{refused}"
+    );
+    let stored = store.document(workspace, document).unwrap();
+    assert_eq!(stored.revision, revision);
+    let frames = prism_core::protocol::snapshot_frames(vec![stored], vec![], vec![]);
+    assert!(frames.is_ok(), "the app can still load the conversation");
+}
+
+#[test]
+fn bookmark_positions_are_never_given_out_twice() {
+    let mut store = Store::open(":memory:").unwrap();
+    let workspace = store.workspace(&key("thread-1")).unwrap().id;
+    let first_request = publication();
+    let second_request = publication();
+    let first = store
+        .publish(workspace, &first_request)
+        .unwrap()
+        .document_id;
+    let second = store
+        .publish(workspace, &second_request)
+        .unwrap()
+        .document_id;
+    let [a, b] = [first_request.elements[0].id, second_request.elements[0].id];
+    store
+        .apply(workspace, first, 1, &bookmark(vec![a], None))
+        .unwrap();
+    store
+        .apply(workspace, second, 1, &bookmark(vec![b], None))
+        .unwrap();
+    // Removing the latest one leaves its position given out: the next bookmark takes a new one.
+    store
+        .apply(
+            workspace,
+            second,
+            2,
+            &ContentAction::Unbookmark { ids: vec![b] },
+        )
+        .unwrap();
+    let c = first_request.elements[1].id;
+    store
+        .apply(workspace, first, 2, &bookmark(vec![c], None))
+        .unwrap();
+    // Undoing the removal brings the bookmark back with its own position: no two share one.
+    store.undo_latest(workspace, second, 3).unwrap();
+    let mut orders: Vec<u64> = [first, second]
+        .into_iter()
+        .flat_map(|document| bookmarks(&store, workspace, document))
+        .map(|(_, _, order)| order)
+        .collect();
+    orders.sort();
+    assert_eq!(orders, vec![0, 1, 2]);
+    assert_eq!(bookmarks(&store, workspace, second), vec![(b, None, 1)]);
+    assert_eq!(bookmarks(&store, workspace, first)[1], (c, None, 2));
+}
+
+#[test]
+fn the_same_quote_with_other_whitespace_is_the_same_bookmark() {
+    let (mut store, workspace, request, result) = setup();
+    let source = request.elements[0].id;
+    store
+        .apply(
+            workspace,
+            result.document_id,
+            1,
+            &bookmark(vec![source], Some("First line\n\nsecond  line")),
+        )
+        .unwrap();
+    assert!(matches!(
+        store.apply(workspace, result.document_id, 2, &bookmark(vec![source], Some(" First line second line "))),
+        Err(Error::Invalid(message)) if message == "text is already bookmarked"
+    ));
+    // The quote is kept as written, paragraphs included.
+    assert_eq!(
+        bookmarks(&store, workspace, result.document_id),
+        vec![(source, Some("First line\n\nsecond  line".into()), 0)]
+    );
+}

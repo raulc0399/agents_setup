@@ -4,7 +4,8 @@ description: Publish lists, plans, findings and diagrams to Prism when the user 
 ---
 
 Use the native Prism tools for content the user asks to see visually. Do not
-automatically extract conversation content or open another agent conversation.
+automatically extract conversation content (the Decided lines below are the one
+exception) or open another agent conversation.
 
 - Call `mcp__prism__inspect` before revising existing content; preserve stable
   IDs and use its current document revision when calling `mcp__prism__publish`
@@ -31,8 +32,13 @@ automatically extract conversation content or open another agent conversation.
   open points; these show as badges on the box they point at.
 - Treat acceptance as content feedback, never permission to implement changes.
 - All Prism content and document state is shared through the bridge store: a
-  close, drop, accept, question or answer is seen by you and every app view;
-  there is no app-local document state.
+  close, drop, accept, bookmark, question or answer is seen by you and every app
+  view; there is no app-local document state.
+- Bookmarks are the user's marks for things to come back to: `mcp__prism__inspect`
+  counts them per document and lists them in a document (item ID, quote when
+  the user marked selected text); read them when the user refers to "the
+  bookmarked items". Do not add or remove them with `mcp__prism__action`
+  (`bookmark`, `unbookmark`) unless the user asks.
 - Close or reopen a whole document with `mcp__prism__action` (`close` or
   `reopen`, no `ids`) only when asked; `mcp__prism__inspect` marks closed
   documents, and publishing to a closed document reopens it.
@@ -55,6 +61,20 @@ automatically extract conversation content or open another agent conversation.
 - Retrieve other shared questions only when the user explicitly asks, using
   `mcp__prism__questions`; answer in this exact conversation, then revise the
   referenced content if asked.
+- When a discussion about an item ends in a decision or a change the user agreed
+  to, record it in Prism; this is the one exception to not extracting
+  conversation content automatically, and only after the user agreed. For an
+  item of a list document, append a line
+  `Decided (YYYY-MM-DD): <decision or change>. Why: <reason>.` to its body and
+  republish it with `mcp__prism__publish`, keeping earlier Decided lines; the item keeps
+  its number and place. For an item of a diagram, whose box body stays at 5
+  words, do not append to the box: revise the diagram itself if the decision
+  changes it, and record the Decided line on the matching item of the plan or
+  review list or, when there is none, in a list document titled "Decisions"
+  with one item per decision that names the diagram and the item. A
+  republished accepted item shows "changed since accepted"; that is expected.
+  Answers that decide nothing stay in the chat. When the user asks to save the
+  plan to a file, the Decided lines go into the file with their items.
 - Relationships accept `manual: true` for any arrow that should be dashed:
   manual, review, asynchronous or optional flows. Groups become lanes in diagrams, so group by where things
   run (for example Container, Host app) when drawing architecture or data

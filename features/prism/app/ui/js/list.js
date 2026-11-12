@@ -1,5 +1,5 @@
 import { h } from './dom.js';
-import { EXPLANATION_STATES, askedQuestions, explanationOf, questionsFor } from './rows.js';
+import { EXPLANATION_STATES, askedQuestions, explanationOf, itemBookmarks, questionsFor } from './rows.js';
 
 /**
  * What a shared question's outcome means for the user. Only shared questions cross to the
@@ -25,6 +25,12 @@ export const ACCEPT_NOTE = 'Acceptance is feedback for the agent, never permissi
 const DROPPED = 'dropped';
 /** Why Ask, Explain, Accept and Drop refuse a dropped item; it stays in the list until U undoes the drop. */
 export const DROPPED_NOTE = 'Dropped items cannot be asked about, explained, accepted or dropped again; U undoes the drop.';
+/** What a bookmarked item's card, box and pane say; the mark is only a mark, shared like the rest. */
+export const BOOKMARKED = 'bookmarked';
+export const BOOKMARK_NOTE = 'B bookmarks the item or the text selected in it, or removes the bookmark; Shift+B lists all bookmarks.';
+const SVG_NS = 'http://www.w3.org/2000/svg';
+/** A ribbon in a 12 by 12 box. */
+export const BOOKMARK_PATH = 'M2.5 1h7v10l-3.5-2.6-3.5 2.6z';
 
 /**
  * The list view of one tab: a compact card per row; the tab's side pane shows the focused
@@ -54,7 +60,8 @@ export class ListView {
       const selected = model.selected.has(row.id);
       const questions = questionsFor(model.questions, model.document.id, row.id);
       const explanation = explanationOf(questions, model);
-      const signature = JSON.stringify([row, focused, selected, questions, explanation?.status]);
+      const bookmarks = itemBookmarks(model.document, row.id).length;
+      const signature = JSON.stringify([row, focused, selected, questions, explanation?.status, bookmarks]);
       let entry = this.cards.get(row.id);
       if (!entry) {
         entry = {
@@ -68,7 +75,7 @@ export class ListView {
       }
       if (entry.signature !== signature) {
         entry.signature = signature;
-        this.fill(entry.element, row, { focused, selected, questions, explanation });
+        this.fill(entry.element, row, { focused, selected, questions, explanation, bookmarks });
       }
       if (this.list.children[index] !== entry.element) {
         this.list.insertBefore(entry.element, this.list.children[index] ?? null);
@@ -88,14 +95,14 @@ export class ListView {
     this.cards.get(id)?.element.scrollIntoView({ block: 'nearest' });
   }
 
-  fill(card, row, { focused, selected, questions, explanation }) {
+  fill(card, row, { focused, selected, questions, explanation, bookmarks }) {
     card.className = `card kind-${row.kind}${row.dropped ? ` ${DROPPED}` : ''}${focused ? ' focused' : ''}${selected ? ' selected' : ''}`;
     if (focused) {
       card.setAttribute('aria-current', 'true');
     } else {
       card.removeAttribute('aria-current');
     }
-    card.setAttribute('aria-label', `${selected ? 'Selected: ' : ''}${row.number} ${row.kindLabel} ${row.title}${row.dropped ? ` (${DROPPED})` : ''}`);
+    card.setAttribute('aria-label', `${selected ? 'Selected: ' : ''}${row.number} ${row.kindLabel} ${row.title}${row.dropped ? ` (${DROPPED})` : ''}${bookmarks > 0 ? `, ${BOOKMARKED}` : ''}`);
     card.dataset.id = row.id;
 
     const badges = stateBadges(row);
@@ -115,6 +122,9 @@ export class ListView {
     }
     if (explanation) {
       badges.push(explanationBadge(explanation));
+    }
+    if (bookmarks > 0) {
+      badges.push(bookmarkBadge(bookmarks));
     }
     const head = h(
       'div',
@@ -152,6 +162,24 @@ export function stateBadges(row) {
 function explanationBadge({ status, reason }) {
   const state = EXPLANATION_STATES[status];
   return h('span', { class: `badge explanation state-${status}`, title: state.text(reason) ?? 'Explained: the side pane shows the explanation', text: state.badge });
+}
+
+/** The mark of an item with `count` bookmarks, with the count when there are several. */
+function bookmarkBadge(count) {
+  const name = count === 1 ? 'Bookmarked' : `Bookmarked ${count} times`;
+  return h('span', { class: 'badge bookmark', role: 'img', 'aria-label': name, title: `${name}. ${BOOKMARK_NOTE}` }, bookmarkIcon(), count > 1 ? h('span', { text: String(count) }) : null);
+}
+
+/** The bookmark ribbon, drawn in the text color. */
+export function bookmarkIcon() {
+  const icon = document.createElementNS(SVG_NS, 'svg');
+  icon.setAttribute('class', 'bookmark-icon');
+  icon.setAttribute('viewBox', '0 0 12 12');
+  icon.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(SVG_NS, 'path');
+  path.setAttribute('d', BOOKMARK_PATH);
+  icon.append(path);
+  return icon;
 }
 
 /** `short`, the full `text` with the outcome's reason, and the `tone` of a shared question. */

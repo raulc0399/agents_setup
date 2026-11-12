@@ -75,6 +75,7 @@ fn fixture() -> (Document, BTreeSet<Id>) {
         ]),
         groups: BTreeMap::from([(lane.id, lane)]),
         lanes: None,
+        bookmarks: BTreeMap::new(),
     };
     let visible = document
         .elements
@@ -426,6 +427,7 @@ fn steps(count: u128) -> (Document, BTreeSet<Id>) {
         relationships: BTreeMap::new(),
         groups: BTreeMap::new(),
         lanes: None,
+        bookmarks: BTreeMap::new(),
     };
     let visible = document.elements.keys().copied().collect();
     (document, visible)

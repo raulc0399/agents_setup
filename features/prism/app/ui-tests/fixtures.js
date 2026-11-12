@@ -241,7 +241,7 @@ function status(overrides = {}) {
     problem: null,
     settings_file: '/Users/me/Library/Application Support/local.prism.desktop/settings.json',
     version: '0.1.0',
-    protocol: 2,
+    protocol: 3,
     ...overrides,
   };
 }
@@ -298,7 +298,7 @@ function arrangement(active, views = {}) {
 }
 
 export const VERSION_PROBLEM =
-  'A bridge speaks Prism protocol 3, this app protocol 2. This app is older: build and install the newer Prism app.';
+  'A bridge speaks Prism protocol 4, this app protocol 3. This app is older: build and install the newer Prism app.';
 
 export const KEYS = { LIVE, CODEX, ENDED, CLOSED, PLAN, REVIEW, NOTES, RELEASE, SYNC_ITEM, TABS_ITEM };
 export const RELEASE_IDS = { item: releaseItem, link: releaseLink, group: releaseGroup };
@@ -337,6 +337,7 @@ const DIAGRAM_VIEWS = {
   'diagram-pane-wide': { focus: releaseItem(4), cameras: {} },
   'diagram-pane-narrow': { focus: releaseItem(4), cameras: {} },
   'diagram-explained': { focus: releaseItem(4), cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -24, scale: 1 } } },
+  'diagram-bookmarked': { focus: releaseItem(4), cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -24, scale: 1 } } },
 };
 export const CONTENTS_FOR_TESTS = CONTENTS;
 
@@ -354,6 +355,9 @@ const LIST_VIEWS = {
   plain: { document: REVIEW },
   dropped: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
   explained: { document: PLAN, focus: TABS_ITEM, hidden: [] },
+  bookmarked: { document: PLAN, focus: TABS_ITEM, hidden: [] },
+  'bookmarks-list': { document: PLAN, focus: TABS_ITEM, hidden: [] },
+  'bookmark-checks': { document: PLAN, focus: null, hidden: [], modes: { ...LIST_MODES } },
   'pane-wide': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
   'pane-narrow': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
 };
@@ -383,6 +387,40 @@ function explainedContents() {
     explainRequest('000000000004', RELEASE, 2, [releaseItem(2)], 'Item 2: Upload batch\n> Sends the queued readings over HTTPS once the device is online.', { outcome: { state: 'submitted' } }),
     explainRequest('000000000006', RELEASE, 2, [releaseItem(6)], 'Item 6: Archive raw batches\n> Raw uploads are kept for 90 days for audits.', { answer: 'Kept for audits.' }),
   );
+  return contents;
+}
+
+/** A bookmark of `item`, the whole item or with `quote` the text selected in it; `order` as the store gives it out. */
+function bookmark(number, item, order, quote = null) {
+  return { id: `f0000000-0000-4000-8000-0000000000${String(number).padStart(2, '0')}`, item, order, ...(quote ? { quote } : {}) };
+}
+
+/**
+ * Scenarios with bookmarks, in the order they were made: in the app plan item 3 whole and a
+ * quote in it, item 2 a quote its text no longer contains; in the release flow box 4 (also
+ * explained) and box 1; in the review findings, closed, item 1.
+ */
+const BOOKMARKED_SCENARIOS = ['bookmarked', 'bookmarks-list', 'diagram-bookmarked', 'bookmark-checks'];
+export const BOOKMARKS = {
+  tabs: bookmark(1, TABS_ITEM, 0),
+  tabsQuote: bookmark(2, TABS_ITEM, 1, 'tabs move between windows by drag'),
+  review: bookmark(3, releaseItem(4), 2),
+  stale: bookmark(4, 'a0000000-0000-4000-8000-000000000002', 3, 'The pairing file is written once at install'),
+  finding: bookmark(5, 'a1000000-0000-4000-8000-000000000001', 4),
+  capture: bookmark(6, releaseItem(1), 5),
+};
+const BOOKMARKED_DOCUMENTS = {
+  [PLAN]: ['tabs', 'tabsQuote', 'stale'],
+  [RELEASE]: ['review', 'capture'],
+  [REVIEW]: ['finding'],
+};
+function bookmarkedContents() {
+  const contents = explainedContents();
+  const live = contents[LIVE];
+  for (const [id, names] of Object.entries(BOOKMARKED_DOCUMENTS)) {
+    live.documents.find((candidate) => candidate.id === id).bookmarks = Object.fromEntries(names.map((name) => [BOOKMARKS[name].id, BOOKMARKS[name]]));
+  }
+  live.closed = [REVIEW];
   return contents;
 }
 
@@ -577,6 +615,16 @@ export function fixture(scenario) {
   }
   if (EXPLAINED_SCENARIOS.includes(scenario)) {
     contents = explainedContents();
+  }
+  if (BOOKMARKED_SCENARIOS.includes(scenario)) {
+    contents = bookmarkedContents();
+  }
+  // The diagram also shows the mark on an arrow's pill and after a lane's title.
+  if (scenario === 'diagram-bookmarked') {
+    const release = contents[LIVE].documents.find((candidate) => candidate.id === RELEASE);
+    for (const marked of [bookmark(7, releaseLink(3), 6), bookmark(8, releaseGroup(2), 7)]) {
+      release.bookmarks[marked.id] = marked;
+    }
   }
   const state = { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) };
   state.arrangement.windows[0].pane_width = PANE_WIDTHS[scenario] ?? null;

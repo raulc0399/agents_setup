@@ -163,6 +163,7 @@ pub fn document(id: u128, revision: u64, titles: &[&str]) -> Document {
         relationships: BTreeMap::new(),
         groups: BTreeMap::new(),
         lanes: None,
+        bookmarks: BTreeMap::new(),
     }
 }
 

@@ -31,7 +31,7 @@ Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 | Batch | State | Note |
 | --- | --- | --- |
 | 1 Gates | **[done]** 1.1, 1.2, 1.3 (Claude half) passed | the Codex half of 1.3 is for the Codex agent to confirm |
-| 2 `prism-core` | **[done]** | protocol 2 (1 before documents could close): `hello` → `welcome` → `auth` → `snapshot`; see `prism-core/src/protocol.rs` |
+| 2 `prism-core` | **[done]** | protocol 3 (2 before bookmarks, 1 before documents could close): `hello` → `welcome` → `auth` → `snapshot`; see `prism-core/src/protocol.rs` |
 | 3 Bridge app link | **[done]** | `src/applink.rs`; commits noticed by polling SQLite `data_version`; legacy bindings report `bound_at_ms = 1` |
 | 4 App shell | **[done]**, Mac pass open | one review round; the fix round was committed without a second review pass (usage limit). Mac checklist: see `app/README.md` if present, else the batch 4 report in the session |
 | 5 Diagram | **[done]**, Mac pass open (pinch, save dialog, Tab in WKWebView) | layout in the shell via `prism-core`; `LANE_GAP` grew to 48, arrows that skip a box run below the row |
@@ -186,6 +186,12 @@ the Linux container.
   the focused item, the selection or the quoted text; the Claude mod submits it by itself;
   the agent records the explanation with the answer tool and the side pane shows it under
   "Explanation". Ordinary Ask answers stay in the chat.
+- **[done]** (2026-11-12) Bookmarks: `B` marks the focused item, the selected items or
+  the selected text; `Shift+B` lists the conversation's bookmarks and jumps to them. They
+  are shared state (actions `bookmark`/`unbookmark`, app protocol 3), so the agent reads
+  them with inspect.
+- **[done]** (2026-11-12) Working rule in both skills: a decision or change agreed in the
+  chat is recorded on the list item as `Decided (date): … Why: ….` and republished.
 
 ## Later (not planned yet)
 

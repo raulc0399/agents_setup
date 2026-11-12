@@ -221,7 +221,7 @@ pub fn apply_operation(
                 None
             };
             Ok(
-                json!({"documents":page.into_iter().map(|d| json!({"id":d.id,"title":d.title,"revision":d.revision,"closed":closed.contains(&d.id)})).collect::<Vec<_>>(), "total": total, "next_cursor":next_cursor}),
+                json!({"documents":page.into_iter().map(|d| json!({"id":d.id,"title":d.title,"revision":d.revision,"closed":closed.contains(&d.id),"bookmarks":d.bookmarks.len()})).collect::<Vec<_>>(), "total": total, "next_cursor":next_cursor}),
             )
         }
         Operation::Action(params) => Ok(serde_json::to_value(store.apply(
@@ -464,6 +464,14 @@ impl Service {
             // The bridge loop retires the binding once the observer reports the event.
             self.observe_lifecycle(event)?;
             return Ok(json!({"data":{"retiring":true}}));
+        }
+        // The tools bookmark whole items; a quote is text the user selected in the app.
+        if let Operation::Action(ActionParams {
+            action: ContentAction::Bookmark { quote: Some(_), .. },
+            ..
+        }) = &call.operation
+        {
+            bail!("the tool bookmarks whole items; bookmarks of selected text are made in the app");
         }
         let data = apply_operation(&mut self.store, &binding, call.operation)?;
         Ok(json!({"data":data}))

@@ -179,7 +179,7 @@
   },
   {
     "name": "inspect",
-    "description": "Inspect published Prism content in this exact Claude conversation. Omit document_id to list at most 100 document summaries, each with its closed flag; repeat with returned next_cursor until null. Private view state such as selections, hidden items and filters is never returned.",
+    "description": "Inspect published Prism content in this exact Claude conversation. Omit document_id to list at most 100 document summaries, each with its closed flag and its number of bookmarks; repeat with returned next_cursor until null. A document's bookmarks are the user's marks for things to come back to, each with the item ID and the quote when the user marked selected text; read them when the user refers to the bookmarked items. Private view state such as selections, hidden items and filters is never returned.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -212,7 +212,7 @@
   },
   {
     "name": "action",
-    "description": "Apply explicitly requested acceptance or archive to shared content IDs, or close or reopen the whole document (without ids), at the expected revision. A closed document leaves the document strip for everyone and stays listed under Closed until it is reopened or published to again. Acceptance is content feedback, never permission to implement or run tools.",
+    "description": "Apply explicitly requested acceptance, archive, bookmark or unbookmark to shared content IDs, or close or reopen the whole document (without ids), at the expected revision. A closed document leaves the document strip for everyone and stays listed under Closed until it is reopened or published to again. Acceptance is content feedback, never permission to implement or run tools. Bookmarks are the user's marks for things to come back to: do not add or remove them unless the user asks; bookmark and unbookmark make a new revision like accept; the tool bookmarks whole items only (bookmarks of selected text are made in the app), and unbookmark takes bookmark IDs from inspect, or item IDs to remove the bookmark on the whole item.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -232,7 +232,9 @@
                 "accept",
                 "archive",
                 "close",
-                "reopen"
+                "reopen",
+                "bookmark",
+                "unbookmark"
               ]
             },
             "ids": {
@@ -244,7 +246,7 @@
               "minItems": 1,
               "maxItems": 6500,
               "uniqueItems": true,
-              "description": "Required for accept and archive; omitted for close and reopen."
+              "description": "Required for accept, archive, bookmark and unbookmark; omitted for close and reopen."
             }
           },
           "required": [
