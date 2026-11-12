@@ -9,9 +9,10 @@
 import { start } from '../ui/js/app.js';
 import { DROPPED_NOTE } from '../ui/js/list.js';
 import { questionBlock } from '../ui/js/panel.js';
+import { EXPLAIN_TIMEOUT_MS } from '../ui/js/rows.js';
 import { fakeBackend } from './fake-backend.js';
 import { formatTime } from '../ui/js/format.js';
-import { CONTENTS_FOR_TESTS, KEYS, RELEASE_BACK, RELEASE_IDS, SEEN_AT_MS, VERSION_PROBLEM, fixture, withHandovers } from './fixtures.js';
+import { CONTENTS_FOR_TESTS, KEYS, RELEASE_BACK, RELEASE_IDS, SEEN_AT_MS, VERSION_PROBLEM, explainRequest, fixture, withHandovers } from './fixtures.js';
 
 const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 // Under a virtual time budget headless Chromium hardly runs animation frames: timers stand in.
@@ -1050,8 +1051,8 @@ async function actionChecks(backend, app) {
   key('Tab', { ctrlKey: true });
   await settle();
   const offline = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].map((node) => `${node.textContent}:${node.disabled}`);
-  expect(offline().join('|') === 'Ask:true|Accept:true|Drop:true', `shared actions are disabled: ${offline()}`);
-  for (const name of ['a', 'x', 'u']) {
+  expect(offline().join('|') === 'Ask:true|Explain:true|Accept:true|Drop:true', `shared actions are disabled: ${offline()}`);
+  for (const name of ['e', 'a', 'x', 'u']) {
     key(name);
     await settle();
     expect(backend.sent.length === 0 && message().textContent === 'Read-only until the bridge reconnects', `${name} is blocked while disconnected: ${message().textContent}`);
@@ -1067,7 +1068,7 @@ async function actionChecks(backend, app) {
   key(' ');
   await settle();
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `Space selects, got ${selectedCards()}`);
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask (2)|Accept (2)|Drop (2)', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask (2)|Explain (2)|Accept (2)|Drop (2)', `buttons name the selection: ${buttons('.detail-panel .panel-actions')}`);
   expect(document.querySelector('.pane-controls .selection')?.textContent === '2 selected · clear', 'the pane counts the selection');
   ctrlClick(card(plan(6)));
   await settle();
@@ -1159,7 +1160,7 @@ async function actionChecks(backend, app) {
   expect(card(plan(2))?.classList.contains('dropped') && card(plan(2)).querySelector('.badge.dropped')?.textContent === 'dropped', 'the dropped card is marked');
   expect(JSON.stringify(selectedCards()) === JSON.stringify([plan(2), plan(4)]), `and stays selected: ${selectedCards()}`);
   const hint = () => document.querySelector('.detail-panel .panel-actions .hint')?.textContent;
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Accept|Drop' && hint() === '1 dropped item takes no part', `the buttons leave it out: ${buttons('.detail-panel .panel-actions')} ${hint()}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Explain|Accept|Drop' && hint() === '1 dropped item takes no part', `the buttons leave it out: ${buttons('.detail-panel .panel-actions')} ${hint()}`);
   key('Enter');
   await settle();
   const partial = backend.sent.at(-1);
@@ -1172,9 +1173,9 @@ async function actionChecks(backend, app) {
   for (const view of [{ selected: [plan(2)], focus: plan(4) }, { selected: [], focus: plan(2) }]) {
     app.updateView(KEYS.LIVE, view);
     await settle();
-    expect(disabled() === 'Ask:true|Accept:true|Drop:true' && hint() === DROPPED_NOTE, `${JSON.stringify(view)}: disabled with the reason: ${disabled()} ${hint()}`);
+    expect(disabled() === 'Ask:true|Explain:true|Accept:true|Drop:true' && hint() === DROPPED_NOTE, `${JSON.stringify(view)}: disabled with the reason: ${disabled()} ${hint()}`);
     const sentBefore = backend.sent.length;
-    for (const name of ['Enter', 'a', 'x']) {
+    for (const name of ['Enter', 'e', 'a', 'x']) {
       app.setMessage('');
       key(name);
       await settle();
@@ -1219,7 +1220,7 @@ async function actionChecks(backend, app) {
   await settle();
 
   // 6.4 Accept: one `action` on the selection; the note says acceptance is no tool permission.
-  expect(document.querySelector('.detail-panel .panel-actions .button:nth-child(2)').title.includes('never permission to run tools'), 'the Accept button says what acceptance is');
+  expect(document.querySelector('.detail-panel .panel-actions .button:nth-child(3)').title.includes('never permission to run tools'), 'the Accept button says what acceptance is');
   key('a');
   await settle();
   const accept = backend.sent.at(-1);
@@ -1371,7 +1372,7 @@ async function actionChecks(backend, app) {
   const filter = document.querySelector('.pane-controls .filter');
   expect(document.activeElement === filter, '/ goes to the filter');
   const untouched = [backend.sent.length, JSON.stringify(app.view(KEYS.LIVE))];
-  for (const name of ['a', 'x', 'u', 'h', 'H', 'A', ' ', 'j', 'v', '/']) {
+  for (const name of ['a', 'e', 'x', 'u', 'h', 'H', 'A', ' ', 'j', 'v', '/']) {
     filter.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
   }
   await settle();
@@ -1442,12 +1443,12 @@ async function actionChecks(backend, app) {
   expect(document.querySelector('.detail-panel .badge.stale')?.textContent === 'changed since accepted', 'the panel shows changed since accepted');
   shape(item(4)).dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await settle();
-  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Accept|Drop', `the panel has the item actions: ${buttons('.detail-panel .panel-actions')}`);
+  expect(buttons('.detail-panel .panel-actions').join('|') === 'Ask|Explain|Accept|Drop', `the panel has the item actions: ${buttons('.detail-panel .panel-actions')}`);
   const panelQuote = selectText(document.querySelector('.detail-panel .panel-body'), 3, 40);
   key('Enter');
   await settle();
   const panelAsk = backend.sent.at(-1);
-  expect(JSON.stringify(panelAsk?.command) === JSON.stringify({ type: 'ask', selection: { document_id: KEYS.RELEASE, revision: 2, ids: [item(4)] }, items: [{ number: 4, title: 'Review anomalies', quote: panelQuote }] }), `the panel sends the list's payload, quoting the selection: ${JSON.stringify(panelAsk?.command)}`);
+  expect(JSON.stringify(panelAsk?.command) === JSON.stringify({ type: 'ask', selection: { document_id: KEYS.RELEASE, revision: 2, ids: [item(4)] }, items: [{ number: 4, title: 'Review anomalies', quote: panelQuote }], quoted: item(4) }), `the panel sends the list's payload, quoting the selection: ${JSON.stringify(panelAsk?.command)}`);
   expect(!document.querySelector('.detail-panel textarea') && document.activeElement === shape(item(4)), 'no editor: the box keeps the keyboard');
   backend.reply(panelAsk.key, panelAsk.id);
   await settle();
@@ -1476,7 +1477,300 @@ async function actionChecks(backend, app) {
   await settle();
   expect(message().textContent.startsWith('Pick an item first'), `Enter with nothing picked says so: ${message().textContent}`);
 
+  await explainChecks(backend, app, expect);
+
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
+}
+
+/** The reference an ask names its items by, as prism-core's `ask_text` writes it for plain text. */
+function referenceOf(items) {
+  return items.map((item) => [`Item ${item.number}: ${item.title}`, ...item.quote.split('\n').map((line) => `> ${line}`)].join('\n')).join('\n');
+}
+
+/** What the side pane shows of the focused item's explanation, or null without one. */
+function explanationShown() {
+  const section = document.querySelector('.detail-panel .panel-explanation');
+  if (!section) {
+    return null;
+  }
+  return {
+    title: section.querySelector('h3')?.textContent ?? null,
+    state: section.querySelector('.explanation-state')?.textContent ?? null,
+    quote: section.querySelector('.explanation-quote')?.textContent ?? null,
+    paragraphs: [...section.querySelectorAll('.explanation-text p')].map((paragraph) => paragraph.textContent),
+  };
+}
+
+/**
+ * The bridge shares the explain request `sent` (an `ask` with the explain intent) as the
+ * store keeps it, numbered `request` so that a larger one is newer; with `answer` once the
+ * agent recorded it, and `outcome` (default: submitted by the mod, queued). Returns the
+ * shared question, to answer it later with `explained`.
+ */
+async function shareExplanation(backend, sent, request, answer = null, outcome = undefined) {
+  const next = await backend.content(KEYS.LIVE);
+  const { selection, items, quoted = null } = sent.command;
+  const question = explainRequest(String(request).padStart(12, '0'), selection.document_id, selection.revision, selection.ids, referenceOf(items), { answer, quoted, ...(outcome ? { outcome } : {}) });
+  next.questions.push(question);
+  backend.update(KEYS.LIVE, next);
+  await settle();
+  return question;
+}
+
+/** The agent records `answer` on the shared `question`. */
+async function explained(backend, question, answer) {
+  const next = await backend.content(KEYS.LIVE);
+  next.questions.find((candidate) => candidate.request_id === question.request_id).answer = answer;
+  backend.update(KEYS.LIVE, next);
+  await settle();
+}
+
+/**
+ * Explain: E and the Explain button send an ask with the explain intent for the focused item,
+ * the selected ones or the text selected in the focused one, as Ask picks them; "Explaining…"
+ * until the explanation arrives, then the explanation in the side pane and a badge on the card
+ * and the box. A newer explanation replaces the older one. Dropped items and a read-only tab
+ * refuse it (the key loops of `actionChecks`).
+ */
+async function explainChecks(backend, app, expect) {
+  const plan = (number) => `a0000000-0000-4000-8000-00000000000${number}`;
+  const { item } = RELEASE_IDS;
+  const card = (id) => document.querySelector(`.card[data-id="${id}"]`);
+  const badge = (id) => card(id)?.querySelector('.badge.explanation')?.textContent ?? null;
+  const message = () => document.querySelector('.statusbar .message').textContent;
+  const buttons = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].map((node) => node.textContent);
+  const explainButton = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].find((node) => node.textContent.startsWith('Explain'));
+  const reply = async () => {
+    const { key: session, id } = backend.sent.at(-1);
+    backend.reply(session, id);
+    await settle();
+  };
+  const shown = () => JSON.stringify(explanationShown());
+  const expected = (state, quote, paragraphs) => JSON.stringify({ title: 'Explanation', state, quote, paragraphs });
+
+  // The focused item in the list: E sends at once, with the reference Ask sends.
+  app.updateView(KEYS.LIVE, { document: KEYS.PLAN, focus: plan(3), selected: [], modes: { ...app.view(KEYS.LIVE).modes, [KEYS.PLAN]: 'list' } });
+  await settle();
+  expect(explanationShown() === null && badge(plan(3)) === null, 'no explanation before one is asked for');
+  expect(document.querySelector('.statusbar .keys').textContent.includes('explain'), 'the status bar offers E');
+  expect(JSON.stringify(buttons()) === JSON.stringify(['Ask', 'Explain', 'Accept', 'Drop']) && explainButton().title === 'Explain this item; the explanation shows here (E)', `Explain sits next to Ask: ${buttons()}`);
+  const sentBefore = backend.sent.length;
+  key('e');
+  await settle();
+  const focused = backend.sent.at(-1);
+  expect(
+    backend.sent.length === sentBefore + 1 &&
+      JSON.stringify(focused?.command) ===
+        JSON.stringify({
+          type: 'ask',
+          selection: { document_id: KEYS.PLAN, revision: 3, ids: [plan(3)] },
+          items: [{ number: 3, title: 'Windows and tabs', quote: CONTENTS_FOR_TESTS[KEYS.LIVE].documents[0].elements[plan(3)].body }],
+          intent: 'explain',
+        }),
+    `E explains the focused item: ${JSON.stringify(focused?.command)}`,
+  );
+  expect(message() === 'Asking for an explanation…', `while it is on its way: ${message()}`);
+  key('e');
+  key('e', { repeat: true });
+  await settle();
+  expect(backend.sent.length === sentBefore + 1, 'one explain request while one is on its way');
+  await reply();
+  expect(message() === 'Asked the conversation to explain item 3.', `the reply is shown: ${message()}`);
+  key('e', { repeat: true });
+  await settle();
+  expect(backend.sent.length === sentBefore + 1, 'holding E explains nothing more');
+
+  // Shared, not answered yet: "Explaining…" on the card and in the pane; the ordinary
+  // question about the item keeps its badge and its block.
+  const first = await shareExplanation(backend, focused, 1);
+  expect(badge(plan(3)) === 'explaining…' && shown() === expected('Explaining…', null, []), `waiting: ${badge(plan(3))} ${shown()}`);
+  expect(card(plan(3)).querySelector('.badge.asked')?.textContent === 'asked · shared', `the asked badge counts ordinary questions only: ${card(plan(3)).querySelector('.badge.asked')?.textContent}`);
+  expect(document.querySelectorAll('.detail-panel .card-question').length === 1, 'the explain request is no question block');
+
+  // The explanation arrives: paragraphs and line breaks kept, selectable, after the actions.
+  await explained(backend, first, 'Tabs are conversations.\nOne per conversation.\n\nThey move between windows.');
+  expect(badge(plan(3)) === 'explained' && shown() === expected(null, null, ['Tabs are conversations.\nOne per conversation.', 'They move between windows.']), `explained: ${badge(plan(3))} ${shown()}`);
+  const text = document.querySelector('.detail-panel .explanation-text p');
+  expect(getComputedStyle(text).userSelect === 'text' && getComputedStyle(text).whiteSpace === 'pre-wrap', 'the explanation is selectable plain text');
+  const section = document.querySelector('.detail-panel .panel-explanation');
+  expect(
+    document.querySelector('.detail-panel .panel-actions').compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING &&
+      section.compareDocumentPosition(document.querySelector('.detail-panel .card-question')) & Node.DOCUMENT_POSITION_FOLLOWING,
+    'the explanation comes after the actions, before the questions',
+  );
+
+  // Text selected in the item, with the Explain button: the quote goes along and shows above
+  // the newer explanation; while it waits, the older explanation stays.
+  const quote = selectText(document.querySelector('.detail-panel .panel-body'), 4, 24);
+  explainButton().click();
+  await settle();
+  const quoted = backend.sent.at(-1);
+  expect(quoted?.command.intent === 'explain' && quoted.command.items[0].quote === quote && quoted.command.quoted === plan(3), `the button explains the quote, naming the quoted item: ${JSON.stringify(quoted?.command)}`);
+  await reply();
+  const second = await shareExplanation(backend, quoted, 2);
+  expect(badge(plan(3)) === 'explaining…' && shown() === expected('Explaining…', null, ['Tabs are conversations.\nOne per conversation.', 'They move between windows.']), `a newer request waits, the older explanation stays: ${shown()}`);
+  await explained(backend, second, 'The selected words.');
+  expect(badge(plan(3)) === 'explained' && shown() === expected(null, quote, ['The selected words.']), `the newer explanation replaces the older, below its quote: ${shown()}`);
+
+  // The quote shows by the request's own flag: a whole-item explanation shows none, also when
+  // the item was revised since or its text has CRLF line ends.
+  const revised = await backend.content(KEYS.LIVE);
+  const planDocument = revised.documents.find((candidate) => candidate.id === KEYS.PLAN);
+  planDocument.elements[plan(3)].body = 'One tab per conversation.\r\nRevised since.';
+  revised.questions.push(explainRequest('000000000009', KEYS.PLAN, 3, [plan(3)], 'Item 3: Windows and tabs\n> One tab per conversation; tabs move', { answer: 'Whole item.' }));
+  backend.update(KEYS.LIVE, revised);
+  await settle();
+  expect(shown() === expected(null, null, ['Whole item.']), `a whole-item explanation shows no quote: ${shown()}`);
+
+  // Plain text: markup shows as it is; a long explanation scrolls inside the pane.
+  const markup = await backend.content(KEYS.LIVE);
+  markup.questions.find((candidate) => candidate.request_id.endsWith('000000000009')).answer = 'Use <b>bold</b> & <script>x</script>.';
+  backend.update(KEYS.LIVE, markup);
+  await settle();
+  const rendered = document.querySelector('.detail-panel .explanation-text');
+  expect(rendered.textContent === 'Use <b>bold</b> & <script>x</script>.' && !rendered.querySelector('b, script'), `markup renders literally: ${rendered.innerHTML}`);
+  const long = await backend.content(KEYS.LIVE);
+  long.questions.find((candidate) => candidate.request_id.endsWith('000000000009')).answer = Array.from({ length: 60 }, (_, index) => `Paragraph ${index + 1} of a long explanation.`).join('\n\n');
+  backend.update(KEYS.LIVE, long);
+  await settle();
+  const panel = document.querySelector('.detail-panel');
+  expect(
+    panel.scrollHeight > panel.clientHeight && getComputedStyle(panel).overflowY === 'auto' && document.documentElement.scrollHeight <= window.innerHeight && document.querySelector('.side-pane').getBoundingClientRect().bottom <= window.innerHeight,
+    `a long explanation scrolls inside the pane: ${panel.scrollHeight}/${panel.clientHeight}, page ${document.documentElement.scrollHeight}/${window.innerHeight}`,
+  );
+  const plain = structuredClone(long);
+  plain.documents.find((candidate) => candidate.id === KEYS.PLAN).elements[plan(3)] = CONTENTS_FOR_TESTS[KEYS.LIVE].documents.find((candidate) => candidate.id === KEYS.PLAN).elements[plan(3)];
+  plain.questions = plain.questions.filter((candidate) => !candidate.request_id.endsWith('000000000009'));
+  backend.update(KEYS.LIVE, plain);
+  await settle();
+
+  // A request that was not delivered, one in the prompt box, one that ended without an
+  // answer, and one that timed out say so instead of "Explaining…", the older explanation kept.
+  const states = [
+    [{ state: 'failed', reason: 'binding retired' }, 'not delivered', 'Could not be delivered: binding retired; E asks again'],
+    [{ state: 'refused', reason: 'not bound' }, 'not delivered', 'Could not be delivered: not bound; E asks again'],
+    [{ state: 'unknown', reason: 'no confirmation' }, 'not delivered', 'Could not be delivered: no confirmation; E asks again'],
+    [{ state: 'submitted' }, 'in prompt box', 'In the CLI prompt box: press Enter there'],
+  ];
+  for (const [index, [outcome, short, text]] of states.entries()) {
+    await shareExplanation(backend, quoted, 20 + index, null, outcome);
+    expect(badge(plan(3)) === short && shown() === expected(text, quote, ['The selected words.']), `${outcome.state}: ${badge(plan(3))} ${shown()}`);
+  }
+  await shareExplanation(backend, quoted, 30);
+  backend.change((next) => {
+    next.sessions.find((session) => session.key === KEYS.LIVE).link = { state: 'ended', reason: 'conversation cleared' };
+  });
+  await settle();
+  expect(badge(plan(3)) === 'not explained' && shown() === expected('No explanation arrived; E asks again', quote, ['The selected words.']), `ended without an answer: ${badge(plan(3))} ${shown()}`);
+  backend.change((next) => {
+    next.sessions.find((session) => session.key === KEYS.LIVE).link = { state: 'live' };
+  });
+  await settle();
+  expect(badge(plan(3)) === 'explaining…', `live again, it waits: ${badge(plan(3))}`);
+  // Made just short of the timeout: it times out while shown, without another change. Asked
+  // at a later revision, it is the latest request despite its older ID.
+  const late = await backend.content(KEYS.LIVE);
+  late.questions = late.questions.filter((candidate) => candidate.intent !== 'explain' || candidate.answer);
+  const time = (Date.now() - EXPLAIN_TIMEOUT_MS + 300).toString(16).padStart(12, '0');
+  late.questions.push({ ...explainRequest('000000000031', KEYS.PLAN, 4, [plan(3)], 'Item 3: Windows and tabs'), request_id: `${time.slice(0, 8)}-${time.slice(8)}-7000-8000-ffffffffffff` });
+  backend.update(KEYS.LIVE, late);
+  await settle();
+  expect(badge(plan(3)) === 'explaining…', `before its timeout it waits: ${badge(plan(3))}`);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(badge(plan(3)) === 'not explained' && shown() === expected('No explanation arrived; E asks again', quote, ['The selected words.']), `after its timeout: ${badge(plan(3))} ${shown()}`);
+  const answeredAgain = await backend.content(KEYS.LIVE);
+  answeredAgain.questions = answeredAgain.questions.filter((candidate) => candidate.intent !== 'explain' || candidate.answer);
+  backend.update(KEYS.LIVE, answeredAgain);
+  await settle();
+
+  // Several selected items: one request, shown on each of them.
+  app.updateView(KEYS.LIVE, { selected: [plan(2), plan(4)], focus: plan(4) });
+  await settle();
+  expect(explainButton()?.textContent === 'Explain (2)', `the button counts the selection: ${explainButton()?.textContent}`);
+  key('e');
+  await settle();
+  const several = backend.sent.at(-1);
+  const items = several?.command.items ?? [];
+  expect(
+    several?.command.intent === 'explain' && JSON.stringify(several.command.selection.ids) === JSON.stringify([plan(2), plan(4)]) && JSON.stringify(items.map((entry) => entry.number)) === '[2,4]' && items[0].quote.endsWith('\nSource: features/prism/app/host/src/registry.rs'),
+    `E explains the selection, each quoted in full: ${JSON.stringify(several?.command)}`,
+  );
+  await reply();
+  expect(message() === 'Asked the conversation to explain items 2, 4.', `the reply names both: ${message()}`);
+  await shareExplanation(backend, several, 3, 'Both of them.');
+  expect(badge(plan(2)) === 'explained' && badge(plan(4)) === 'explained' && shown() === expected(null, null, ['Both of them.']), `on each item: ${badge(plan(2))} ${badge(plan(4))} ${shown()}`);
+  app.updateView(KEYS.LIVE, { selected: [], focus: plan(2) });
+  await settle();
+  expect(shown() === expected(null, null, ['Both of them.']), `and in the pane of the other one: ${shown()}`);
+
+  // The diagram: E on the focused box; the box carries the badge, "explaining…" first.
+  app.updateView(KEYS.LIVE, { document: KEYS.RELEASE, focus: item(4), selected: [], modes: { ...app.view(KEYS.LIVE).modes, [KEYS.RELEASE]: 'diagram' } });
+  const box = (id) => document.querySelector(`.diagram-svg [data-kind="box"][data-id="${id}"]`);
+  const boxBadge = (id) => box(id)?.querySelector('.prism-explained')?.textContent ?? null;
+  expect(await waitFor(() => box(item(4))), 'the release flow shows its diagram');
+  key('e');
+  await settle();
+  const inDiagram = backend.sent.at(-1);
+  expect(inDiagram?.command.intent === 'explain' && inDiagram.command.selection.document_id === KEYS.RELEASE && JSON.stringify(inDiagram.command.selection.ids) === JSON.stringify([item(4)]), `E explains the focused box: ${JSON.stringify(inDiagram?.command)}`);
+  await reply();
+  const boxed = await shareExplanation(backend, inDiagram, 4);
+  expect(boxBadge(item(4)) === 'EXPLAINING…' && shown() === expected('Explaining…', null, []), `the box waits: ${boxBadge(item(4))} ${shown()}`);
+  await explained(backend, boxed, 'An operator decides.');
+  expect(boxBadge(item(4)) === 'EXPLAINED' && boxBadge(item(3)) === null && shown() === expected(null, null, ['An operator decides.']), `the box is explained: ${boxBadge(item(4))} ${shown()}`);
+  expect(box(item(4)).getAttribute('aria-label').endsWith(', explained') && !box(item(3)).getAttribute('aria-label').includes('explain'), `its name says so: ${box(item(4)).getAttribute('aria-label')}`);
+  key(' ');
+  await settle();
+  expect(box(item(4)).getAttribute('aria-label').startsWith('Selected: ') && box(item(4)).getAttribute('aria-label').endsWith(', explained'), `selected too: ${box(item(4)).getAttribute('aria-label')}`);
+  key(' ');
+  await settle();
+  // Inside the box and clear of its texts: a box with a head line and a text box without one.
+  // In a text box whose every line is full it stays inside, over the end of its last line.
+  const placed = (id, clearOfTexts = true) => {
+    const outline = box(id).querySelector('.prism-shape').getBBox();
+    const mark = box(id).querySelector('.prism-explained').getBBox();
+    const texts = [...box(id).querySelectorAll(':scope > text')].map((node) => node.getBBox());
+    const clear = texts.every((other) => other.x + other.width <= mark.x || mark.x + mark.width <= other.x || other.y + other.height <= mark.y || mark.y + mark.height <= other.y);
+    return mark.x >= outline.x && mark.x + mark.width <= outline.x + outline.width && mark.y >= outline.y && mark.y + mark.height <= outline.y + outline.height && (clear || !clearOfTexts);
+  };
+  expect(placed(item(4)), 'the badge sits inside the box, clear of its texts');
+  await shareExplanation(backend, { command: { ...inDiagram.command, selection: { ...inDiagram.command.selection, ids: [item(6)] }, items: [{ number: 6, title: 'Archive raw batches', quote: 'Raw uploads' }] } }, 5, 'Kept for audits.');
+  expect(await waitFor(() => boxBadge(item(6)) === 'EXPLAINED') && placed(item(6)), 'and inside a text box, which has no head line');
+  const longTitle = await backend.content(KEYS.LIVE);
+  longTitle.documents.find((candidate) => candidate.id === KEYS.RELEASE).revision = 3;
+  longTitle.documents.find((candidate) => candidate.id === KEYS.RELEASE).elements[item(6)].title = 'Archive the raw batches of every device';
+  longTitle.questions.forEach((candidate) => {
+    if (candidate.snapshot.selection.document_id === KEYS.RELEASE) {
+      candidate.snapshot.selection.revision = 3;
+    }
+  });
+  backend.update(KEYS.LIVE, longTitle);
+  expect(await waitFor(() => backend.pending === 0 && boxBadge(item(6)) === 'EXPLAINED' && box(item(6)).querySelector('.prism-name')?.textContent.startsWith('Archive the raw')), 'the text box with a long title is laid out again');
+  const lastLine = [...box(item(6)).querySelectorAll(':scope > text')].at(-1).getBBox();
+  const mark6 = box(item(6)).querySelector('.prism-explained').getBBox();
+  expect(placed(item(6), false) && Math.abs(mark6.y + mark6.height / 2 - (lastLine.y + lastLine.height / 2)) < 1, `with every line full, inside, over the end of the last line: ${[...box(item(6)).querySelectorAll('.prism-name')].map((node) => node.textContent)}`);
+  key('s');
+  await settle();
+  expect(backend.exports.length > 0 && !backend.exports.at(-1).svg.includes('prism-explained') && box(item(4)).querySelector('.prism-explained'), 'an export leaves the badge out');
+
+  // A Codex tab, live: Explain is disabled and says why, Ask stays; E sends nothing.
+  backend.change((next) => {
+    next.sessions.find((session) => session.key === KEYS.CODEX).link = { state: 'live' };
+  });
+  app.activate(KEYS.CODEX);
+  await settle();
+  app.updateView(KEYS.CODEX, { focus: 'a2000000-0000-4000-8000-000000000001' });
+  await settle();
+  const states2 = () => [...document.querySelectorAll('.detail-panel .panel-actions .button')].map((node) => `${node.textContent}:${node.disabled}`).join('|');
+  expect(states2() === 'Ask:false|Explain:true|Accept:false|Drop:false' && explainButton().title === 'Explain needs the Claude mod; ask in Codex instead', `Explain is disabled for Codex: ${states2()} ${explainButton()?.title}`);
+  const sentCodex = backend.sent.length;
+  key('e');
+  await settle();
+  expect(backend.sent.length === sentCodex && message() === 'Explain needs the Claude mod; ask in Codex instead', `E says why: ${message()}`);
+  backend.change((next) => {
+    next.sessions.find((session) => session.key === KEYS.CODEX).link = { state: 'disconnected' };
+  });
+  app.activate(KEYS.LIVE);
+  await settle();
 }
 
 /**
@@ -2297,6 +2591,35 @@ async function splitChecks(backend, app) {
     `Enter asks about the right pane's item, at its document's revision: ${JSON.stringify(asked?.selection)}`,
   );
   await answer();
+  key('e');
+  await settle();
+  const explainedRight = backend.sent.at(-1);
+  expect(
+    explainedRight?.command.intent === 'explain' && explainedRight.command.selection.document_id === KEYS.RELEASE && JSON.stringify(explainedRight.command.selection.ids) === JSON.stringify([view().split.focus]),
+    `E explains the right pane's item: ${JSON.stringify(explainedRight?.command)}`,
+  );
+  await answer();
+  await shareExplanation(backend, explainedRight, 11, 'Explained on the right.');
+  const rightMark = () => slot('right').querySelector(`[data-id="${view().split.focus}"] .prism-explained, [data-id="${view().split.focus}"] .badge.explanation.state-done`);
+  expect(rightMark() && JSON.stringify(explanationShown()?.paragraphs) === '["Explained on the right."]', `the right pane's item shows it: ${JSON.stringify(explanationShown())}`);
+  // And E in the left pane explains its item there.
+  slot('left').querySelector('.view').focus();
+  await settle();
+  app.updateView(KEYS.LIVE, { focus: KEYS.TABS_ITEM });
+  await settle();
+  key('e');
+  await settle();
+  const explainedLeft = backend.sent.at(-1);
+  expect(
+    explainedLeft?.command.intent === 'explain' && explainedLeft.command.selection.document_id === KEYS.PLAN && JSON.stringify(explainedLeft.command.selection.ids) === JSON.stringify([KEYS.TABS_ITEM]),
+    `E explains the left pane's item: ${JSON.stringify(explainedLeft?.command)}`,
+  );
+  await answer();
+  await shareExplanation(backend, explainedLeft, 12, 'Explained on the left.');
+  expect(slot('left').querySelector(`.card[data-id="${KEYS.TABS_ITEM}"] .badge.explanation.state-done`) && JSON.stringify(explanationShown()?.paragraphs) === '["Explained on the left."]' && rightMark(), `the left pane's item shows it, the right one keeps its badge: ${JSON.stringify(explanationShown())}`);
+  app.updateView(KEYS.LIVE, { focus: leftFocus });
+  slot('right').querySelector('.diagram-canvas').focus();
+  await settle();
   key(' ');
   await settle();
   expect(JSON.stringify(view().split.selected) === JSON.stringify([view().split.focus]) && view().selected.length === 0, `Space selects in the right pane: ${view().split.selected}`);

@@ -3,7 +3,7 @@ import { MOD_KEY, h } from './dom.js';
 import { agentLabel, formatTime, projectName, shortConversation } from './format.js';
 import { ACCEPT_NOTE, DROPPED_NOTE, ListView } from './list.js';
 import { DetailPanel } from './panel.js';
-import { documentsOf, hasDiagram, itemCount, itemIds, rows as buildRows } from './rows.js';
+import { EXPLAIN_INTENT, documentsOf, hasDiagram, itemCount, itemIds, nextExplainTimeout, rows as buildRows } from './rows.js';
 
 /** View state is saved this long after the last change, not on every key press. */
 const VIEW_SAVE_DELAY_MS = 300;
@@ -60,6 +60,9 @@ const PANE_KEY_STEP = 16;
 /** The narrow layout of styles.css: the pane goes below the content, without a width of its own. */
 const NARROW_LAYOUT = '(max-width: 760px)';
 
+/** Only the Claude mod delivers explain requests; for other agents Explain is disabled with this. */
+const EXPLAIN_AGENT = 'claude';
+const EXPLAIN_NEEDS_MOD = 'Explain needs the Claude mod; ask in Codex instead';
 const LINK_LABELS = { live: 'Live', disconnected: 'Disconnected', ended: 'Ended', waiting: 'Waiting for bridge' };
 const READ_ONLY_REASONS = {
   disconnected: 'Read-only until the bridge reconnects',
@@ -73,6 +76,7 @@ const KEY_HINTS = {
     [['Space'], 'select', 2],
     [['Shift+A'], 'all', 5],
     [['Enter'], 'ask', 1],
+    [['E'], 'explain', 2],
     [['A'], 'accept', 2],
     [['X'], 'drop', 2],
     [['U'], 'undo', 2],
@@ -87,6 +91,7 @@ const KEY_HINTS = {
     [['J', 'K'], 'move', 1],
     [['Space'], 'select', 2],
     [['Enter'], 'ask', 1],
+    [['E'], 'explain', 2],
     [['A'], 'accept', 2],
     [['X'], 'drop', 2],
     [['U'], 'undo', 2],
@@ -165,6 +170,8 @@ class App {
     this.earlyReplies = new Map();
     /** Tabs with an ask on its way: a new one waits for its reply, so a question is not shared twice. */
     this.asking = new Set();
+    /** Renders again when the next explain request on its way times out (`nextExplainTimeout`). */
+    this.explainTimer = null;
     /**
      * The document this window closed last, `{key, id, revision, side}` with the revision its
      * close produced and the pane it was shown in while split (else null), until the next
@@ -606,6 +613,7 @@ class App {
   itemActions(pane) {
     return {
       onAsk: () => this.ask(pane),
+      onExplain: () => this.explain(pane),
       onAccept: () => this.accept(pane),
       onDrop: () => this.drop(pane),
     };
@@ -744,6 +752,21 @@ class App {
     this.renderStatus();
     this.renderSessions();
     this.renderMenu();
+    this.scheduleExplainTimeout();
+  }
+
+  /** An explain request without an answer says so once it timed out: the next one due renders again. */
+  scheduleExplainTimeout() {
+    clearTimeout(this.explainTimer);
+    const now = Date.now();
+    const due = [...this.contents.values()].map((content) => nextExplainTimeout(content?.questions ?? [], now)).filter((time) => time !== null);
+    this.explainTimer = due.length > 0 ? setTimeout(() => this.render(), Math.min(...due) - now + 1) : null;
+  }
+
+  /** Why Explain is unavailable in a tab: only the Claude mod delivers explain requests. */
+  explainBlocked(key) {
+    const agent = this.session(key)?.agent;
+    return agent && agent !== EXPLAIN_AGENT ? EXPLAIN_NEEDS_MOD : null;
   }
 
   /** Rebuilds `container` only when `signature` changed, keeping keyboard focus otherwise. */
@@ -932,6 +955,9 @@ class App {
       selected,
       questions: current.content.questions,
       readOnly: READ_ONLY_REASONS[state] ?? null,
+      explainBlocked: this.explainBlocked(paneTab(pane)),
+      ended: state === 'ended',
+      now: Date.now(),
     };
 
     if (mode === 'diagram') {
@@ -1984,7 +2010,7 @@ class App {
     return targets;
   }
 
-  /** The targets of Ask, Accept and Drop: dropped items take no part; with only dropped ones picked, none and why. */
+  /** The targets of Ask, Explain, Accept and Drop: dropped items take no part; with only dropped ones picked, none and why. */
   sharedTargets(pane) {
     const targets = this.pickedTargets(pane);
     const active = targets.filter((row) => !row.dropped);
@@ -1997,14 +2023,19 @@ class App {
   /**
    * Shares the focused or selected items of a pane with the CLI prompt box right away, where
    * the user types the question. Text selected inside the focused item's text in the panel
-   * becomes its quote; every other item is quoted in full.
+   * becomes its quote; every other item is quoted in full. With `intent` explain, the agent
+   * is asked to explain them, and the side pane shows its explanation on each item.
    */
-  async ask(pane) {
+  async ask(pane, intent = null) {
     const key = paneTab(pane);
     if (!this.requireLive(key)) {
       return;
     }
     if (this.asking.has(key)) {
+      return;
+    }
+    if (intent && this.explainBlocked(key)) {
+      this.setMessage(this.explainBlocked(key), 'error');
       return;
     }
     const targets = this.sharedTargets(pane);
@@ -2014,7 +2045,10 @@ class App {
     const current = this.current(pane);
     const focus = this.mode(pane) === 'diagram' ? this.diagramFocus(pane) : current.focus;
     const quoted = focus ? this.detailPanel(pane).selectedText(focus.id) : '';
-    const items = targets.map((row) => ({ number: row.number, title: row.title, quote: row.id === focus?.id && quoted.trim() ? quoted : row.details }));
+    // The item quoted by the selected part, if it is one of the targets.
+    const quotedItem = quoted.trim() && targets.some((row) => row.id === focus.id) ? focus.id : null;
+    const items = targets.map((row) => ({ number: row.number, title: row.title, quote: row.id === quotedItem ? quoted : row.details }));
+    const numbered = `${items.length === 1 ? 'item' : 'items'} ${items.map((item) => item.number).join(', ')}`;
     const release = () => this.asking.delete(key);
     this.asking.add(key);
     const sent = await this.send(
@@ -2023,10 +2057,12 @@ class App {
         type: 'ask',
         selection: { document_id: current.document.id, revision: current.document.revision, ids: targets.map((row) => row.id) },
         items,
+        ...(intent ? { intent } : {}),
+        ...(quotedItem ? { quoted: quotedItem } : {}),
       },
       {
-        sending: 'Sharing…',
-        done: `Shared ${items.length === 1 ? 'item' : 'items'} ${items.map((item) => item.number).join(', ')} with the CLI prompt box.`,
+        sending: intent ? 'Asking for an explanation…' : 'Sharing…',
+        done: intent ? `Asked the conversation to explain ${numbered}.` : `Shared ${numbered} with the CLI prompt box.`,
         onSuccess: release,
         onError: release,
       },
@@ -2034,6 +2070,11 @@ class App {
     if (!sent) {
       release();
     }
+  }
+
+  /** E or Explain: asks the conversation to explain what Ask would share; the answer shows in the side pane. */
+  explain(pane) {
+    return this.ask(pane, EXPLAIN_INTENT);
   }
 
   hide(pane) {
@@ -2281,8 +2322,8 @@ class App {
     if (!key) {
       return;
     }
-    // Holding Enter must not ask again and again.
-    if (event.key === 'Enter' && event.repeat) {
+    // Holding Enter or E must not ask again and again.
+    if ((event.key === 'Enter' || event.key === 'e') && event.repeat) {
       event.preventDefault();
       return;
     }
@@ -2300,6 +2341,7 @@ class App {
       A: () => this.selectAll(pane),
       Escape: () => this.clearSelection(pane),
       Enter: () => this.ask(pane),
+      e: () => this.explain(pane),
       a: () => this.accept(pane),
       h: () => this.hide(pane),
       H: () => this.updateView(key, { hidden: [] }),

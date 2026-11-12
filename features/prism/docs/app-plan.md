@@ -182,6 +182,10 @@ the Linux container.
   or columns (stored at the first publish), `manual: true` for any dashed arrow.
 - **[done]** (2026-11-11) App: resizable side pane, two documents side by side, restored
   tabs show whether their conversation ended.
+- **[done]** (2026-11-12) Explain: `E` or the Explain button sends an explain request for
+  the focused item, the selection or the quoted text; the Claude mod submits it by itself;
+  the agent records the explanation with the answer tool and the side pane shows it under
+  "Explanation". Ordinary Ask answers stay in the chat.
 
 ## Later (not planned yet)
 

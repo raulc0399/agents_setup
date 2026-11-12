@@ -45,8 +45,15 @@ automatically extract conversation content or open another agent conversation.
 - Retrieve questions only when the user explicitly asks, using `prism_questions`;
   answer in this exact conversation, then revise the referenced content if asked.
   Keep the answer in the conversation and save it to the relevant md files when
-  it matters. Answers are not recorded in Prism, so for now do not call
-  `prism_answer`; the app changes only when you publish the revised item.
+  it matters. Answers to ordinary questions are not recorded in Prism, so do not
+  call `prism_answer` for them; the app changes only when you publish the
+  revised item.
+- A shared question whose last line starts with `Explain` (`intent:
+  "explain"` in `prism_questions`) is an explain request from Prism's Explain
+  action. Explain the items or the quoted text clearly and briefly in plain
+  text; when it names several items, label each item's part ("Item 2: ...").
+  Record that explanation with `prism_answer` and the request ID, and keep the
+  chat reply to one line. Only explain requests are recorded.
 - Native caller identity comes from the CLI transport. Never supply conversation,
   process, server identity or binding credentials as model arguments.
 - Subagents and forked threads must return their findings to the bound parent

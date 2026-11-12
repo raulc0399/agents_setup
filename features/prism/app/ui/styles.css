@@ -920,6 +920,29 @@ button {
   color: var(--danger);
 }
 
+/* The state of an item's latest explain request, as for questions: on its way, in the
+   prompt box, explained, not delivered, no explanation arrived. */
+.badge.explanation.state-waiting {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.badge.explanation.state-prompt {
+  color: var(--accent);
+}
+
+.badge.explanation.state-done {
+  color: var(--success);
+}
+
+.badge.explanation.state-failed {
+  color: var(--danger);
+}
+
+.badge.explanation.state-lost {
+  color: var(--warning-text);
+}
+
 .excerpt {
   /* Up to three lines of the item's text; the pane shows all of it. */
   display: -webkit-box;
@@ -1263,6 +1286,71 @@ button {
   font-size: 11px;
 }
 
+/* The latest explanation of the focused item, as plain text; the quote is what it explains. */
+.panel-explanation {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--success);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface-muted);
+}
+
+.panel-explanation h3 {
+  margin: 0;
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.explanation-state {
+  margin: 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.explanation-state.state-prompt {
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.explanation-state.state-failed {
+  color: var(--danger);
+  font-style: normal;
+}
+
+.explanation-state.state-lost {
+  color: var(--warning-text);
+  font-style: normal;
+}
+
+.explanation-quote {
+  margin: 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.explanation-text {
+  display: grid;
+  gap: 8px;
+  user-select: text;
+  cursor: text;
+}
+
+.explanation-text p {
+  margin: 0;
+  font-size: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .panel-selection h3 {
   margin: 4px 0;
   color: var(--faint);
@@ -1317,7 +1405,8 @@ button {
   .diagram-svg[data-zoom] .prism-body,
   .diagram-svg[data-zoom] .prism-kind,
   .diagram-svg[data-zoom] .prism-number,
-  .diagram-svg[data-zoom] .prism-dropped-label {
+  .diagram-svg[data-zoom] .prism-dropped-label,
+  .diagram-svg[data-zoom] .prism-explained {
     transition: opacity 150ms ease-out;
   }
 }
@@ -1328,7 +1417,8 @@ button {
 .diagram-svg[data-zoom="far"] .prism-body,
 .diagram-svg[data-zoom="far"] .prism-kind,
 .diagram-svg[data-zoom="far"] .prism-number,
-.diagram-svg[data-zoom="far"] .prism-dropped-label {
+.diagram-svg[data-zoom="far"] .prism-dropped-label,
+.diagram-svg[data-zoom="far"] .prism-explained {
   opacity: 0;
 }
 
@@ -1492,6 +1582,41 @@ button {
 
 .diagram-svg .prism-gate .prism-label {
   fill: var(--gate-text);
+}
+
+/* The badge diagram.js puts on a box asked to be explained, colored as the card's badge. */
+.diagram-svg .prism-explained {
+  --explained: var(--success);
+}
+
+.diagram-svg .prism-explained.prism-state-waiting {
+  --explained: var(--muted);
+}
+
+.diagram-svg .prism-explained.prism-state-prompt {
+  --explained: var(--accent);
+}
+
+.diagram-svg .prism-explained.prism-state-failed {
+  --explained: var(--danger);
+}
+
+.diagram-svg .prism-explained.prism-state-lost {
+  --explained: var(--warning-text);
+}
+
+.diagram-svg .prism-explained-shape {
+  fill: var(--surface);
+  stroke: var(--explained);
+  vector-effect: non-scaling-stroke;
+}
+
+.diagram-svg .prism-explained-label {
+  fill: var(--explained);
+}
+
+.diagram-svg .prism-explained.prism-state-waiting .prism-explained-label {
+  font-style: italic;
 }
 
 /* Selected items: tinted, under the focus highlight. */

@@ -2,7 +2,7 @@
 use crate::actions::{ContentAction, PublishRequest};
 use crate::adapters::{AgentAdapter, NativeEvent, claude::ClaudeAdapter};
 use crate::applink::{AppLink, LinkConfig};
-use crate::model::{AgentKind, DeliveryMode, DeliveryOutcome, Id, MAX_PAYLOAD_BYTES};
+use crate::model::{AgentKind, DeliveryMode, DeliveryOutcome, Id, Intent, MAX_PAYLOAD_BYTES};
 use crate::session::{LiveBinding, read_binding, verify_binding, write_binding};
 use crate::store::Store;
 use anyhow::{Context, Result, bail, ensure};
@@ -49,9 +49,11 @@ pub enum Operation {
     Inspect(InspectParams),
     Action(ActionParams),
     Questions(QuestionParams),
+    /// Records the agent's explanation on an explain request; an ordinary ask is refused.
     Answer(AnswerParams),
-    /// Shared questions not yet placed in the CLI prompt box. The native mod polls this every
-    /// second, so it only reads.
+    /// Shared questions not yet placed in the CLI prompt box, each with its `intent`: the mod
+    /// submits an explain request and fills the prompt box with an ordinary ask. The native
+    /// mod polls this every second, so it only reads.
     Pending(PendingParams),
     /// The link to the desktop app, for the mod's `/prism` command; read-only like `pending`.
     Status(StatusParams),
@@ -104,8 +106,14 @@ pub enum LifecycleEvent {
     SessionEnd {
         reason: String,
     },
-    /// The mod placed a shared question in the CLI prompt box; the user sends it from there.
+    /// The mod placed a shared question in the CLI prompt box, where the user sends it: the
+    /// question becomes `submitted`.
     PromptFilled {
+        request_id: Id,
+    },
+    /// The mod submitted an explain request as a prompt of its own: the question becomes
+    /// `queued`, as the prompt may wait behind a turn and its start is not confirmed.
+    PromptSubmitted {
         request_id: Id,
     },
 }
@@ -255,7 +263,7 @@ pub fn apply_operation(
             let mut last_id = None;
             for question in page {
                 let preview: String = question.text.chars().take(QUESTION_PREVIEW_CHARS).collect();
-                let summary = json!({"request_id":question.request_id,"document_id":question.snapshot.selection.document_id,"revision":question.snapshot.selection.revision,"text_truncated":preview.len() < question.text.len(),"text":preview,"outcome":question.outcome});
+                let summary = json!({"request_id":question.request_id,"document_id":question.snapshot.selection.document_id,"revision":question.snapshot.selection.revision,"text_truncated":preview.len() < question.text.len(),"text":preview,"outcome":question.outcome,"intent":question.intent});
                 let summary_bytes = serde_json::to_vec(&summary)?.len() + 1;
                 if encoded_bytes + summary_bytes > RESPONSE_LIMIT {
                     ensure!(
@@ -280,7 +288,7 @@ pub fn apply_operation(
                 .into_iter()
                 .filter(|question| question.outcome == DeliveryOutcome::Pending)
                 .take(PENDING_LIMIT)
-                .map(|question| json!({"request_id":question.request_id,"text":question.text}))
+                .map(|question| json!({"request_id":question.request_id,"text":question.text,"intent":question.intent}))
                 .collect::<Vec<_>>();
             Ok(json!({"questions":questions}))
         }
@@ -289,6 +297,11 @@ pub fn apply_operation(
             ensure!(
                 question.mode == DeliveryMode::Share,
                 "question was not explicitly shared for CLI retrieval"
+            );
+            // Only explanations are recorded; the answer to an ordinary ask stays in the chat.
+            ensure!(
+                question.intent == Some(Intent::Explain),
+                "only explain requests record an answer; answer this question in the conversation"
             );
             Ok(serde_json::to_value(store.answer_question(
                 workspace.id,
@@ -438,6 +451,14 @@ impl Service {
                 DeliveryOutcome::Submitted,
             )?;
             return Ok(json!({"data":{"filled":true}}));
+        }
+        if let Operation::Lifecycle(LifecycleEvent::PromptSubmitted { request_id }) =
+            &call.operation
+        {
+            let workspace = self.store.workspace(&binding.workspace_key()?)?;
+            self.store
+                .submit_as_prompt(workspace.id, *request_id, binding.generation)?;
+            return Ok(json!({"data":{"submitted":true}}));
         }
         if let Operation::Lifecycle(event) = &call.operation {
             // The bridge loop retires the binding once the observer reports the event.
@@ -1096,6 +1117,8 @@ mod tests {
                     },
                     text: "Explicit question".into(),
                     mode: DeliveryMode::Share,
+                    intent: None,
+                    quoted: None,
                 },
             )
             .unwrap();
@@ -1136,6 +1159,20 @@ mod tests {
         assert!(matches!(
             operation,
             Operation::Lifecycle(LifecycleEvent::PromptFilled { request_id })
+                if request_id == crate::model::Id::from_u128(1)
+        ));
+    }
+
+    #[test]
+    fn prompt_submitted_lifecycle_carries_the_request_id() {
+        let operation: Operation = serde_json::from_value(json!({
+            "method":"lifecycle",
+            "params":{"event":"prompt_submitted","request_id":"00000000-0000-0000-0000-000000000001"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            operation,
+            Operation::Lifecycle(LifecycleEvent::PromptSubmitted { request_id })
                 if request_id == crate::model::Id::from_u128(1)
         ));
     }

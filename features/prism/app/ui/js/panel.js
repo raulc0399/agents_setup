@@ -1,13 +1,16 @@
 import { MOD_KEY, h } from './dom.js';
 import { ACCEPT_NOTE, DROPPED_NOTE, kindText, stateBadges, questionState } from './list.js';
-import { questionsFor, typedQuestion } from './rows.js';
+import { EXPLANATION_STATES, askedQuestions, explanationOf, questionsFor, quotedText, typedQuestion } from './rows.js';
+
+/** The pane's section with an item's explanation. */
+const EXPLANATION_TITLE = 'Explanation';
 
 /**
  * The detail area of one tab's side pane, in the list and in the diagram: the focused item
  * with its text, actions and questions. Without a focused item (only in the diagram, where
  * the user picks one) it shows an overview of the diagram.
  *
- * `actions`: onAsk(), onAccept(), onDrop().
+ * `actions`: onAsk(), onExplain(), onAccept(), onDrop().
  */
 export class DetailPanel {
   constructor(actions) {
@@ -20,23 +23,25 @@ export class DetailPanel {
 
   /**
    * `model`: {document, rows, focus: the focused item's ID or null, selected: Set of selected
-   * item IDs, questions, readOnly: why commands are unavailable, or null, counts: [boxes,
-   * arrows, badges] of the diagram, or null}. Rebuilt only when what it shows changed.
+   * item IDs, questions, readOnly: why commands are unavailable, or null, explainBlocked: why
+   * Explain alone is, or null, ended and now: for the state of explain requests, counts:
+   * [boxes, arrows, badges] of the diagram, or null}. Rebuilt only when what it shows changed.
    */
   render(model) {
     this.model = model;
-    const { readOnly, counts } = model;
+    const { readOnly, explainBlocked = null, counts } = model;
     const row = model.rows.find((candidate) => candidate.id === model.focus) ?? null;
     const selected = model.rows.filter((candidate) => model.selected.has(candidate.id));
     const questions = row ? questionsFor(model.questions, model.document.id, row.id) : [];
-    const signature = JSON.stringify([row, questions, selected.map((item) => [item.number, item.title, item.dropped]), readOnly, row ? null : [model.document.title, counts]]);
+    const explanation = explanationOf(questions, model);
+    const signature = JSON.stringify([row, questions, explanation?.status, selected.map((item) => [item.number, item.title, item.dropped]), readOnly, explainBlocked, row ? null : [model.document.title, counts]]);
     if (signature === this.signature) {
       return;
     }
     this.signature = signature;
-    const actions = row || selected.length > 0 ? this.panelActions(row, selected, readOnly) : null;
+    const actions = row || selected.length > 0 ? this.panelActions(row, selected, readOnly, explainBlocked) : null;
     this.element.replaceChildren(
-      ...(row ? itemPanel(row, questions, actions) : overviewPanel(model.document.title, counts, selected, actions)),
+      ...(row ? itemPanel(row, questions, explanation, actions) : overviewPanel(model.document.title, counts, selected, actions)),
     );
   }
 
@@ -47,9 +52,10 @@ export class DetailPanel {
 
   /**
    * The buttons for the selected items, else the focused one. Dropped items take no part:
-   * with only dropped ones the buttons are disabled and say why.
+   * with only dropped ones the buttons are disabled and say why; `explainBlocked` disables
+   * Explain alone.
    */
-  panelActions(row, selected, readOnly) {
+  panelActions(row, selected, readOnly, explainBlocked) {
     const actionable = selected.filter((item) => !item.dropped).length;
     const onlyDropped = selected.length > 0 ? actionable === 0 : Boolean(row?.dropped);
     const unavailable = readOnly ?? (onlyDropped ? DROPPED_NOTE : null);
@@ -58,14 +64,14 @@ export class DetailPanel {
     return h(
       'div',
       { class: 'panel-actions' },
-      itemActions(selected.length > 0 ? actionable : 0, unavailable, this.actions),
+      itemActions(selected.length > 0 ? actionable : 0, unavailable, explainBlocked, this.actions),
       hint ? h('span', { class: 'hint', text: hint }) : null,
     );
   }
 }
 
-/** The focused item; its `actions` come before its questions. */
-function itemPanel(row, questions, actions) {
+/** The focused item; its `actions` come before its `explanation` and its questions. */
+function itemPanel(row, questions, explanation, actions) {
   const badges = stateBadges(row);
   return [
     h('div', { class: `panel-tag kind-${row.kind}` }, h('span', { class: 'kind', text: kindText(row) }), h('span', { class: 'number', text: row.step !== null ? `· link ${row.number}` : String(row.number) })),
@@ -74,8 +80,37 @@ function itemPanel(row, questions, actions) {
     row.body ? h('div', { class: 'panel-body', text: row.body }) : null,
     row.source ? h('div', { class: 'card-source', text: row.source }) : null,
     actions,
-    ...questions.map(questionBlock),
+    explanation ? explanationSection(row, explanation) : null,
+    ...askedQuestions(questions).map(questionBlock),
   ].filter(Boolean);
+}
+
+/**
+ * The latest explanation of an item as plain text, a paragraph per block of lines, below the
+ * text its request quoted when that was a selection in this item (`quoted`), not the whole
+ * item. While a newer request is not answered, its state (EXPLANATION_STATES) comes first;
+ * the older explanation stays until the newer one arrives.
+ */
+function explanationSection(row, { status, reason, answered }) {
+  const quote = answered?.quoted === row.id ? quotedText(answered, row.number) : '';
+  const state = EXPLANATION_STATES[status].text(reason);
+  return h(
+    'section',
+    { class: 'panel-explanation', 'aria-label': EXPLANATION_TITLE },
+    h('h3', { text: EXPLANATION_TITLE }),
+    state ? h('p', { class: `explanation-state state-${status}`, text: state }) : null,
+    quote ? h('blockquote', { class: 'explanation-quote', text: quote }) : null,
+    answered ? h('div', { class: 'explanation-text' }, paragraphs(answered.answer)) : null,
+  );
+}
+
+/** Blocks of lines separated by blank lines, each a paragraph that keeps its line breaks. */
+function paragraphs(text) {
+  return text
+    .trim()
+    .split(/\n[ \t]*\n/)
+    .filter((paragraph) => paragraph.trim() !== '')
+    .map((paragraph) => h('p', { text: paragraph }));
 }
 
 function overviewPanel(title, counts, selected, actions) {
@@ -121,19 +156,20 @@ function selectionInside(container) {
 }
 
 /**
- * Ask, Accept and Drop for the focused item or, when `selection` items are selected, for
- * those; the labels say which. `unavailable`: why the buttons are disabled, or null.
+ * Ask, Explain, Accept and Drop for the focused item or, when `selection` items are selected,
+ * for those; the labels say which. `unavailable`: why the buttons are disabled, or null;
+ * `explainBlocked`: why Explain is, or null.
  */
-function itemActions(selection, unavailable, actions) {
+function itemActions(selection, unavailable, explainBlocked, actions) {
   const many = selection > 0;
   const what = many ? `the ${selection} selected ${selection === 1 ? 'item' : 'items'}` : 'this item';
   // The count shows only for several items; one selected item reads like the focused one.
   const count = selection > 1 ? ` (${selection})` : '';
-  const button = (className, text, title, action) =>
+  const button = (className, text, title, action, blocked = null) =>
     h('button', {
       class: `button ${className}`,
-      disabled: Boolean(unavailable),
-      title: unavailable ?? title,
+      disabled: Boolean(unavailable ?? blocked),
+      title: unavailable ?? blocked ?? title,
       text,
       onclick: (event) => {
         event.stopPropagation();
@@ -141,10 +177,14 @@ function itemActions(selection, unavailable, actions) {
       },
     });
   const ask = button('primary', `Ask${count}`, `Ask about ${what} (Enter)`, actions.onAsk);
+  const explain = button('', `Explain${count}`, `Explain ${what}; the explanation shows here (E)`, actions.onExplain, explainBlocked);
   // Keeps a text selection inside the item, which becomes the quote.
-  ask.addEventListener('mousedown', (event) => event.preventDefault());
+  for (const quoting of [ask, explain]) {
+    quoting.addEventListener('mousedown', (event) => event.preventDefault());
+  }
   return [
     ask,
+    explain,
     button('', `Accept${count}`, `Accept ${what}. ${ACCEPT_NOTE} (A)`, actions.onAccept),
     button('danger', `Drop${count}`, `Drop ${what} for everyone; U undoes (X)`, actions.onDrop),
   ];

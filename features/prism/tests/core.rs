@@ -349,6 +349,8 @@ fn question_snapshot_and_delivery_persist_without_resend() {
         },
         text: "Explain this flow".into(),
         mode: DeliveryMode::Start,
+        intent: None,
+        quoted: None,
     };
     let prepared = store.prepare_question(workspace, &request).unwrap();
     assert_eq!(prepared.snapshot.elements.len(), 2);
@@ -414,6 +416,8 @@ fn shared_questions_survive_retirement_and_resume() {
         },
         text: "Explain the selected content".into(),
         mode: DeliveryMode::Share,
+        intent: None,
+        quoted: None,
     };
     let shared = store.prepare_question(workspace, &request).unwrap();
     request.request_id = Id::new_v4();
@@ -457,6 +461,8 @@ fn stale_selection_wrong_generation_and_illegal_delivery_transition_fail() {
         },
         text: "Why?".into(),
         mode: DeliveryMode::Queue,
+        intent: None,
+        quoted: None,
     };
     assert!(matches!(
         store.prepare_question(workspace, &request),
@@ -658,6 +664,8 @@ fn unknown_delivery_requires_new_request_for_retry() {
         },
         text: "Explain".into(),
         mode: DeliveryMode::Start,
+        intent: None,
+        quoted: None,
     };
     store.prepare_question(workspace, &request).unwrap();
     store
@@ -1190,6 +1198,8 @@ fn questions_and_answers_on_a_closed_document_stay_and_return_on_reopen() {
         },
         text: "Why this source?".into(),
         mode: DeliveryMode::Share,
+        intent: None,
+        quoted: None,
     };
     store.prepare_question(workspace, &question).unwrap();
     store
@@ -1418,4 +1428,85 @@ fn a_diagram_built_arrow_by_arrow_keeps_its_lane_orientation() {
             assert_eq!(Some(layout.orientation), first);
         }
     }
+}
+
+#[test]
+fn questions_stored_before_intents_load_and_explain_requests_keep_theirs() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let mut store = Store::open(&path).unwrap();
+    let workspace = store.workspace(&key("thread")).unwrap().id;
+    let publication = publication();
+    let result = store.publish(workspace, &publication).unwrap();
+    let ask = PrepareQuestion {
+        request_id: Id::new_v4(),
+        generation: 1,
+        selection: Selection {
+            document_id: result.document_id,
+            revision: 1,
+            ids: vec![publication.elements[0].id],
+        },
+        text: "Item 1: Source".into(),
+        mode: DeliveryMode::Share,
+        intent: None,
+        quoted: None,
+    };
+    let explain = PrepareQuestion {
+        request_id: Id::new_v4(),
+        text: "Item 1: Source\nExplain".into(),
+        intent: Some(Intent::Explain),
+        ..ask.clone()
+    };
+    store.prepare_question(workspace, &ask).unwrap();
+    store.prepare_question(workspace, &explain).unwrap();
+    // A resend with the same request ID but another intent is another request.
+    for changed in [
+        PrepareQuestion {
+            intent: Some(Intent::Explain),
+            ..ask.clone()
+        },
+        PrepareQuestion {
+            intent: None,
+            ..explain.clone()
+        },
+    ] {
+        assert!(matches!(
+            store.prepare_question(workspace, &changed),
+            Err(Error::RequestConflict)
+        ));
+    }
+
+    // An ordinary question is stored as before; the explain request stores its intent.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let content = |request: Id| -> String {
+        connection
+            .query_row(
+                "SELECT content FROM questions WHERE request_id=?1",
+                [request.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(!content(ask.request_id).contains("intent"));
+    assert!(content(explain.request_id).contains(r#""intent":"explain""#));
+    // A question an older binary wrote, without intent and answer, loads as an ordinary ask.
+    let mut older: serde_json::Value = serde_json::from_str(&content(ask.request_id)).unwrap();
+    older.as_object_mut().unwrap().remove("answer");
+    connection
+        .execute(
+            "UPDATE questions SET content=?2 WHERE request_id=?1",
+            [ask.request_id.to_string(), older.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let store = Store::open(&path).unwrap();
+    let loaded = store.question(workspace, ask.request_id).unwrap();
+    assert_eq!((loaded.intent, loaded.answer), (None, None));
+    assert_eq!(
+        store
+            .question(workspace, explain.request_id)
+            .unwrap()
+            .intent,
+        Some(Intent::Explain)
+    );
 }

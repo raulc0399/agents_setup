@@ -1,5 +1,5 @@
 import { h } from './dom.js';
-import { questionsFor } from './rows.js';
+import { EXPLANATION_STATES, askedQuestions, explanationOf, questionsFor } from './rows.js';
 
 /**
  * What a shared question's outcome means for the user. Only shared questions cross to the
@@ -23,8 +23,8 @@ const ANSWERED = { short: 'answered', label: 'Answered', tone: 'answered' };
 export const ACCEPT_NOTE = 'Acceptance is feedback for the agent, never permission to run tools.';
 /** Class and badge of a dropped item, which keeps its card. */
 const DROPPED = 'dropped';
-/** Why Ask, Accept and Drop refuse a dropped item; it stays in the list until U undoes the drop. */
-export const DROPPED_NOTE = 'Dropped items cannot be asked about, accepted or dropped again; U undoes the drop.';
+/** Why Ask, Explain, Accept and Drop refuse a dropped item; it stays in the list until U undoes the drop. */
+export const DROPPED_NOTE = 'Dropped items cannot be asked about, explained, accepted or dropped again; U undoes the drop.';
 
 /**
  * The list view of one tab: a compact card per row; the tab's side pane shows the focused
@@ -42,7 +42,10 @@ export class ListView {
     this.element = h('div', { class: 'view', tabindex: '0' }, this.list);
   }
 
-  /** `model`: {document, rows, focus, selected: Set of selected item IDs, questions}. */
+  /**
+   * `model`: {document, rows, focus, selected: Set of selected item IDs, questions, ended:
+   * whether the conversation ended, now: the time, for the state of explain requests}.
+   */
   render(model) {
     const seen = new Set();
     model.rows.forEach((row, index) => {
@@ -50,7 +53,8 @@ export class ListView {
       const focused = row.id === model.focus;
       const selected = model.selected.has(row.id);
       const questions = questionsFor(model.questions, model.document.id, row.id);
-      const signature = JSON.stringify([row, focused, selected, questions]);
+      const explanation = explanationOf(questions, model);
+      const signature = JSON.stringify([row, focused, selected, questions, explanation?.status]);
       let entry = this.cards.get(row.id);
       if (!entry) {
         entry = {
@@ -64,7 +68,7 @@ export class ListView {
       }
       if (entry.signature !== signature) {
         entry.signature = signature;
-        this.fill(entry.element, row, { focused, selected, questions });
+        this.fill(entry.element, row, { focused, selected, questions, explanation });
       }
       if (this.list.children[index] !== entry.element) {
         this.list.insertBefore(entry.element, this.list.children[index] ?? null);
@@ -84,7 +88,7 @@ export class ListView {
     this.cards.get(id)?.element.scrollIntoView({ block: 'nearest' });
   }
 
-  fill(card, row, { focused, selected, questions }) {
+  fill(card, row, { focused, selected, questions, explanation }) {
     card.className = `card kind-${row.kind}${row.dropped ? ` ${DROPPED}` : ''}${focused ? ' focused' : ''}${selected ? ' selected' : ''}`;
     if (focused) {
       card.setAttribute('aria-current', 'true');
@@ -98,15 +102,19 @@ export class ListView {
     if (row.latestChange) {
       badges.push(h('span', { class: 'badge changed', text: row.latestChange }));
     }
-    if (questions.length > 0) {
-      const latest = questionState(questions[0]);
+    const asked = askedQuestions(questions);
+    if (asked.length > 0) {
+      const latest = questionState(asked[0]);
       badges.push(
         h('span', {
           class: `badge asked tone-${latest.tone}`,
           title: `Latest question: ${latest.text}`,
-          text: `${questions.length === 1 ? 'asked' : `asked ×${questions.length}`} · ${latest.short}`,
+          text: `${asked.length === 1 ? 'asked' : `asked ×${asked.length}`} · ${latest.short}`,
         }),
       );
+    }
+    if (explanation) {
+      badges.push(explanationBadge(explanation));
     }
     const head = h(
       'div',
@@ -138,6 +146,12 @@ export function stateBadges(row) {
     badges.push(h('span', { class: 'badge stale', title: 'Changed after it was accepted; accept it again to confirm', text: 'changed since accepted' }));
   }
   return badges;
+}
+
+/** The state of an item's latest explain request (EXPLANATION_STATES), as its card shows it. */
+function explanationBadge({ status, reason }) {
+  const state = EXPLANATION_STATES[status];
+  return h('span', { class: `badge explanation state-${status}`, title: state.text(reason) ?? 'Explained: the side pane shows the explanation', text: state.badge });
 }
 
 /** `short`, the full `text` with the outcome's reason, and the `tone` of a shared question. */

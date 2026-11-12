@@ -102,6 +102,12 @@ pub struct PrepareQuestion {
     pub selection: Selection,
     pub text: String,
     pub mode: DeliveryMode,
+    /// Left out of the payload hash when `None`, so an ordinary ask hashes as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<Intent>,
+    /// As `intent`, left out of the hash when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted: Option<Id>,
 }
 
 pub(crate) fn bounded(text: &str, maximum: usize, field: &str) -> Result<()> {

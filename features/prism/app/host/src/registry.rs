@@ -1,9 +1,9 @@
 //! Sessions keyed by conversation: the connection that currently speaks for each, the
 //! content it sent (kept in memory only), and the commands awaiting their `reply`. Applies
 //! the rules of `prism_core::protocol` for snapshots, superseding and resending.
-use prism_core::ask::{AskItem, ask_text};
+use prism_core::ask::{AskItem, request_text};
 use prism_core::model::{
-    AgentKind, ContentAction, Document, Id, MAX_TEXT_BYTES, Question, Selection,
+    AgentKind, ContentAction, Document, Id, Intent, MAX_TEXT_BYTES, Question, Selection,
 };
 use prism_core::protocol::{
     APP_PROTOCOL, AppMessage, BridgeMessage, CommandError, Refusal, Session,
@@ -87,10 +87,15 @@ pub struct Content {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     /// `items` name the selected items as the list shows them, each with its text or the
-    /// part the user selected; the user types the question in the CLI prompt box.
+    /// part the user selected (`quoted` names that item); the user types the question in the
+    /// CLI prompt box. With `intent` explain, the agent is asked to explain them instead.
     Ask {
         selection: Selection,
         items: Vec<AskItem>,
+        #[serde(default)]
+        intent: Option<Intent>,
+        #[serde(default)]
+        quoted: Option<Id>,
     },
     Action {
         document_id: Id,
@@ -107,10 +112,17 @@ pub enum Command {
 impl Command {
     fn into_message(self, id: Id) -> AppMessage {
         match self {
-            Command::Ask { selection, items } => AppMessage::Ask {
+            Command::Ask {
+                selection,
+                items,
+                intent,
+                quoted,
+            } => AppMessage::Ask {
                 id,
                 selection,
-                text: ask_text(&items),
+                text: request_text(&items, intent),
+                intent,
+                quoted,
             },
             Command::Action {
                 document_id,

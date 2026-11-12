@@ -649,6 +649,8 @@ mod contract {
             mode,
             outcome: DeliveryOutcome::Pending,
             answer: None,
+            intent: None,
+            quoted: None,
         }
     }
 

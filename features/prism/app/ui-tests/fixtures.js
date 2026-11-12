@@ -114,6 +114,36 @@ const syncQuestions = [
   syncQuestion('00000000000f', 2, 'Is this still open?', { state: 'refused', reason: 'native sending from Prism is disabled for Claude' }),
 ];
 
+/** When the fixtures' explain requests were made: now, so that none timed out. */
+const EXPLAIN_BASE_MS = Date.now();
+
+/** A time-ordered request ID (UUID v7) made `offset` milliseconds after EXPLAIN_BASE_MS. */
+function requestId(offset, request) {
+  const time = (EXPLAIN_BASE_MS + offset).toString(16).padStart(12, '0');
+  return `${time.slice(0, 8)}-${time.slice(8)}-7000-8000-${request}`;
+}
+
+/**
+ * An explain request as the bridge shares it, about `ids` of `documentId` at `revision`, with
+ * the reference `reference`, the explanation `answer` (null while the agent explains), its
+ * delivery `outcome` (queued: submitted by the mod) and the item `quoted` by a selection.
+ * Request IDs are time-ordered, so a larger `request` (12 digits) is a newer request.
+ */
+export function explainRequest(request, documentId, revision, ids, reference, { answer = null, outcome = { state: 'queued', reason: null }, quoted = null } = {}) {
+  return {
+    request_id: requestId(Number(request), request),
+    workspace_id: 'e0000000-0000-4000-8000-000000000001',
+    generation: 1,
+    snapshot: { selection: { document_id: documentId, revision, ids }, document_title: '', elements: {}, relationships: {}, groups: {} },
+    text: `${reference}\nExplain`,
+    mode: 'share',
+    outcome,
+    answer,
+    intent: 'explain',
+    ...(quoted ? { quoted } : {}),
+  };
+}
+
 /** Release flow: three lanes, five arrows (one manual), two gate badges. */
 const releaseItem = (number) => `a4000000-0000-4000-8000-00000000000${number}`;
 const releaseLink = (number) => `b4000000-0000-4000-8000-00000000000${number}`;
@@ -306,6 +336,7 @@ const DIAGRAM_VIEWS = {
   'pane-checks': { focus: null, cameras: {} },
   'diagram-pane-wide': { focus: releaseItem(4), cameras: {} },
   'diagram-pane-narrow': { focus: releaseItem(4), cameras: {} },
+  'diagram-explained': { focus: releaseItem(4), cameras: { [RELEASE]: { detail: 'subtitles', x: -40, y: -24, scale: 1 } } },
 };
 export const CONTENTS_FOR_TESTS = CONTENTS;
 
@@ -322,6 +353,7 @@ const LIST_VIEWS = {
   // A document without arrows or groups: a list without a view switch.
   plain: { document: REVIEW },
   dropped: { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
+  explained: { document: PLAN, focus: TABS_ITEM, hidden: [] },
   'pane-wide': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
   'pane-narrow': { document: PLAN, focus: 'a0000000-0000-4000-8000-000000000004' },
 };
@@ -332,6 +364,27 @@ const DROPPED_SCENARIOS = {
   dropped: [PLAN, ['a0000000-0000-4000-8000-000000000004'], []],
   'diagram-dropped': [RELEASE, [releaseItem(6)], [releaseLink(5)]],
 };
+
+/**
+ * Scenarios with explanations: in the app plan, item 3 explained for a quoted selection,
+ * item 6 waiting and item 2 not delivered; in the release flow, item 4 explained in full,
+ * item 2 waiting in the prompt box and the text box 6 explained.
+ */
+const EXPLAINED_SCENARIOS = ['explained', 'diagram-explained'];
+const EXPLANATION =
+  'A tab shows one conversation: the documents its agent published, with their questions.\n\nTabs move between windows by drag or by the context menu.\nA project opens its next conversation in the window it used last.';
+function explainedContents() {
+  const contents = structuredClone(CONTENTS);
+  contents[LIVE].questions.push(
+    explainRequest('000000000001', PLAN, 3, [TABS_ITEM], 'Item 3: Windows and tabs\n> One tab per conversation', { answer: EXPLANATION, quoted: TABS_ITEM }),
+    explainRequest('000000000002', PLAN, 3, ['a0000000-0000-4000-8000-000000000006'], 'Item 6: List view\n> Cards with kind color, the focused card expanded, keyboard navigation, ask, hide and drop.'),
+    explainRequest('000000000005', PLAN, 3, ['a0000000-0000-4000-8000-000000000002'], 'Item 2: Listener, pairing file, session registry\n> One process', { outcome: { state: 'failed', reason: 'binding retired' } }),
+    explainRequest('000000000003', RELEASE, 2, [releaseItem(4)], 'Item 4: Review anomalies\n> An operator checks flagged readings before they are released.', { answer: 'The operator sees every batch with a flagged reading and releases or rejects it.\n\nBatches without flags skip the queue.' }),
+    explainRequest('000000000004', RELEASE, 2, [releaseItem(2)], 'Item 2: Upload batch\n> Sends the queued readings over HTTPS once the device is online.', { outcome: { state: 'submitted' } }),
+    explainRequest('000000000006', RELEASE, 2, [releaseItem(6)], 'Item 6: Archive raw batches\n> Raw uploads are kept for 90 days for audits.', { answer: 'Kept for audits.' }),
+  );
+  return contents;
+}
 
 /** Scenarios whose release flow has long texts: a title on two lines, a long text, one too long for its box, and a long word. */
 const LONG_TEXT_SCENARIOS = ['diagram-long', 'diagram-long-full'];
@@ -521,6 +574,9 @@ export function fixture(scenario) {
   }
   if (LANE_SCENARIOS[scenario]) {
     contents = laneContents(LANE_SCENARIOS[scenario]);
+  }
+  if (EXPLAINED_SCENARIOS.includes(scenario)) {
+    contents = explainedContents();
   }
   const state = { status: status(), sessions: SESSIONS, arrangement: arrangement(active, views) };
   state.arrangement.windows[0].pane_width = PANE_WIDTHS[scenario] ?? null;

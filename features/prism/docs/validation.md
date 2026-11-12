@@ -163,3 +163,28 @@ formatting, Clippy with warnings denied and the release build passed;
 The real loop against the desktop app (publish, ask, answer, drop, undo,
 `/clear`, resume) needs the app running on the host and a Claude restart so the
 changed mod loads; it was not run in this batch.
+
+## Explain (2026-11-12)
+
+Automated: `claude plugin test plugins/claude` runs `plugins/claude/tests/prism.test.ts`
+against the engine's test kit, with the bridge faked behind `$.process.run`, `$.fs.read`
+and `$.http.fetch` and the poll on a mocked clock: an ask fills the prompt box and reports
+`prompt_filled`; an explain request is submitted once and reports `prompt_submitted` only
+after the submission resolved, while later polls do not submit it again; a dropped or
+rejected submission goes to the prompt box (`prompt_filled`) and the other pending
+questions go on; a fill the box refuses is tried again at the next poll and never
+submitted again. The bridge side (`queued` for a submitted, `submitted` for a filled
+request, answers only for explain requests) is in `tests/applink.rs`, the app side in
+`app/ui-tests` (`action-checks`, `split-checks`).
+
+Manual, in the real run on the Mac (not done here; needs the new app, the new bridge
+binary and a Claude restart):
+
+- Explain on an idle conversation: the request is sent without Enter, the agent records
+  the explanation, the item shows it with its `explained` badge.
+- Explain while a turn runs: the request waits behind it ("Explaining…") and is answered
+  after the turn.
+- A submission the CLI refuses (for example under a dialog or a refusing hook) lands in the
+  prompt box; the item says "In the CLI prompt box: press Enter there".
+- `/clear` or exit before the answer: the item says "No explanation arrived; E asks again".
+- A Codex tab: Explain is disabled with "Explain needs the Claude mod; ask in Codex instead".

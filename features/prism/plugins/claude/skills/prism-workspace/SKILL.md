@@ -39,11 +39,19 @@ automatically extract conversation content or open another agent conversation.
 - A prompt that quotes an item and carries `[prism:<request_id>]` came from
   Prism's ask action: the user asks about that item or the quoted text, with
   the question typed after the marker. Answer in this conversation and save the
-  answer to the relevant md files when it matters. Answers are not recorded in
-  Prism, so for now do not call `mcp__prism__answer`; the app changes only when
-  the item itself changes, when you publish the revised item. Call
+  answer to the relevant md files when it matters. Answers to these are not
+  recorded in Prism, so do not call `mcp__prism__answer` for them; the app
+  changes only when the item itself changes, when you publish the revised item. Call
   `mcp__prism__questions` with the request ID when you need the frozen content
   snapshot.
+- A prompt with the same reference and a last line that starts with `Explain`,
+  followed by `[prism:<request_id>]`, is an explain request from Prism's Explain
+  action (`intent: "explain"` in `mcp__prism__questions`); it usually arrives as
+  a message from the Prism plugin. Explain the items or the quoted text clearly
+  and briefly in plain text; when it names several items, label each item's part
+  ("Item 2: ..."). Record that explanation with `mcp__prism__answer` and the
+  request ID, and keep the chat reply to one line. Only explain requests are
+  recorded.
 - Retrieve other shared questions only when the user explicitly asks, using
   `mcp__prism__questions`; answer in this exact conversation, then revise the
   referenced content if asked.

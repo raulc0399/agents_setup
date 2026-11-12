@@ -168,4 +168,5 @@ these facts.
 | --- | --- |
 | Share + same-session retrieval (`mcp__prism__questions`) | ENABLED |
 | Start / Steer / Queue | DISABLED: the prompt receipt lacks request-to-turn correlation |
+| Explain request (`intent: "explain"`) | ENABLED: the mod submits it with `$.prompt.submit({text})` and reports `prompt_submitted` (outcome `queued`, start not confirmed); the `[prism:<id>]` marker and the answer tool's request ID correlate it, not the turn. A dropped or failed submission goes to the prompt box and reports `prompt_filled` (outcome `submitted`, shown as "In the CLI prompt box"). Tested by `claude plugin test plugins/claude` |
 | Interactive approval ownership, busy-queue cancellation | NOT VERIFIED (authenticated interactive runs required) |

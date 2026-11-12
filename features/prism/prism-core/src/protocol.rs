@@ -37,7 +37,7 @@
 //! `undo` carry no request ID, so a resend of one that committed fails with `stale_revision`,
 //! and the app then sends `fetch` and shows the current content.
 use crate::model::{
-    AgentKind, ContentAction, Document, Id, MAX_PAYLOAD_BYTES, Question, Selection,
+    AgentKind, ContentAction, Document, Id, Intent, MAX_PAYLOAD_BYTES, Question, Selection,
 };
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,14 @@ pub enum AppMessage {
         id: Id,
         selection: Selection,
         text: String,
+        /// Stored on the question; `None` for an ordinary ask. Optional and left out when
+        /// `None`: an older bridge ignores it and shares the request as an ordinary ask.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent: Option<Intent>,
+        /// The item quoted by a part the user selected (`Question::quoted`); optional as
+        /// `intent`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quoted: Option<Id>,
     },
     Action {
         id: Id,

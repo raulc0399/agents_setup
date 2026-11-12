@@ -408,21 +408,45 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut question = read_question(&transaction, workspace, request_id)?;
-        if question.generation != generation || question.outcome != *expected {
-            return Err(Error::Invalid(
-                "delivery generation or outcome changed".into(),
-            ));
-        }
-        validate_transition(expected, &outcome)?;
-        question.outcome = outcome;
-        transaction.execute(
-            "UPDATE questions SET content=?3 WHERE workspace_id=?1 AND request_id=?2",
-            params![
-                workspace.to_string(),
-                request_id.to_string(),
-                serialized(&question)?
-            ],
+        let question = transition(
+            &transaction,
+            workspace,
+            request_id,
+            generation,
+            expected,
+            outcome,
+        )?;
+        transaction.commit()?;
+        Ok(question)
+    }
+
+    /// A pending question the mod submitted as a prompt of its own: `submitted`, then
+    /// `queued` without a reason, as the prompt may wait behind a turn and its start is not
+    /// confirmed. One commit, so no reader sees it `submitted`, which means "in the prompt box".
+    pub fn submit_as_prompt(
+        &mut self,
+        workspace: Id,
+        request_id: Id,
+        generation: u64,
+    ) -> Result<Question> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transition(
+            &transaction,
+            workspace,
+            request_id,
+            generation,
+            &DeliveryOutcome::Pending,
+            DeliveryOutcome::Submitted,
+        )?;
+        let question = transition(
+            &transaction,
+            workspace,
+            request_id,
+            generation,
+            &DeliveryOutcome::Submitted,
+            DeliveryOutcome::Queued { reason: None },
         )?;
         transaction.commit()?;
         Ok(question)
@@ -635,6 +659,35 @@ fn restore_changed<T: Clone + PartialEq>(
     Ok(())
 }
 
+/// Moves a question of `generation` from `expected` to `outcome` inside `connection`'s
+/// transaction; refused when either changed meanwhile or the transition is not allowed.
+fn transition(
+    connection: &Connection,
+    workspace: Id,
+    request_id: Id,
+    generation: u64,
+    expected: &DeliveryOutcome,
+    outcome: DeliveryOutcome,
+) -> Result<Question> {
+    let mut question = read_question(connection, workspace, request_id)?;
+    if question.generation != generation || question.outcome != *expected {
+        return Err(Error::Invalid(
+            "delivery generation or outcome changed".into(),
+        ));
+    }
+    validate_transition(expected, &outcome)?;
+    question.outcome = outcome;
+    connection.execute(
+        "UPDATE questions SET content=?3 WHERE workspace_id=?1 AND request_id=?2",
+        params![
+            workspace.to_string(),
+            request_id.to_string(),
+            serialized(&question)?
+        ],
+    )?;
+    Ok(question)
+}
+
 fn validate_transition(previous: &DeliveryOutcome, next: &DeliveryOutcome) -> Result<()> {
     use DeliveryOutcome::*;
     let allowed = match previous {
@@ -715,6 +768,8 @@ fn insert_question(
         mode: request.mode.clone(),
         outcome: DeliveryOutcome::Pending,
         answer: None,
+        intent: request.intent,
+        quoted: request.quoted,
     };
     connection.execute(
             "INSERT INTO questions(workspace_id, request_id, payload_hash, content) VALUES(?1, ?2, ?3, ?4)",

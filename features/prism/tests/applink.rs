@@ -3,14 +3,15 @@ use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
 use prism::applink::{AppLink, LinkConfig, LinkState};
 use prism::bridge::{
     ActionParams, AnswerParams, BridgeClient, LifecycleEvent, Operation, PendingParams,
-    StatusParams, store_path,
+    QuestionParams, StatusParams, store_path,
 };
 use prism::model::{
-    AgentKind, ContentAction, DeliveryMode, DeliveryOutcome, Document, ElementKind, Id, Question,
-    Selection,
+    AgentKind, ContentAction, DeliveryMode, DeliveryOutcome, Document, ElementKind, Id, Intent,
+    Question, Selection,
 };
 use prism::session::{LiveBinding, RuntimeDirectory, read_binding, write_binding};
 use prism::store::Store;
+use prism_core::ask::{AskItem, request_text};
 use prism_core::pairing::Pairing;
 use prism_core::protocol::{
     self, APP_PROTOCOL, AppMessage, BridgeMessage, CommandError, MAX_MESSAGE_BYTES, Prover,
@@ -723,6 +724,8 @@ fn commands_apply_through_the_shared_actions() {
                 ids: vec![element],
             },
             text: "Item 1: Node\n> Body".into(),
+            intent: None,
+            quoted: None,
         },
     );
     let (_, questions) = update(&mut socket);
@@ -772,6 +775,8 @@ fn commands_apply_through_the_shared_actions() {
                 ids: vec![element],
             },
             text: "Item 1: Node".into(),
+            intent: None,
+            quoted: None,
         },
     );
     assert!(matches!(
@@ -909,6 +914,8 @@ fn ask_resent_after_reconnect_is_shared_once() {
             ids: vec![element],
         },
         text: "Item 1: Node".into(),
+        intent: None,
+        quoted: None,
     };
     send(&mut socket, &ask);
     drop(socket);
@@ -1019,6 +1026,8 @@ fn questions_not_shared_never_cross() {
         },
         text: text.into(),
         mode: DeliveryMode::Start,
+        intent: None,
+        quoted: None,
     };
     store
         .prepare_question(workspace, &private("before the app"))
@@ -1042,10 +1051,10 @@ fn questions_not_shared_never_cross() {
 }
 
 #[test]
-fn answer_and_prompt_box_reports_arrive_as_updates() {
+fn an_ordinary_ask_is_filled_and_its_answer_stays_in_the_chat() {
     let fixture = Fixture::new();
     let bridge = fixture.start_bridge();
-    let (document, element) = fixture.publish("Answered");
+    let (document, element) = fixture.publish("Asked");
     let (mut socket, ..) = fixture.connect();
     let ask = Id::new_v4();
     send(
@@ -1058,23 +1067,128 @@ fn answer_and_prompt_box_reports_arrive_as_updates() {
                 ids: vec![element],
             },
             text: "Item 1: Node".into(),
+            intent: None,
+            quoted: None,
         },
     );
-    update(&mut socket);
+    let (_, questions) = update(&mut socket);
+    assert_eq!(questions[0].intent, None);
     assert_eq!(reply(&mut socket, ask), None);
-    // The mod places the question in the prompt box.
+    // The mod fills the prompt box: `pending` names no intent.
+    let pending = fixture.call(Operation::Pending(PendingParams {}));
+    assert_eq!(
+        pending["data"]["questions"][0]["intent"],
+        serde_json::Value::Null
+    );
     fixture.call(Operation::Lifecycle(LifecycleEvent::PromptFilled {
         request_id: ask,
     }));
     let (_, questions) = update(&mut socket);
     assert_eq!(questions[0].outcome, DeliveryOutcome::Submitted);
-    // The agent records its answer.
-    fixture.call(Operation::Answer(AnswerParams {
-        request_id: ask,
-        text: "Because.".into(),
+    // The answer tool refuses it: the agent answers in the chat, nothing is recorded.
+    let refused = BridgeClient::new(&fixture.binding_path).unwrap().call(
+        &fixture.conversation,
+        Operation::Answer(AnswerParams {
+            request_id: ask,
+            text: "Because.".into(),
+        }),
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("only explain requests record an answer"),
+    );
+    let fetch = Id::new_v4();
+    send(&mut socket, &AppMessage::Fetch { id: fetch });
+    let (_, questions) = snapshot(&mut socket);
+    assert_eq!(questions[0].answer, None);
+    assert_eq!(reply(&mut socket, fetch), None);
+    fixture.stop(bridge, socket);
+}
+
+#[test]
+fn an_explain_request_is_delivered_and_its_explanation_arrives_as_an_update() {
+    let fixture = Fixture::new();
+    let bridge = fixture.start_bridge();
+    let (document, element) = fixture.publish("Explained");
+    let (mut socket, ..) = fixture.connect();
+    let explain = Id::new_v4();
+    let text = request_text(
+        &[AskItem {
+            number: 1,
+            title: "Node".into(),
+            quote: "Body".into(),
+        }],
+        Some(Intent::Explain),
+    );
+    assert_eq!(text, "Item 1: Node\n> Body\nExplain");
+    send(
+        &mut socket,
+        &AppMessage::Ask {
+            id: explain,
+            selection: Selection {
+                document_id: document,
+                revision: 1,
+                ids: vec![element],
+            },
+            text: text.clone(),
+            intent: Some(Intent::Explain),
+            quoted: Some(element),
+        },
+    );
+    // A shared question with the intent and the explain line.
+    let (_, questions) = update(&mut socket);
+    assert_eq!(questions[0].request_id, explain);
+    assert_eq!(questions[0].mode, DeliveryMode::Share);
+    assert_eq!(questions[0].intent, Some(Intent::Explain));
+    assert_eq!(questions[0].text, text);
+    assert_eq!(questions[0].quoted, Some(element));
+    assert_eq!(reply(&mut socket, explain), None);
+
+    // `pending` hands it to the mod with its intent, and so does the questions listing.
+    let pending = fixture.call(Operation::Pending(PendingParams {}));
+    assert_eq!(
+        pending["data"]["questions"][0],
+        serde_json::json!({"request_id":explain,"text":text,"intent":"explain"})
+    );
+    let listed = fixture.call(Operation::Questions(QuestionParams {
+        request_id: None,
+        cursor: None,
+    }));
+    assert_eq!(listed["data"]["questions"][0]["intent"], "explain");
+    // The mod submitted it as a prompt of its own: queued in one change, never `submitted`
+    // (in the prompt box) on the way.
+    fixture.call(Operation::Lifecycle(LifecycleEvent::PromptSubmitted {
+        request_id: explain,
     }));
     let (_, questions) = update(&mut socket);
-    assert_eq!(questions[0].answer.as_deref(), Some("Because."));
+    assert_eq!(
+        questions[0].outcome,
+        DeliveryOutcome::Queued { reason: None }
+    );
+
+    // The agent records the explanation; the app receives it, and a later one replaces it.
+    for explanation in ["It holds the body.", "It holds the body.\n\nNothing else."] {
+        fixture.call(Operation::Answer(AnswerParams {
+            request_id: explain,
+            text: explanation.into(),
+        }));
+        let (_, questions) = update(&mut socket);
+        assert_eq!(questions[0].answer.as_deref(), Some(explanation));
+    }
+    // It comes back with the whole content, as after an app restart.
+    let fetch = Id::new_v4();
+    send(&mut socket, &AppMessage::Fetch { id: fetch });
+    let (_, questions) = snapshot(&mut socket);
+    assert_eq!(
+        (questions[0].intent, questions[0].answer.as_deref()),
+        (
+            Some(Intent::Explain),
+            Some("It holds the body.\n\nNothing else.")
+        )
+    );
+    assert_eq!(reply(&mut socket, fetch), None);
     fixture.stop(bridge, socket);
 }
 
@@ -1099,6 +1213,8 @@ fn commands_are_refused_for_an_unverified_or_retired_binding() {
                 ids: vec![element],
             },
             text: "Item 1: Node 0".into(),
+            intent: None,
+            quoted: None,
         },
     );
     assert!(matches!(

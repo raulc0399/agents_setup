@@ -5,8 +5,8 @@ use common::*;
 use prism_app_host::registry::{Command, HostEvent, Link};
 use prism_core::ask::AskItem;
 use prism_core::model::{
-    ContentAction, DeliveryMode, DeliveryOutcome, Id, MAX_PAYLOAD_BYTES, MAX_TEXT_BYTES, Question,
-    Selection, SelectionSnapshot,
+    ContentAction, DeliveryMode, DeliveryOutcome, Id, Intent, MAX_PAYLOAD_BYTES, MAX_TEXT_BYTES,
+    Question, Selection, SelectionSnapshot,
 };
 use prism_core::protocol::*;
 use serde_json::json;
@@ -56,6 +56,8 @@ fn shared_question(request: u128) -> Question {
         mode: DeliveryMode::Share,
         outcome: DeliveryOutcome::Pending,
         answer: None,
+        intent: None,
+        quoted: None,
     }
 }
 
@@ -396,6 +398,8 @@ fn commands_get_fresh_ids_and_replies_are_matched() {
             title: "First".into(),
             quote: "First body".into(),
         }],
+        intent: None,
+        quoted: None,
     };
     let first = app.host.send(&key(), ask).unwrap();
     let second = app.host.send(&key(), archive()).unwrap();
@@ -409,6 +413,8 @@ fn commands_get_fresh_ids_and_replies_are_matched() {
             id: first,
             selection: selection(),
             text: "Item 1: First\n> First body".into(),
+            intent: None,
+            quoted: None,
         }
     );
     assert!(matches!(bridge.receive(), AppMessage::Action { id, .. } if id == second));
@@ -473,6 +479,46 @@ fn an_ask_about_several_items_names_each_of_them() {
                 ids: vec![Id::from_u128(101), Id::from_u128(100)],
             },
             text: "Item 2: Second\n> Second body\nItem 1: First\n> First".into(),
+            intent: None,
+            quoted: None,
+        }
+    );
+}
+
+#[test]
+fn an_explain_request_carries_its_intent_and_the_explain_line() {
+    let app = start_app();
+    let mut bridge = app.connect(session(1, 1));
+    bridge.snapshot(vec![document(1, 1, &["First", "Second"])], Vec::new());
+    app.wait_for("loaded", |state| {
+        state.sessions.iter().any(|session| session.loaded)
+    });
+
+    // As the UI sends it.
+    let explain: Command = serde_json::from_value(json!({
+        "type": "ask",
+        "selection": {"document_id": Id::from_u128(1), "revision": 1, "ids": [Id::from_u128(100), Id::from_u128(101)]},
+        "items": [
+            {"number": 1, "title": "First", "quote": "First"},
+            {"number": 2, "title": "Second", "quote": "cond"},
+        ],
+        "intent": "explain",
+        "quoted": Id::from_u128(101),
+    }))
+    .unwrap();
+    let id = app.host.send(&key(), explain).unwrap();
+    assert_eq!(
+        bridge.receive(),
+        AppMessage::Ask {
+            id,
+            selection: Selection {
+                document_id: Id::from_u128(1),
+                revision: 1,
+                ids: vec![Id::from_u128(100), Id::from_u128(101)],
+            },
+            text: "Item 1: First\n> First\nItem 2: Second\n> cond\nExplain".into(),
+            intent: Some(Intent::Explain),
+            quoted: Some(Id::from_u128(101)),
         }
     );
 }
@@ -522,6 +568,8 @@ fn an_ask_over_the_text_limit_is_refused_before_it_is_sent() {
             title: "First".into(),
             quote: "x".repeat(MAX_TEXT_BYTES),
         }],
+        intent: None,
+        quoted: None,
     };
     let error = app.host.send(&key(), ask).unwrap_err();
     assert!(

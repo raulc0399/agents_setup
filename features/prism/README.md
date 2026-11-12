@@ -125,7 +125,11 @@ type your question after it and press Enter there. Answers are kept in the
 conversation and saved to the md files when relevant; they are not recorded in
 the app, which changes only when the agent publishes the revised item. Codex has no
 prompt box access: ask it to retrieve the shared question with `prism_questions`.
-Share does not start a model turn or prove an answer began. **Drop** is the
+Share does not start a model turn or prove an answer began. **Explain** (`E`)
+picks the same items or quote and asks the agent to explain them: with Claude Code
+the mod submits the request by itself, the agent records the explanation with the
+answer tool, and the side pane shows it under the item ("Explaining…" until it
+arrives; a newer one replaces it), with an `explained` badge on the card and box. **Drop** is the
 shared archive: a dropped item stays in its place, greyed with a `dropped` badge,
 so numbers never shift; it cannot be asked about or accepted, and `U` undoes it.
 **hide** and the filter only affect that tab. **Close** (× on a document or `W`)

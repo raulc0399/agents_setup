@@ -93,7 +93,7 @@ fn authentication_precedes_binding_and_retirement() {
 fn operations_preserve_replay_and_expose_only_explicit_shares() {
     use prism::actions::{ElementInput, PrepareQuestion, PublishRequest};
     use prism::bridge::{AnswerParams, PendingParams, QuestionParams, apply_operation};
-    use prism::model::{DeliveryMode, ElementKind, Id, Selection};
+    use prism::model::{DeliveryMode, ElementKind, Id, Intent, Selection};
     use prism::store::Store;
     let mut fixture = Fixture::new();
     fixture
@@ -147,6 +147,8 @@ fn operations_preserve_replay_and_expose_only_explicit_shares() {
         selection: selection.clone(),
         text: "native-only-question".into(),
         mode: DeliveryMode::Start,
+        intent: None,
+        quoted: None,
     };
     store.prepare_question(workspace.id, &private).unwrap();
     let shared = PrepareQuestion {
@@ -214,35 +216,53 @@ fn operations_preserve_replay_and_expose_only_explicit_shares() {
         pending["questions"][0]["request_id"],
         shared.request_id.to_string()
     );
-    // Only explicitly shared questions take an answer; it is stored beside the question.
-    assert!(
-        apply_operation(
-            &mut store,
-            &fixture.binding,
-            Operation::Answer(AnswerParams {
-                request_id: private.request_id,
-                text: "never".into(),
-            })
-        )
-        .is_err()
-    );
+    // Only explicitly shared explain requests take an answer; it is stored beside the
+    // question. The answer to an ordinary ask stays in the chat.
+    let explain = PrepareQuestion {
+        request_id: Id::new_v4(),
+        text: "explicitly-shared\nExplain".into(),
+        intent: Some(Intent::Explain),
+        ..shared.clone()
+    };
+    store.prepare_question(workspace.id, &explain).unwrap();
+    for request_id in [private.request_id, shared.request_id] {
+        assert!(
+            apply_operation(
+                &mut store,
+                &fixture.binding,
+                Operation::Answer(AnswerParams {
+                    request_id,
+                    text: "never".into(),
+                })
+            )
+            .is_err()
+        );
+    }
     let answered = apply_operation(
         &mut store,
         &fixture.binding,
         Operation::Answer(AnswerParams {
-            request_id: shared.request_id,
+            request_id: explain.request_id,
             text: "Because ancestry is stable.".into(),
         }),
     )
     .unwrap();
     assert_eq!(answered["answer"], "Because ancestry is stable.");
+    assert_eq!(answered["intent"], "explain");
     assert_eq!(
         store
-            .question(workspace.id, shared.request_id)
+            .question(workspace.id, explain.request_id)
             .unwrap()
             .answer
             .as_deref(),
         Some("Because ancestry is stable.")
+    );
+    assert_eq!(
+        store
+            .question(workspace.id, shared.request_id)
+            .unwrap()
+            .answer,
+        None
     );
     let mut other = fixture.binding.clone();
     other.conversation = Some(Uuid::new_v4().to_string());
@@ -376,6 +396,8 @@ fn claude_session_end_retires_the_binding_and_preserves_shared_questions() {
                     },
                     text: "Shared before /clear".into(),
                     mode: DeliveryMode::Share,
+                    intent: None,
+                    quoted: None,
                 },
             )
             .unwrap();
@@ -473,6 +495,8 @@ fn listing_all_documents_and_shared_questions_supports_pagination() {
                     },
                     text: "\u{0001}".repeat(prism::model::MAX_TEXT_BYTES),
                     mode: DeliveryMode::Share,
+                    intent: None,
+                    quoted: None,
                 },
             )
             .unwrap();

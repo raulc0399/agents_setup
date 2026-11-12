@@ -199,6 +199,112 @@ export function questionsFor(questions, documentId, itemId) {
     );
 }
 
+/** The `intent` of an explain request, as `Intent::Explain` in prism-core. */
+export const EXPLAIN_INTENT = 'explain';
+/** How `ask_text` in prism-core's `ask.rs` starts an item's reference line and its quoted lines. */
+const REFERENCE_PREFIX = 'Item';
+const QUOTE_PREFIX = '> ';
+
+/** Of an item's questions, the ordinary ones: explain requests show as its explanation instead. */
+export function askedQuestions(questions) {
+  return questions.filter((question) => question.intent !== EXPLAIN_INTENT);
+}
+
+/**
+ * How long an explain request on its way (shared or submitted, no answer) may wait before the
+ * item says that no explanation arrived. Measured from its request ID, which the app makes
+ * time-ordered (UUID v7); a request with another ID never times out.
+ */
+export const EXPLAIN_TIMEOUT_MS = 10 * 60 * 1000;
+/** Outcomes that mean the request never reached the conversation. */
+const UNDELIVERED = new Set(['failed', 'refused', 'dropped', 'unknown']);
+/** The UUID version digit of a time-ordered ID, and its 48-bit time in milliseconds. */
+const V7_VERSION_INDEX = 14;
+const V7_VERSION = '7';
+
+/**
+ * What each state of an item's latest explain request shows: `badge` on its card (in capitals
+ * on its box), `text` in the side pane. `waiting`: on its way; `prompt`: placed in the CLI
+ * prompt box because it could not be submitted; `failed`: not delivered; `lost`: no answer
+ * before the conversation ended or EXPLAIN_TIMEOUT_MS passed; `done`: explained.
+ */
+export const EXPLANATION_STATES = {
+  waiting: { badge: 'explaining…', text: () => 'Explaining…' },
+  prompt: { badge: 'in prompt box', text: () => 'In the CLI prompt box: press Enter there' },
+  failed: { badge: 'not delivered', text: (reason) => `Could not be delivered${reason ? `: ${reason}` : ''}; E asks again` },
+  lost: { badge: 'not explained', text: () => 'No explanation arrived; E asks again' },
+  done: { badge: 'explained', text: () => null },
+};
+
+/** When a time-ordered request ID was made, in milliseconds since the epoch; null for another ID. */
+export function requestTime(id) {
+  if (id[V7_VERSION_INDEX] !== V7_VERSION) {
+    return null;
+  }
+  return parseInt(id.slice(0, 8) + id.slice(9, 13), 16);
+}
+
+/**
+ * What an item shows of its explain requests, from its questions the latest first
+ * (`questionsFor`): `status`, the state of the latest one (EXPLANATION_STATES), with the
+ * `reason` of an outcome that failed, and `answered`, the latest one with an answer, which
+ * replaces every older explanation. `ended`: the conversation ended; `now`: the time.
+ * Null when it was never explained.
+ */
+export function explanationOf(questions, { ended = false, now = Date.now() } = {}) {
+  const requests = questions.filter((question) => question.intent === EXPLAIN_INTENT);
+  if (requests.length === 0) {
+    return null;
+  }
+  const latest = requests[0];
+  return {
+    status: latest.answer ? 'done' : requestStatus(latest, ended, now),
+    reason: latest.outcome.reason ?? null,
+    answered: requests.find((question) => question.answer) ?? null,
+  };
+}
+
+function requestStatus(question, ended, now) {
+  if (UNDELIVERED.has(question.outcome.state)) {
+    return 'failed';
+  }
+  if (ended) {
+    return 'lost';
+  }
+  if (question.outcome.state === 'submitted') {
+    return 'prompt';
+  }
+  const time = requestTime(question.request_id);
+  return time !== null && now - time > EXPLAIN_TIMEOUT_MS ? 'lost' : 'waiting';
+}
+
+/** When the next explain request on its way among `questions` times out, or null. */
+export function nextExplainTimeout(questions, now = Date.now()) {
+  const due = questions
+    .filter((question) => question.intent === EXPLAIN_INTENT && !question.answer && !UNDELIVERED.has(question.outcome.state) && question.outcome.state !== 'submitted')
+    .map((question) => requestTime(question.request_id))
+    .filter((time) => time !== null && time + EXPLAIN_TIMEOUT_MS >= now)
+    .map((time) => time + EXPLAIN_TIMEOUT_MS);
+  return due.length > 0 ? Math.min(...due) : null;
+}
+
+/** The text a question quoted of the item it numbered `number`: the quoted lines below its reference line. */
+export function quotedText(question, number) {
+  const lines = question.text.split('\n');
+  const start = lines.findIndex((line) => line.startsWith(`${REFERENCE_PREFIX} ${number}: `));
+  if (start === -1) {
+    return '';
+  }
+  const quoted = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.startsWith(QUOTE_PREFIX)) {
+      break;
+    }
+    quoted.push(line.slice(QUOTE_PREFIX.length));
+  }
+  return quoted.join('\n');
+}
+
 /**
  * The question typed in the app's former question editor: what follows the quoted reference
  * after a blank line. Empty for questions asked since, whose question is typed in the CLI.

@@ -272,6 +272,15 @@ pub enum DeliveryOutcome {
     Unknown { reason: String },
 }
 
+/// What the user asked the agent to do with a shared question, beyond reading the reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Intent {
+    /// Explain the items or the quoted text; the agent records the explanation through the
+    /// answer tool, and the app shows it on each item.
+    Explain,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionSnapshot {
     pub selection: Selection,
@@ -293,6 +302,14 @@ pub struct Question {
     /// Recorded by the agent through the answer tool after replying in its conversation.
     #[serde(default)]
     pub answer: Option<String>,
+    /// `None` for an ordinary ask. Optional and left out when `None`, so questions stored
+    /// before it load and ordinary questions serialize as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<Intent>,
+    /// The item whose quote in `text` is a part the user selected, not its whole text; `None`
+    /// when every item is quoted in full. Optional and left out when `None`, as `intent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted: Option<Id>,
 }
 
 /// Escape terminal controls at rendering boundaries, including persisted content.

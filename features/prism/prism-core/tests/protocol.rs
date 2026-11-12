@@ -59,6 +59,8 @@ fn question() -> Question {
         mode: DeliveryMode::Share,
         outcome: DeliveryOutcome::Pending,
         answer: Some("It polls.".into()),
+        intent: None,
+        quoted: None,
     }
 }
 
@@ -164,6 +166,15 @@ fn app_messages_round_trip() {
             id,
             selection: selection(),
             text: "Item 1: Collect\n> Reads the device".into(),
+            intent: None,
+            quoted: None,
+        },
+        AppMessage::Ask {
+            id,
+            selection: selection(),
+            text: "Item 1: Collect\n> Reads the device\nExplain".into(),
+            intent: Some(Intent::Explain),
+            quoted: None,
         },
         AppMessage::Action {
             id,
@@ -311,6 +322,55 @@ fn action_carries_the_content_action_and_expected_revision() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("unknown field `ids`"), "{error}");
+}
+
+/// The intent and the quoted item are optional fields: an ordinary ask leaves them out, so its
+/// wire format is the one before explain requests, and an older peer ignores them.
+#[test]
+fn ask_carries_an_intent_only_for_an_explain_request() {
+    let ask = |text: &str, intent, quoted| AppMessage::Ask {
+        id: Id::from_u128(COMMAND),
+        selection: selection(),
+        text: text.into(),
+        intent,
+        quoted,
+    };
+    let selection = r#""selection":{"document_id":"00000000-0000-0000-0000-000000000001","revision":1,"ids":["00000000-0000-0000-0000-000000000002"]}"#;
+    fixed(
+        &ask("Item 1: Collect", None, None),
+        &format!(
+            r#"{{"type":"ask","id":"00000000-0000-0000-0000-000000000006",{selection},"text":"Item 1: Collect"}}"#
+        ),
+    );
+    fixed(
+        &ask(
+            "Item 1: Collect\n> Reads\nExplain",
+            Some(Intent::Explain),
+            Some(Id::from_u128(ELEMENT)),
+        ),
+        &format!(
+            r#"{{"type":"ask","id":"00000000-0000-0000-0000-000000000006",{selection},"text":"Item 1: Collect\n> Reads\nExplain","intent":"explain","quoted":"00000000-0000-0000-0000-000000000002"}}"#
+        ),
+    );
+}
+
+/// Questions stored and sent before explain requests have no intent and still load.
+#[test]
+fn a_question_without_intent_loads_and_serializes_without_one() {
+    let mut value = serde_json::to_value(question()).unwrap();
+    assert!(value.get("intent").is_none());
+    value.as_object_mut().unwrap().remove("answer");
+    let loaded = serde_json::from_value::<Question>(value).unwrap();
+    assert_eq!(
+        (loaded.intent, loaded.quoted, loaded.answer),
+        (None, None, None)
+    );
+    let explain = Question {
+        intent: Some(Intent::Explain),
+        ..question()
+    };
+    assert_eq!(serde_json::to_value(&explain).unwrap()["intent"], "explain");
+    round_trip(&explain);
 }
 
 #[test]

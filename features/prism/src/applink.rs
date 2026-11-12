@@ -21,7 +21,7 @@
 use crate::actions::{self, PrepareQuestion};
 use crate::bridge::{ActionParams, Operation, apply_operation, store_path};
 use crate::model::{
-    AgentKind, ContentAction, DeliveryMode, Document, Id, Question, Selection, WorkspaceKey,
+    AgentKind, ContentAction, DeliveryMode, Document, Id, Intent, Question, Selection, WorkspaceKey,
 };
 use crate::session::{LiveBinding, read_binding, unix_time_ms, verify_binding, write_binding};
 use crate::store::{BUSY_TIMEOUT_SECONDS, Store};
@@ -554,7 +554,9 @@ impl Connection {
                     id,
                     selection,
                     text,
-                } => (id, self.ask(id, selection, text)),
+                    intent,
+                    quoted,
+                } => (id, self.ask(id, selection, text, intent, quoted)),
                 AppMessage::Action {
                     id,
                     document_id,
@@ -608,8 +610,16 @@ impl Connection {
         Ok(binding)
     }
 
-    /// Shares the selection for the CLI prompt box, where the mod's `pending` poll finds it.
-    fn ask(&mut self, id: Id, selection: Selection, text: String) -> Result<(), CommandError> {
+    /// Shares the selection for the CLI prompt box, where the mod's `pending` poll finds it;
+    /// `intent` marks an explain request, `quoted` the item quoted by a selected part.
+    fn ask(
+        &mut self,
+        id: Id,
+        selection: Selection,
+        text: String,
+        intent: Option<Intent>,
+        quoted: Option<Id>,
+    ) -> Result<(), CommandError> {
         let binding = self.verified_binding()?;
         self.store
             .prepare_question(
@@ -620,6 +630,8 @@ impl Connection {
                     selection,
                     text,
                     mode: DeliveryMode::Share,
+                    intent,
+                    quoted,
                 },
             )
             .map_err(store_error)?;

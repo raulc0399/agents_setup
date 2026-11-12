@@ -1,4 +1,5 @@
 import { h } from './dom.js';
+import { EXPLANATION_STATES, explanationOf, questionsFor } from './rows.js';
 
 /**
  * Detail levels of the layout, least first (`Detail` in prism-core's graph.rs): titles only,
@@ -73,6 +74,27 @@ const EXPORT_PROPERTIES = [
 const XML_PROLOG = '<?xml version="1.0" encoding="UTF-8"?>\n';
 /** Classes the view adds to shapes, left out of an export. */
 const VIEW_CLASSES = ['focused', 'selected'];
+/**
+ * The badge of a box whose item was asked to be explained, with the state its card shows
+ * (EXPLANATION_STATES, in capitals): right-aligned in the line of the box's number, left of a
+ * dropped label, as the card's badges. Where it would cover a text of the box (a long title
+ * on that line, in a box without head line), it goes to the end of the first line below with
+ * room, and over the end of the last line where none has room, so it stays inside the box.
+ * Sized like prism-core's kind label; left out of an export.
+ */
+const EXPLAINED_CLASS = 'prism-explained';
+const EXPLAINED_HEIGHT = 16;
+/** prism-core's BOX_PADDING_RIGHT, and the room the badge keeps to the other texts. */
+const EXPLAINED_RIGHT = 12;
+const EXPLAINED_GAP = 6;
+const EXPLAINED_SIZE = 11;
+const EXPLAINED_LETTER_SPACING = 0.44;
+/** Where the label's baseline sits: this share of its size below the badge's middle, as in prism-core. */
+const BASELINE_SHIFT = 0.35;
+/** Width per character of the label, generous, and the room around it. */
+const EXPLAINED_CHAR_WIDTH = 7.4;
+const EXPLAINED_PADDING = 14;
+const SVG_NS = 'http://www.w3.org/2000/svg';
 /** Attributes that reference an arrowhead marker, as `url(#id)`. */
 const HEAD_REFERENCES = ['marker-start', 'marker-end'];
 const HEAD_REFERENCE = /^url\(#(.+)\)$/;
@@ -139,6 +161,8 @@ export class DiagramView {
     this.gesture = null;
     this.shownFocus = null;
     this.shownSelection = null;
+    // The explained boxes marked on the SVG shown, as `explainedBoxes` gives them.
+    this.shownExplained = null;
 
     this.message = h('div', { class: 'diagram-message', hidden: true });
     this.zoomLabel = h('span', { class: 'zoom', title: 'Zoom' });
@@ -228,6 +252,7 @@ export class DiagramView {
     this.showLevels();
     this.showLevel();
     this.showFocus(model.focus !== previousFocus);
+    this.showExplained();
   }
 
   /** Shows the layout of the level picked, once it arrived; until then the one shown stays. */
@@ -351,6 +376,7 @@ export class DiagramView {
     this.showMessage(this.diagram.order.length === 0 ? 'Nothing to draw: the items shown here have no boxes.' : null);
     this.shownFocus = null;
     this.shownSelection = null;
+    this.shownExplained = null;
     if (anchor) {
       this.setCamera(this.anchoredCamera(anchor));
     } else if (finish) {
@@ -359,6 +385,7 @@ export class DiagramView {
       this.applyCamera();
     }
     this.showFocus(false);
+    this.showExplained();
     this.actions.onLayout();
     if (refocus) {
       (this.stop(this.model.focus) ?? this.canvas).focus({ preventScroll: true });
@@ -421,11 +448,8 @@ export class DiagramView {
       for (const node of this.svg.querySelectorAll('[data-id]')) {
         const selected = this.model.selected.has(node.dataset.id);
         node.classList.toggle('selected', selected);
-        // Keyboard stops say it too; the label from prism-core is kept to restore it.
-        if (node.hasAttribute('aria-label')) {
-          node.dataset.label ??= node.getAttribute('aria-label');
-          node.setAttribute('aria-label', selected ? `Selected: ${node.dataset.label}` : node.dataset.label);
-        }
+        // Keyboard stops say it too.
+        nameShape(node);
       }
       this.shownSelection = selection;
     }
@@ -438,6 +462,31 @@ export class DiagramView {
       stop.focus({ preventScroll: true });
     }
     this.reveal(stop);
+  }
+
+  /** Marks the boxes of explained items with their badge, as the list's cards show it. */
+  showExplained() {
+    if (!this.svg) {
+      return;
+    }
+    const explained = explainedBoxes(this.model);
+    const signature = JSON.stringify(explained);
+    if (signature === this.shownExplained) {
+      return;
+    }
+    this.shownExplained = signature;
+    this.svg.querySelectorAll(`.${EXPLAINED_CLASS}`).forEach((node) => node.remove());
+    for (const box of this.svg.querySelectorAll('[data-kind="box"]')) {
+      const outline = this.boxes.get(box.dataset.id);
+      const status = explained[box.dataset.id];
+      delete box.dataset.explanation;
+      if (outline && status) {
+        box.dataset.explanation = EXPLANATION_STATES[status].badge;
+        box.append(explainedBadge(box, outline, status));
+      }
+      // Its keyboard stop says the state too.
+      nameShape(box);
+    }
   }
 
   // Camera
@@ -954,6 +1003,7 @@ export class DiagramView {
     // The theme is read from a hidden copy without the view's classes and the zoom band, so
     // the SVG shown does not change.
     const staged = this.svg.cloneNode(true);
+    staged.querySelectorAll(`.${EXPLAINED_CLASS}`).forEach((node) => node.remove());
     VIEW_CLASSES.forEach((name) => staged.querySelectorAll(`.${name}`).forEach((node) => node.classList.remove(name)));
     delete staged.dataset.zoom;
     const stage = h('div', { hidden: true }, staged);
@@ -1097,6 +1147,81 @@ function renameHeads(svg, rename) {
       node.setAttribute(attribute, `url(#${rename(id)})`);
     }
   }
+}
+
+/** The state of each item shown that was asked to be explained (EXPLANATION_STATES), by item ID. */
+function explainedBoxes({ document, rows, questions, ended, now }) {
+  const explained = {};
+  for (const row of rows) {
+    const explanation = explanationOf(questionsFor(questions, document.id, row.id), { ended, now });
+    if (explanation) {
+      explained[row.id] = explanation.status;
+    }
+  }
+  return explained;
+}
+
+/** The badge of `box`, whose shape is at `outline`, for the state `status`. */
+function explainedBadge(box, outline, status) {
+  const label = EXPLANATION_STATES[status].badge.toUpperCase();
+  const width = label.length * EXPLAINED_CHAR_WIDTH + EXPLAINED_PADDING;
+  const dropped = box.querySelector('.prism-dropped-label')?.getBBox();
+  const right = dropped?.width ? dropped.x - EXPLAINED_GAP : outline.x + outline.width - EXPLAINED_RIGHT;
+  const top = badgeTop(box, outline, { x: right - width, width });
+  const badge = svgNode('g', { class: `${EXPLAINED_CLASS} prism-state-${status}`, 'aria-hidden': 'true' });
+  const text = svgNode('text', {
+    class: 'prism-explained-label',
+    x: right - width / 2,
+    y: top + EXPLAINED_HEIGHT / 2 + EXPLAINED_SIZE * BASELINE_SHIFT,
+    'text-anchor': 'middle',
+    'font-size': EXPLAINED_SIZE,
+    'font-weight': 650,
+    'letter-spacing': EXPLAINED_LETTER_SPACING,
+  });
+  text.textContent = label;
+  badge.append(svgNode('rect', { class: 'prism-explained-shape', x: right - width, y: top, width, height: EXPLAINED_HEIGHT, rx: EXPLAINED_HEIGHT / 2 }), text);
+  return badge;
+}
+
+/**
+ * The top of the badge spanning `x` and `width`: centered on the number's line, else on the
+ * first text line below where it covers no text, else on the last line; always inside `outline`.
+ */
+function badgeTop(box, outline, { x, width }) {
+  const number = box.querySelector('.prism-number');
+  const texts = [...box.querySelectorAll(':scope > text')].map((text) => text.getBBox());
+  const lines = [Number(number.getAttribute('y')) - Number(number.getAttribute('font-size')) * BASELINE_SHIFT, ...texts.map((text) => text.y + text.height / 2)];
+  const inside = (top) => top >= outline.y && top + EXPLAINED_HEIGHT <= outline.y + outline.height;
+  const tops = lines.map((line) => line - EXPLAINED_HEIGHT / 2).filter(inside);
+  const free = tops.find((top) => !texts.some((text) => overlaps(text, { x, y: top, width, height: EXPLAINED_HEIGHT }, EXPLAINED_GAP)));
+  const last = Math.max(...tops);
+  return free ?? (Number.isFinite(last) ? last : outline.y + outline.height - EXPLAINED_HEIGHT);
+}
+
+/**
+ * A keyboard stop's accessible name: prism-core's label, kept to restore it, with the state
+ * of its explanation (`data-explanation`) after it and "Selected: " before it when selected.
+ */
+function nameShape(node) {
+  if (!node.hasAttribute('aria-label')) {
+    return;
+  }
+  node.dataset.label ??= node.getAttribute('aria-label');
+  const name = node.dataset.explanation ? `${node.dataset.label}, ${node.dataset.explanation}` : node.dataset.label;
+  node.setAttribute('aria-label', node.classList.contains('selected') ? `Selected: ${name}` : name);
+}
+
+/** Whether two rectangles come closer than `gap` side by side while sharing height. */
+function overlaps(one, other, gap) {
+  return one.width > 0 && one.x < other.x + other.width + gap && other.x < one.x + one.width + gap && one.y < other.y + other.height && other.y < one.y + one.height;
+}
+
+function svgNode(tag, attributes) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    node.setAttribute(name, String(value));
+  }
+  return node;
 }
 
 /** Where prism-core put each box, by item ID: the outline of its shape. */

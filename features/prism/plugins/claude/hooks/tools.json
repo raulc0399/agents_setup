@@ -263,7 +263,7 @@
   },
   {
     "name": "questions",
-    "description": "Retrieve questions the user explicitly shared from Prism into this Claude conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this conversation, then publish requested visual revisions. Questions not shared for retrieval are never returned.",
+    "description": "Retrieve questions the user explicitly shared from Prism into this Claude conversation. Omit request_id for at most 100 summaries with a 512-character text preview and text_truncated flag; repeat with returned next_cursor until null; supply it for the frozen selected-content snapshot. Answer in this conversation, then publish requested visual revisions. A question with intent \"explain\" (the last line of its text starts with \"Explain\") is an explain request: explain the items or the quoted text and record it with mcp__prism__answer. Questions not shared for retrieval are never returned.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -296,7 +296,7 @@
   },
   {
     "name": "answer",
-    "description": "Not used for now; do not call it. Answers are kept in the conversation and saved to the md files when relevant; they are not recorded in Prism, which changes only when the item itself changes and you publish the revised item. The tool records a reply to a Prism question beside the item; a later call replaces the recorded text.",
+    "description": "Record the explanation for a Prism explain request, using its request ID: a prompt whose last line starts with \"Explain\" and carries [prism:<request_id>], intent \"explain\" in mcp__prism__questions. The Prism app shows it on each item. Write it as plain text, clear and brief, about the items or the quoted text; when it names several items, label each item's part (\"Item 2: ...\"). A later call replaces it. Only explain requests are recorded: answer an ordinary Prism question in the conversation and do not call this tool for it.",
     "inputSchema": {
       "type": "object",
       "properties": {

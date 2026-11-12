@@ -42,9 +42,10 @@ All of this is in the shared bridge and `prism-core`, so Codex gets it with the 
 - **Ask goes straight to the conversation**: the app sends the item reference and the
   quoted text without a typed question (`prism-core/src/ask.rs`); the user types the
   question in the CLI.
-- **Answers are not recorded**: `prism_answer` stays but is not to be called; answers stay
-  in the conversation and go to md files when relevant; Prism changes only when the agent
-  publishes the revised item.
+- **Answers are not recorded**: answers to ordinary asks stay in the conversation and go to
+  md files when relevant; Prism changes only when the agent publishes the revised item.
+  Only explain requests (`intent: "explain"`, text ending with the line `Explain`) are
+  recorded with `prism_answer`, which the bridge refuses for any other question.
 - **Diagram rules for agents** (skill and `prism_publish` description): at most 7 boxes,
   9 arrows and 3 lanes per document; relationships listed in data-flow order; labels of at
   most 3 words without numbers; kind `text` for actors and stores (their box shows only
@@ -75,3 +76,6 @@ All of this is in the shared bridge and `prism-core`, so Codex gets it with the 
    prompt.
 8. Restart Codex after installing the new binary so it loads the new tool schema
    (`prism_action` close/reopen) and skill text.
+9. Explain (`intent: "explain"` on a shared question; the app shows the explanation the
+   agent records with `prism_answer`) needs the Codex-side delivery of shared questions
+   from point 7: until then the Codex user has to ask Codex to retrieve it.

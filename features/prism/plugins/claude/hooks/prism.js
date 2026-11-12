@@ -8,9 +8,14 @@ const SUBAGENT_REFUSAL = 'Prism tools are available only to the main conversatio
 const PROTOCOL_VERSION = 1;
 const COMMAND_NAME = 'prism';
 // Shared questions are polled and placed in the prompt box; the user types the question after
-// them and sends it from there. Answers stay in the conversation; none is recorded in Prism.
+// them and sends it from there, and the answer stays in the conversation. An explain request
+// needs nothing typed: it is submitted as a prompt of its own, and the agent records the
+// explanation in Prism with the answer tool. A submission that is refused or fails goes to the
+// prompt box instead, where the user sends it.
 const QUESTION_POLL_MS = 1000;
+const EXPLAIN_INTENT = 'explain';
 const filledQuestions = new Set();
+const refusedSubmissions = new Set();
 const TOOL_FIELDS = {
   publish: ['request_id', 'document_id', 'expected_revision', 'title', 'elements', 'relationships', 'groups', 'lanes'],
   inspect: ['document_id', 'cursor'],
@@ -114,8 +119,9 @@ function describeLink(app) {
   }
 }
 
-// Places each newly shared Prism question in the prompt box once, then tells the bridge. Only an
-// already attached conversation is polled.
+// Places each newly shared Prism question in the prompt box once, or submits an explain request,
+// then tells the bridge which it did: `prompt_filled` or `prompt_submitted`. One that fails is
+// tried again at the next poll; the others go on. Only an already attached conversation is polled.
 async function deliverQuestions($) {
   const sessionId = await $.session.id();
   if (!bindings.get(sessionId)) {
@@ -130,12 +136,42 @@ async function deliverQuestions($) {
     if (filledQuestions.has(question.request_id)) {
       continue;
     }
-    const filled = await $.prompt.fill({text: question.text + ' [prism:' + question.request_id + ']\n', mode: 'append'});
-    if (!filled.isFilled) {
+    const text = question.text + ' [prism:' + question.request_id + ']';
+    // Kept from the start: a submission resolves only once the session took it, and the
+    // polls meanwhile must not send it again.
+    filledQuestions.add(question.request_id);
+    const event = question.intent === EXPLAIN_INTENT && !refusedSubmissions.has(question.request_id) ? await submitQuestion($, question.request_id, text) : await fillQuestion($, text);
+    if (event === null) {
+      filledQuestions.delete(question.request_id);
       continue;
     }
-    filledQuestions.add(question.request_id);
-    await callBridge($, sessionId, 'lifecycle', {event: 'prompt_filled', request_id: question.request_id}, true);
+    await callBridge($, sessionId, 'lifecycle', {event, request_id: question.request_id}, true);
+  }
+}
+
+// Submits an explain request: `prompt_submitted`. One that is refused or fails is placed in the
+// prompt box instead, from then on, so it is never submitted twice.
+async function submitQuestion($, requestId, text) {
+  let submitted;
+  try {
+    submitted = await $.prompt.submit({text});
+  } catch {
+    submitted = {drop: 'submission failed'};
+  }
+  if (submitted.drop === undefined) {
+    return 'prompt_submitted';
+  }
+  refusedSubmissions.add(requestId);
+  return fillQuestion($, text);
+}
+
+// Appends to the prompt box: `prompt_filled`, or null when the box did not take it.
+async function fillQuestion($, text) {
+  try {
+    const filled = await $.prompt.fill({text: text + '\n', mode: 'append'});
+    return filled.isFilled ? 'prompt_filled' : null;
+  } catch {
+    return null;
   }
 }
 

@@ -26,8 +26,13 @@ attached, the mod polls shared questions every second and appends each new one
 to the prompt box as `Item N: <title>`, quoted lines and a `[prism:<request id>]`
 marker; the user types the question after it and sends it. The skill tells
 Claude to keep answers in the conversation and save them to the md files when
-relevant; for now it does not call `mcp__prism__answer`, and the app changes only
-when Claude publishes the revised item.
+relevant; it does not call `mcp__prism__answer` for them, and the app changes
+only when Claude publishes the revised item. An explain request (the same
+reference, then the line `Explain`) is submitted by the mod as a prompt of its own
+with `$.prompt.submit`; Claude records the explanation with `mcp__prism__answer`,
+and the app shows it on the item. A submission that is refused or fails goes to
+the prompt box instead. `claude plugin test plugins/claude` runs the mod's
+delivery tests (`tests/prism.test.ts`) against a faked bridge.
 
 Start `claude` normally and discuss your task. When needed, use `/prism` or ask
 Claude to show the plan in Prism. The mod reads the native session ID and
