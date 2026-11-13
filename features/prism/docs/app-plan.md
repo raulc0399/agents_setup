@@ -1,30 +1,61 @@
 # Prism desktop app: plan
 
-Status: in progress on branch `prism-app` (go given 2026-11-09). Done batches are marked **[done]**; see Progress.
+Status: all batches and the follow-ups below are implemented on branch `prism-app` (2026-11-13), not merged into `main`. Open: the manual passes on the Mac, builds on Mac and PC, and the Codex items in `docs/codex-handover.md`.
 Diagram: [app-plan.html](app-plan.html), clickable; keep both files in step.
 
 ## Start here (handover)
 
-- **Code today**: `features/prism/` is a Cargo workspace: `prism` (bridge: `src/bridge.rs`
-  tool operations, `src/applink.rs` app link, `src/store.rs` SQLite, `src/attachment.rs`
-  attach by process ID and start time, `src/session.rs` bindings), `prism-core/` (model,
-  protocol, diagram layout), `app/` (desktop app, own workspace), `plugins/claude/` (mod,
-  tools, skill), `plugins/codex/` and `src/adapters/codex.rs` (Codex agent's area).
-- **Build and test**: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
-  `cargo test --locked --all-targets`, `cargo build --locked --release`; install with
-  `install -m 755 target/release/prism ~/.local/bin/prism`.
+- **Code today**: `features/prism/` holds two Cargo workspaces. The bridge workspace:
+  `prism` (`src/bridge.rs` tool operations, `src/applink.rs` app link, `src/store.rs`
+  SQLite, `src/actions.rs` publish and shared actions, `src/attachment.rs` attach by process
+  ID and start time, `src/session.rs` bindings, `src/mcp.rs` Codex tools) and `prism-core/`
+  (model, app protocol, ask text, diagram layout and SVG in `graph.rs`). The app workspace
+  in `app/`: `host/` (listener, registry, arrangement; testable on Linux), `src-tauri/`
+  (Tauri shell), `ui/` (plain HTML, CSS and JavaScript), `ui-tests/` (headless Chromium
+  checks). Plugins: `plugins/claude/` (mod `hooks/prism.js`, `hooks/tools.json`, skill,
+  mod tests), `plugins/codex/` and `src/adapters/codex.rs` (Codex agent's area).
+- **Build and test the bridge** (from `features/prism`, with `CARGO_BUILD_JOBS=2` in the
+  container): `cargo fmt --all --check`,
+  `cargo clippy --locked --workspace --all-targets -- -D warnings`,
+  `cargo test --locked --workspace --all-targets`, `cargo build --locked --release`; install
+  with `install -m 755 target/release/prism ~/.local/bin/prism`. Mod:
+  `claude plugin test plugins/claude`, `claude plugin validate plugins/claude`.
+- **Build and test the app** (from `features/prism/app`): `cargo fmt --all --check`,
+  `cargo clippy --locked -p prism-app-host --all-targets -- -D warnings`,
+  `cargo test --locked -p prism-app-host --all-targets`, `bash ui-tests/run.sh` (11 check
+  suites and screenshots in `app/target/ui-screenshots/`). Tauri cannot be built in the
+  container; on the Mac run `cargo tauri dev` or `cargo tauri build` in `app/src-tauri`
+  (see `app/README.md`).
+- **Versions that must match**: app protocol 3 (`APP_PROTOCOL` in
+  `prism-core/src/protocol.rs`). After a change to the bridge, the mod, `tools.json` or a
+  skill: install the binary, then restart Claude (`/exit`, `claude -c`). After a change to
+  `prism-core` or the app's Rust code: restart `cargo tauri dev`; changes to `app/ui/` reload
+  by themselves.
 - **Environment**: each CLI runs in its own throwaway container (`d_claude`, `d_codex`,
   `docker compose run --rm`). Only the project and `~/.claude` / `~/.codex` survive a new
-  container; `~/.local/bin/prism` must be reinstalled after one.
-- **The Claude mod loads at session start.** A change to `plugins/claude/hooks/prism.js`
-  needs a Claude restart (`/exit`, `claude -c`).
-- **Lessons from the terminal test (2026-11-09)**, all relevant to the bridge that stays:
-  the project mount can report stale file attributes right after a rename, so binding
-  reads retry briefly; the mod polls every second through the read-only `pending`
-  operation; a bridge that died is restarted by the next attach.
-- **Working rules**: plan and approval before code, one batch at a time, validation after
-  each batch (see the repository's `AGENTS.md`).
-- **First step**: batch 1, the three gates. No product code before they pass.
+  container; `~/.local/bin/prism` must be reinstalled after one, and
+  `git config --global --add safe.directory /workspace/agents_setup` set again. The
+  container has no `ssh`, so pushes happen on the host.
+- **A session's tab is named after the folder Claude was started in**, and its documents
+  live in that folder's `.prism/state.db` (`/workspace/agents_setup` or `features/prism`).
+- **Lessons that still hold**: the project mount can report stale file attributes right
+  after a rename, so binding reads retry briefly; the mod polls every second through the
+  read-only `pending` operation; a bridge that died is restarted by the next attach; WebKit
+  does not resolve a custom property set on an SVG group for its children (see
+  `app/ui/styles.css`).
+- **Working rules**: plan and approval before code (see the repository's `AGENTS.md`). The
+  user's flow for this work: one Opus agent develops a piece, a second Opus agent reviews
+  it, fixes go back to the first, then commit as `raulc0399 <raci0399@gmail.com>`; the
+  separate review may be skipped for small, well-tested pieces. Decisions 1 to 8 below
+  bind; Decision 8 (shared state only) decides where new state lives.
+- **How Prism is used** (the user's words): Prism is a view on the current chat. The agent
+  publishes lists and diagrams, the user asks, explains, drops, accepts and bookmarks from
+  the app, decisions are recorded on the items, and at the end the agent saves the plan to
+  a file.
+- **Next steps**: the manual pass on the Mac (pinch zoom, line widths, arrow tips, split
+  view, Explain and bookmarks in a real session), packaging builds per `app/README.md`,
+  merge of `prism-app` into `main`, and `docs/codex-handover.md` for the Codex agent.
+  "Later" below lists ideas that were postponed.
 
 ## Progress
 
@@ -192,12 +223,17 @@ the Linux container.
   them with inspect.
 - **[done]** (2026-11-12) Working rule in both skills: a decision or change agreed in the
   chat is recorded on the list item as `Decided (date): … Why: ….` and republished.
+- **[done]** (2026-11-13) When an explanation the user asked for arrives, the app focuses
+  the item and scrolls the side pane to it.
 
 ## Later (not planned yet)
 
 - Free-form documents (2026-11-11): the agent publishes its own SVG or HTML, shown as it
   is without scripts; boxes and arrows carry item IDs so the side pane, ask and drop still
   work. For polished diagrams; no automatic layout, numbering or detail levels.
+- A chat thread per item in Prism (2026-11-12): type under the item, the question runs
+  through the CLI conversation, the answer shows under the item. Postponed.
+- Notes beside diagram boxes (2026-11-11): left out.
 
 ## Validation per batch
 
