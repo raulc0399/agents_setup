@@ -288,8 +288,7 @@ python3 -m unittest discover -s features/prism/tests -p probe_codex_test.py
 ```
 
 Independent review identified the pagination, fragmented-frame deadline and
-probe-attribution defects addressed above; final integration review and release
-evidence are recorded in `../IMPLEMENTATION.md`.
+probe-attribution defects addressed above.
 
 ### On-demand attachment (2026-11-09)
 
