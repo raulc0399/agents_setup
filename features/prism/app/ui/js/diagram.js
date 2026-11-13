@@ -1,4 +1,4 @@
-import { h } from './dom.js';
+import { h, reducedMotion } from './dom.js';
 import { BOOKMARKED, BOOKMARK_PATH } from './list.js';
 import { EXPLANATION_STATES, bookmarksOf, explanationOf, questionsFor } from './rows.js';
 
@@ -1152,10 +1152,6 @@ function between(from, to, share) {
     return start + fixed / from.scale - fixed / scale;
   };
   return { x: axis(from.x, to.x), y: axis(from.y, to.y), scale };
-}
-
-function reducedMotion() {
-  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 }
 
 /** The rectangle of a shape from its attributes. */

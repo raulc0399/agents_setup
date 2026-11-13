@@ -1,9 +1,11 @@
-import { MOD_KEY, h } from './dom.js';
+import { MOD_KEY, h, reducedMotion } from './dom.js';
 import { ACCEPT_NOTE, BOOKMARK_NOTE, DROPPED_NOTE, bookmarkIcon, kindText, stateBadges, questionState } from './list.js';
 import { EXPLANATION_STATES, askedQuestions, explanationOf, itemBookmarks, itemMark, questionsFor, quoteFound, quotedText, typedQuestion } from './rows.js';
 
 /** The pane's section with an item's explanation. */
 const EXPLANATION_TITLE = 'Explanation';
+/** The class that highlights an explanation briefly once it arrived (styles.css). */
+const ARRIVED = 'arrived';
 /** The pane's section with an item's bookmarks, and what a bookmark of the whole item says there. */
 const BOOKMARKS_TITLE = 'Bookmarks';
 const WHOLE_ITEM = 'The whole item';
@@ -53,6 +55,25 @@ export class DetailPanel {
         ? itemPanel(row, questions, explanation, actions, bookmarks.length > 0 ? bookmarksSection(row, bookmarks, readOnly, this.actions.onRemoveBookmark) : null)
         : overviewPanel(model.document.title, counts, selected, actions)),
     );
+  }
+
+  /**
+   * Scrolls the panel so that the focused item's explanation section starts at its top,
+   * smoothly unless the user prefers reduced motion, and highlights the section briefly.
+   */
+  revealExplanation() {
+    const section = this.element.querySelector('.panel-explanation');
+    if (!section) {
+      return;
+    }
+    const offset = section.getBoundingClientRect().top - this.element.getBoundingClientRect().top - parseFloat(getComputedStyle(this.element).paddingTop);
+    this.element.scrollTo({ top: this.element.scrollTop + offset, behavior: reducedMotion() ? 'auto' : 'smooth' });
+
+    // Removed and read back first, so a section highlighted already starts its highlight again.
+    section.classList.remove(ARRIVED);
+    void section.offsetWidth;
+    section.classList.add(ARRIVED);
+    section.addEventListener('animationend', () => section.classList.remove(ARRIVED), { once: true });
   }
 
   /** The text the user selected inside the panel's text of the focused item. */

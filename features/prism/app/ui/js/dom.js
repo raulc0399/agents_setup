@@ -26,3 +26,8 @@ export function h(tag, props = {}, ...children) {
 
 /** The modifier key as the platform names it. */
 export const MOD_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
+
+/** Whether the user prefers reduced motion: animations jump to their end. */
+export function reducedMotion() {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+}

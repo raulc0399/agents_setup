@@ -3,7 +3,7 @@ import { MOD_KEY, h } from './dom.js';
 import { agentLabel, formatTime, projectName, shortConversation } from './format.js';
 import { ACCEPT_NOTE, BOOKMARK_NOTE, DROPPED_NOTE, ListView, bookmarkIcon } from './list.js';
 import { DetailPanel } from './panel.js';
-import { EXPLAIN_INTENT, bookmarkCount, collapsed, documentsOf, hasDiagram, itemBookmarks, itemCount, itemIds, itemMark, nextExplainTimeout, quoteFound, rows as buildRows, sessionBookmarks } from './rows.js';
+import { EXPLAIN_INTENT, EXPLAIN_TIMEOUT_MS, bookmarkCount, collapsed, documentsOf, explanationOf, hasDiagram, itemBookmarks, itemCount, itemIds, itemMark, nextExplainTimeout, quoteFound, rows as buildRows, sessionBookmarks } from './rows.js';
 
 /** View state is saved this long after the last change, not on every key press. */
 const VIEW_SAVE_DELAY_MS = 300;
@@ -177,6 +177,12 @@ class App {
     /** Renders again when the next explain request on its way times out (`nextExplainTimeout`). */
     this.explainTimer = null;
     /**
+     * Explain requests this window sent, by request ID, until their explanation arrived, they
+     * failed or were lost, EXPLAIN_TIMEOUT_MS passed or their tab left: `{key, documentId,
+     * itemId, number, sentAt}` of the first item asked about. In memory only.
+     */
+    this.explaining = new Map();
+    /**
      * The document this window closed last, `{key, id, revision, side}` with the revision its
      * close produced and the pane it was shown in while split (else null), until the next
      * command: U reopens it there.
@@ -334,6 +340,8 @@ class App {
     this.restorePaneWidth();
     this.forgetViews();
     this.render();
+    // The conversation may have ended: its requests on their way are lost.
+    this.showArrivedExplanations();
   }
 
   /** At start, the pane width saved for this window; later this window's own is the latest. */
@@ -358,6 +366,9 @@ class App {
     for (const [pane, view] of [...this.diagramViews].filter(([pane]) => !tabs.has(paneTab(pane)))) {
       view.dispose();
       this.diagramViews.delete(pane);
+    }
+    for (const [id, request] of [...this.explaining].filter(([, request]) => !tabs.has(request.key))) {
+      this.explaining.delete(id);
     }
   }
 
@@ -400,6 +411,7 @@ class App {
     if (this.pendingJump?.key === key && key === this.activeKey()) {
       this.jumpTo(key, this.pendingJump.documentId, this.pendingJump.id);
     }
+    this.showArrivedExplanations();
   }
 
   /**
@@ -2223,6 +2235,14 @@ class App {
     const items = targets.map((row) => ({ number: row.number, title: row.title, quote: row.id === quotedItem ? quoted : row.details }));
     const numbered = `${items.length === 1 ? 'item' : 'items'} ${items.map((item) => item.number).join(', ')}`;
     const release = () => this.asking.delete(key);
+    // Once delivered, an explain request is followed until its explanation arrives (`showArrivedExplanations`).
+    const sentAt = Date.now();
+    const delivered = (id) => {
+      release();
+      if (intent) {
+        this.explaining.set(id, { key, documentId: current.document.id, itemId: targets[0].id, number: targets[0].number, sentAt });
+      }
+    };
     this.asking.add(key);
     const sent = await this.send(
       key,
@@ -2236,7 +2256,7 @@ class App {
       {
         sending: intent ? 'Asking for an explanation…' : 'Sharing…',
         done: intent ? `Asked the conversation to explain ${numbered}.` : `Shared ${numbered} with the CLI prompt box.`,
-        onSuccess: release,
+        onSuccess: delivered,
         onError: release,
       },
     );
@@ -2356,12 +2376,74 @@ class App {
     const view = this.paneView(pane);
     const shown = buildRows(document, new Set(view.hidden), view.filter).some((row) => row.id === id);
     this.updatePane(pane, { focus: id, ...(shown ? {} : { filter: '' }) });
+    this.revealFocus(pane, documentId, id);
+  }
+
+  /** The pane's focused item `id` of `documentId` comes into view with the keyboard, in the list or the diagram. */
+  revealFocus(pane, documentId, id) {
     if (this.mode(pane) === 'diagram') {
       this.diagramView(pane).revealItem(documentId, id);
     } else {
       this.listView(pane).reveal(id);
       this.focusPane(pane);
     }
+  }
+
+  /**
+   * Explain requests this window sent whose explanation arrived in the active tab: each shows
+   * it (`showExplanation`); those that failed, were lost or timed out are forgotten, as are
+   * those of another tab that timed out.
+   */
+  showArrivedExplanations() {
+    const now = Date.now();
+    for (const [id, request] of [...this.explaining].filter(([, request]) => now - request.sentAt > EXPLAIN_TIMEOUT_MS)) {
+      this.explaining.delete(id);
+    }
+    const key = this.activeKey();
+    const content = this.contents.get(key);
+    if (!content) {
+      return;
+    }
+    const ended = this.session(key)?.link.state === 'ended';
+    for (const [id, request] of [...this.explaining].filter(([, request]) => request.key === key)) {
+      const question = content.questions.find((candidate) => candidate.request_id === id);
+      const status = question ? explanationOf([question], { ended, now }).status : null;
+      if (status === 'done') {
+        this.explaining.delete(id);
+        this.showExplanation(request);
+      } else if (status === 'failed' || status === 'lost') {
+        this.explaining.delete(id);
+      }
+    }
+  }
+
+  /**
+   * The explanation of an item this window asked about arrived: the pane that shows its
+   * document becomes active and focuses the item, and the side pane scrolls to the explanation.
+   * While the user types in a field or has text selected, only an item focused already is
+   * scrolled to. Otherwise, or when the document or the item is not shown, the status bar says
+   * where the explanation is.
+   */
+  showExplanation({ key, documentId, itemId, number }) {
+    const pane = this.paneShowing(key, documentId);
+    const shown = pane !== null && this.current(pane).rows.some((row) => row.id === itemId);
+    const busy = Boolean(document.activeElement?.closest?.('input, textarea')) || window.getSelection()?.isCollapsed === false;
+    if (shown && !busy) {
+      if (this.isSplit(key)) {
+        this.storeView(key, { activePane: paneSide(pane) });
+      }
+      this.updatePane(pane, { focus: itemId });
+      this.revealFocus(pane, documentId, itemId);
+      this.detailPanel(pane).revealExplanation();
+      return;
+    }
+    const focus = shown && this.activePane(key) === pane ? (this.mode(pane) === 'diagram' ? this.diagramFocus(pane) : this.current(pane).focus) : null;
+    if (focus?.id === itemId) {
+      this.detailPanel(pane).revealExplanation();
+      return;
+    }
+    const title = this.contents.get(key).documents.find((candidate) => candidate.id === documentId)?.title;
+    this.setMessage(`Explanation for item ${number} arrived in “${title}”.`);
   }
 
   /** Reopen in the list: reopens the closed document for everyone, then goes to the bookmarked item. */
@@ -2527,8 +2609,8 @@ class App {
   }
 
   /**
-   * Sends a command and shows `sending`; its reply later runs `onSuccess` and shows `done`, or
-   * runs `onError` and shows the error, in the words of `errors[code]` when given.
+   * Sends a command and shows `sending`; its reply later runs `onSuccess` with the command ID
+   * and shows `done`, or runs `onError` and shows the error, in the words of `errors[code]` when given.
    */
   async send(key, command, { sending, done, errors = {}, onSuccess = null, onError = null }) {
     // Any command ends the moment right after a close or a bookmark change, and a jump still waiting.
@@ -2566,7 +2648,7 @@ class App {
       pending.onError?.();
       this.setMessage(pending.errors[reply.error.code] ?? errorText(reply.error), 'error');
     } else {
-      pending.onSuccess?.();
+      pending.onSuccess?.(reply.id);
       this.setMessage(pending.done, 'success');
     }
   }

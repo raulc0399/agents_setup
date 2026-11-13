@@ -19,6 +19,13 @@ const scenario = new URLSearchParams(location.search).get('scenario') ?? 'list';
 const FRAME_MS = 16;
 window.requestAnimationFrame = (callback) => setTimeout(() => callback(performance.now()), FRAME_MS);
 window.cancelAnimationFrame = (frame) => clearTimeout(frame);
+// Nor does it run smooth scrolling: it jumps to its end; the behavior asked for last is kept.
+let scrollBehavior = null;
+const elementScrollTo = Element.prototype.scrollTo;
+Element.prototype.scrollTo = function (options) {
+  scrollBehavior = options.behavior ?? null;
+  elementScrollTo.call(this, { ...options, behavior: 'instant' });
+};
 const CHECKS = { checks, 'diagram-checks': diagramChecks, 'view-checks': viewChecks, 'narrow-checks': narrowChecks, 'action-checks': actionChecks, 'status-checks': statusChecks, 'document-checks': documentChecks, 'restart-checks': restartChecks, 'pane-checks': paneChecks, 'split-checks': splitChecks, 'bookmark-checks': bookmarkChecks };
 const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
 /** Sizes prism-core's graph.rs draws at: a pill's height and an arrowhead's (`PILL_HEIGHT`, `ARROW_HEAD_SIZE`). */
@@ -1486,6 +1493,7 @@ async function actionChecks(backend, app) {
   expect(message().textContent.startsWith('Pick an item first'), `Enter with nothing picked says so: ${message().textContent}`);
 
   await explainChecks(backend, app, expect);
+  await arrivalChecks(backend, app, expect);
 
   document.getElementById('result').textContent = failures.length === 0 ? 'PASS' : `FAIL: ${failures.join('; ')}`;
 }
@@ -1511,14 +1519,16 @@ function explanationShown() {
 
 /**
  * The bridge shares the explain request `sent` (an `ask` with the explain intent) as the
- * store keeps it, numbered `request` so that a larger one is newer; with `answer` once the
- * agent recorded it, and `outcome` (default: submitted by the mod, queued). Returns the
- * shared question, to answer it later with `explained`.
+ * store keeps it, numbered `request` so that a larger one is newer, as if another window
+ * sent it; with `request` null, under the ID it was sent with, as this window's. With
+ * `answer` once the agent recorded it, and `outcome` (default: submitted by the mod, queued).
+ * Returns the shared question, to answer it later with `explained`.
  */
 async function shareExplanation(backend, sent, request, answer = null, outcome = undefined) {
   const next = await backend.content(KEYS.LIVE);
   const { selection, items, quoted = null } = sent.command;
-  const question = explainRequest(String(request).padStart(12, '0'), selection.document_id, selection.revision, selection.ids, referenceOf(items), { answer, quoted, ...(outcome ? { outcome } : {}) });
+  const shared = explainRequest(String(request ?? 0).padStart(12, '0'), selection.document_id, selection.revision, selection.ids, referenceOf(items), { answer, quoted, ...(outcome ? { outcome } : {}) });
+  const question = request === null ? { ...shared, request_id: sent.id } : shared;
   next.questions.push(question);
   backend.update(KEYS.LIVE, next);
   await settle();
@@ -1779,6 +1789,132 @@ async function explainChecks(backend, app, expect) {
   });
   app.activate(KEYS.LIVE);
   await settle();
+}
+
+/** Whether the side pane shows the start of the focused item's explanation. */
+function explanationStartShown() {
+  const panel = document.querySelector('.detail-panel');
+  const section = panel?.querySelector('.panel-explanation');
+  if (!section) {
+    return false;
+  }
+  const top = section.getBoundingClientRect().top;
+  const frame = panel.getBoundingClientRect();
+  return top >= frame.top && top < frame.bottom;
+}
+
+/** Whether the explanation section is highlighted as just arrived. */
+function explanationHighlighted() {
+  return Boolean(document.querySelector('.detail-panel .panel-explanation.arrived'));
+}
+
+/**
+ * The explanation of a request sent from this window arrives: the item asked about takes the
+ * focus and the keyboard, and the side pane scrolls to the explanation and highlights it, in the
+ * list and in the diagram. While the filter has the keyboard, only the item focused already is
+ * scrolled to; otherwise, and when the document is not shown, the status bar says where it
+ * arrived. A request of another window, or one that failed or timed out, moves nothing.
+ * Closing the tab forgets the requests on their way.
+ */
+async function arrivalChecks(backend, app, expect) {
+  const plan = (number) => `a0000000-0000-4000-8000-00000000000${number}`;
+  const { item } = RELEASE_IDS;
+  const message = () => document.querySelector('.statusbar .message').textContent;
+  const panel = () => document.querySelector('.detail-panel');
+  const filter = () => document.querySelector('.side-pane .filter');
+  const keyboardInItems = () => Boolean(document.activeElement?.closest('.pane-slot'));
+  const view = () => app.view(KEYS.LIVE);
+  // E on item `asked`; its reply comes, then the focus moves to `away`.
+  const ask = async (asked, away) => {
+    app.updateView(KEYS.LIVE, { focus: asked });
+    await settle();
+    key('e');
+    await settle();
+    const sent = backend.sent.at(-1);
+    backend.reply(sent.key, sent.id);
+    await settle();
+    app.updateView(KEYS.LIVE, { focus: away });
+    await settle();
+    return sent;
+  };
+  // Without earlier explanations; the first item's text is longer than the pane.
+  const long = structuredClone(CONTENTS_FOR_TESTS[KEYS.LIVE]);
+  long.documents.find((candidate) => candidate.id === KEYS.PLAN).elements[plan(1)].body = Array.from({ length: 80 }, (_, index) => `Line ${index + 1} of a long item.`).join('\n');
+  backend.update(KEYS.LIVE, long);
+  window.getSelection().removeAllRanges();
+  app.updateView(KEYS.LIVE, { document: KEYS.PLAN, focus: plan(1), selected: [], filter: '', modes: { ...view().modes, [KEYS.PLAN]: 'list', [KEYS.RELEASE]: 'diagram' } });
+  await settle();
+
+  // The list: the item asked about is focused again, the pane scrolled to its explanation.
+  const listed = await ask(plan(1), plan(2));
+  expect(app.explaining.has(listed.id), 'a request sent from this window is followed');
+  await shareExplanation(backend, listed, null, 'Arrived in the list.');
+  expect(view().focus === plan(1) && keyboardInItems() && document.querySelector('.card.focused')?.dataset.id === plan(1), `the item asked about is focused, with the keyboard: ${view().focus}`);
+  expect(JSON.stringify(explanationShown()?.paragraphs) === '["Arrived in the list."]' && explanationHighlighted(), `its explanation is shown, highlighted: ${JSON.stringify(explanationShown())}`);
+  expect(await waitFor(() => explanationStartShown() && panel().scrollTop > 0) && scrollBehavior === 'smooth', `the pane scrolls smoothly to the explanation's start: ${panel().scrollTop} ${scrollBehavior}`);
+  expect(!app.explaining.has(listed.id), 'an arrived explanation is no longer followed');
+
+  // Another window's request, or the agent explaining on its own: nothing moves.
+  app.updateView(KEYS.LIVE, { focus: plan(2) });
+  await settle();
+  const before = message();
+  await shareExplanation(backend, listed, 40, 'From another window.');
+  expect(view().focus === plan(2) && message() === before, `a foreign explanation moves nothing: ${view().focus} ${message()}`);
+
+  // The filter has the keyboard: the focus stays, the status bar says where it arrived.
+  const typing = await ask(plan(1), plan(2));
+  filter().focus();
+  await shareExplanation(backend, typing, null, 'Arrived while typing.');
+  expect(view().focus === plan(2) && document.activeElement === filter() && message() === 'Explanation for item 1 arrived in “App plan”.', `while typing, no focus steal: ${view().focus} ${document.activeElement?.className} ${message()}`);
+  // With the item focused already, only the pane scrolls.
+  app.updateView(KEYS.LIVE, { focus: plan(1) });
+  await settle();
+  panel().scrollTop = 0;
+  filter().blur();
+  key('e');
+  await settle();
+  const focusedAlready = backend.sent.at(-1);
+  backend.reply(focusedAlready.key, focusedAlready.id);
+  await settle();
+  filter().focus();
+  await shareExplanation(backend, focusedAlready, null, 'Arrived on the focused item.');
+  expect(document.activeElement === filter() && explanationHighlighted(), `the item focused already: the filter keeps the keyboard: ${document.activeElement?.className}`);
+  expect(await waitFor(() => explanationStartShown() && panel().scrollTop > 0), `and the pane scrolls: ${panel().scrollTop}`);
+  filter().blur();
+
+  // The document is no longer shown: no switch, the status bar names it.
+  const elsewhere = await ask(plan(1), plan(2));
+  app.showDocument(KEYS.LIVE, KEYS.REVIEW);
+  await settle();
+  const status = message();
+  await shareExplanation(backend, elsewhere, null, 'Arrived elsewhere.');
+  expect(view().document === KEYS.REVIEW && message() === 'Explanation for item 1 arrived in “App plan”.' && message() !== status, `the document stays, the status bar says where: ${view().document} ${message()}`);
+
+  // Not delivered, or timed out: forgotten, nothing moves.
+  app.showDocument(KEYS.LIVE, KEYS.PLAN);
+  await settle();
+  const failed = await ask(plan(1), plan(2));
+  await shareExplanation(backend, failed, null, null, { state: 'failed', reason: 'binding retired' });
+  expect(!app.explaining.has(failed.id) && view().focus === plan(2), `a request not delivered is forgotten: ${view().focus}`);
+  const late = await ask(plan(1), plan(2));
+  app.explaining.get(late.id).sentAt -= EXPLAIN_TIMEOUT_MS + 1;
+  await shareExplanation(backend, late, null, 'Too late.');
+  expect(!app.explaining.has(late.id) && view().focus === plan(2), `a request that timed out is forgotten: ${view().focus}`);
+
+  // The diagram: the box asked about takes the keyboard, the pane shows its explanation.
+  app.updateView(KEYS.LIVE, { document: KEYS.RELEASE });
+  expect(await waitFor(() => document.querySelector(`.diagram-svg [data-kind="box"][data-id="${item(2)}"]`)), 'the release flow shows its diagram');
+  const boxed = await ask(item(2), item(4));
+  await shareExplanation(backend, boxed, null, 'Arrived in the diagram.');
+  expect(await waitFor(() => view().focus === item(2) && document.activeElement?.closest('[data-id]')?.dataset.id === item(2)), `the box asked about is focused, with the keyboard: ${view().focus} ${document.activeElement?.className?.baseVal ?? document.activeElement?.className}`);
+  expect(JSON.stringify(explanationShown()?.paragraphs) === '["Arrived in the diagram."]' && explanationHighlighted(), `its explanation is shown, highlighted: ${JSON.stringify(explanationShown())}`);
+  expect(await waitFor(() => explanationStartShown()), 'the pane shows its start');
+
+  // Closing the tab forgets the requests on their way.
+  await ask(item(2), item(4));
+  backend.closeTab(KEYS.LIVE);
+  await settle();
+  expect([...app.explaining.values()].every((request) => request.key !== KEYS.LIVE), `closing the tab forgets its requests: ${app.explaining.size}`);
 }
 
 /**
@@ -2640,6 +2776,27 @@ async function splitChecks(backend, app) {
   await answer();
   await shareExplanation(backend, explainedLeft, 12, 'Explained on the left.');
   expect(slot('left').querySelector(`.card[data-id="${KEYS.TABS_ITEM}"] .badge.explanation.state-done`) && JSON.stringify(explanationShown()?.paragraphs) === '["Explained on the left."]' && rightMark(), `the left pane's item shows it, the right one keeps its badge: ${JSON.stringify(explanationShown())}`);
+  // Asked in the right pane, arrived while the left one is active: the right pane becomes
+  // active with the item focused and the keyboard, its explanation in the side pane.
+  // An item not explained before, so that its only explanation is this one.
+  const askedRight = view().split.focus === RELEASE_IDS.item(2) ? RELEASE_IDS.item(3) : RELEASE_IDS.item(2);
+  slot('right').querySelector('.diagram-canvas').focus();
+  app.updatePane(RIGHT, { focus: askedRight });
+  await settle();
+  key('e');
+  await settle();
+  const ownRight = backend.sent.at(-1);
+  await answer();
+  app.updatePane(RIGHT, { focus: RELEASE_IDS.item(5) });
+  slot('left').querySelector('.view').focus();
+  await settle();
+  expect(activeSide() === 'left', `the left pane is active before: ${activeSide()}`);
+  await shareExplanation(backend, ownRight, null, 'Arrived on the right.');
+  expect(
+    await waitFor(() => activeSide() === 'right' && view().split.focus === askedRight && slot('right').contains(document.activeElement)),
+    `the right pane focuses the item asked about: ${activeSide()} ${view().split.focus}`,
+  );
+  expect(JSON.stringify(explanationShown()?.paragraphs) === '["Arrived on the right."]' && explanationHighlighted() && (await waitFor(() => explanationStartShown())), `the side pane shows its explanation: ${JSON.stringify(explanationShown())}`);
   app.updateView(KEYS.LIVE, { focus: leftFocus });
   slot('right').querySelector('.diagram-canvas').focus();
   await settle();
