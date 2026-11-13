@@ -1,6 +1,6 @@
 # Codex handover (desktop app)
 
-Written 2026-11-10, updated 2026-11-11, for the Codex agent. The Claude side is done; these points are
+Written 2026-11-10, updated 2026-11-13, for the Codex agent. The Claude side is done; these points are
 Codex-only or need the Codex container.
 
 ## Changed for Codex in batches 3-7
@@ -21,7 +21,7 @@ Codex-only or need the Codex container.
 - Retired runtime directories under `.prism/run` are pruned on attach.
 - `tests/attachment.rs` covers the Codex MCP path with the real binary.
 
-## Changed after batch 7 (2026-11-10 and 2026-11-11)
+## Changed after batch 7 (2026-11-10 to 2026-11-13)
 
 All of this is in the shared bridge and `prism-core`, so Codex gets it with the new
 `prism` binary; the Codex-facing parts are the tool descriptions in `src/mcp.rs` and
@@ -32,7 +32,7 @@ All of this is in the shared bridge and `prism-core`, so Codex gets it with the 
 - **Close and reopen documents**: `prism_action` takes `{"action":"close"}` and
   `{"action":"reopen"}` without `ids` (unknown fields are refused). `prism_inspect` marks
   each document with `closed`. Publishing to a closed document reopens it. Store column
-  `documents.closed`, schema version unchanged; app protocol is 2.
+  `documents.closed`, schema version unchanged.
 - **Numbers never change**: every element, relationship and group keeps the position of
   its first publish (`order` on all three); a publish never reorders, new records go to the
   end. Diagram arrows are numbered (steps) in that order, and Prism always numbers them
@@ -50,9 +50,37 @@ All of this is in the shared bridge and `prism-core`, so Codex gets it with the 
   9 arrows and 3 lanes per document; relationships listed in data-flow order; labels of at
   most 3 words without numbers; kind `text` for actors and stores (their box shows only
   number and title); a changed flow is published as a new document.
+- **Lanes as rows or columns**: `prism_publish` takes an optional `lanes`
+  (`"rows"`, `"columns"`, `"auto"`, or omitted/`null` to keep the stored value). The bridge
+  stores the automatic choice at the first publish with two lanes, so a diagram does not
+  flip between revisions.
+- **Dashed arrows**: `manual: true` on a relationship draws it dashed, for manual, review,
+  asynchronous or optional flows.
+- **Explain**: a shared question can carry `intent: "explain"` (its text ends with a line
+  starting with `Explain`) and `quoted` (the item whose text selection is quoted).
+  `prism_questions` reports both. The agent explains the item, records it with
+  `prism_answer` and keeps the chat reply to one line; for several items it labels each
+  part ("Item 2: …"). In the app Explain is disabled on Codex tabs until point 7 is solved.
+- **Bookmarks**: the user's marks for things to come back to, shared records of a document
+  (`Bookmark {id, item, quote?, order}`, store column `documents.bookmarks`).
+  `prism_action` takes `{"action":"bookmark","ids":[…]}` and
+  `{"action":"unbookmark","ids":[…]}` (whole items only from the tool; a bookmark change
+  makes a new revision like accept). `prism_inspect` lists a bookmark count per document
+  and the bookmarks of one document. Read them when the user refers to "the bookmarked
+  items"; do not add or remove them unless asked.
+- **Decisions on items** (skill rule): after the user agreed to a decision or change, append
+  `Decided (YYYY-MM-DD): <decision or change>. Why: <reason>.` to the list item's body and
+  republish it; for a diagram item, record it on the matching list item or in a list
+  document titled "Decisions".
+- **Records remember their first publish**: optional `created_revision` on elements,
+  relationships and groups; the app shows "new" or "changed" from it.
+- **App protocol is 3** (2 added close/reopen, 3 added bookmarks): an older `prism` binary
+  and the current app refuse each other with a message naming both numbers. Install the
+  current binary in the Codex container.
 - **App**: diagram zoom is continuous with an explicit detail level, boxes look like the
-  list cards, the app remembers ended and last-seen sessions across its restarts. Nothing
-  Codex-specific.
+  list cards, arrows show step numbers, two documents can be shown side by side, the side
+  pane is resizable, the app remembers ended and last-seen sessions across its restarts.
+  Nothing Codex-specific.
 
 ## Open for the Codex agent
 
@@ -75,7 +103,8 @@ All of this is in the shared bridge and `prism-core`, so Codex gets it with the 
    user says they asked from Prism, or a Codex-side way to place the reference in the
    prompt.
 8. Restart Codex after installing the new binary so it loads the new tool schema
-   (`prism_action` close/reopen) and skill text.
+   (`prism_action` close/reopen/bookmark/unbookmark, `prism_publish` `lanes`) and skill
+   text.
 9. Explain (`intent: "explain"` on a shared question; the app shows the explanation the
    agent records with `prism_answer`) needs the Codex-side delivery of shared questions
    from point 7: until then the Codex user has to ask Codex to retrieve it.
